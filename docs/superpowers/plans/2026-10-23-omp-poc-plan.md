@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Status:** DRAFT — bukan izin implementasi, instalasi, OAuth, inference, commit atau push.
+**Status:** SUPPORTING DRAFT — checklist validasi engine, bukan master plan aplikasi. Entry point pembangunan produk adalah `2026-10-23-desktop-mvp-master-plan.md`. Usulan harness Python di bawah bersifat opsional; master plan menggunakan adapter Swift/tests produk agar tidak menduplikasi pekerjaan. Dokumen ini bukan izin instalasi, OAuth, inference, commit atau push.
 
 **Goal:** Membuktikan satu sesi OMP/ChatGPT subscription pada repo contoh dapat dikendalikan lewat protokol terstruktur, dengan approval fail-closed, pembatalan terverifikasi, evidence file/tes, dan reopen tanpa replay tool.
 

@@ -9,7 +9,11 @@ Bangun aplikasi coding agent pribadi di MacBook M1, dengan UI Swift/SwiftUI dan 
 
 Repo `/home/ubuntu/Project/neiro`, remote `https://github.com/julianreza/neiro.git`, branch `main`, belum memiliki commit. Inspeksi menemukan hanya metadata Git; tidak ada kode, dokumen, atau AGENTS.md pada repo maupun ancestor yang diperiksa. Sebelum penulisan dokumen ini working tree bersih. Ini bukan repo Nail dan tidak ada repo lain yang diubah.
 
-Host pemeriksaan adalah Linux. Target produk adalah macOS arm64; versi macOS/Xcode belum diketahui. Tidak ada pengujian runtime engine atau build macOS.
+Host pemeriksaan adalah Linux. Target produk adalah MacBook M1 arm64, macOS 27.2 menurut pengguna (belum diverifikasi langsung). Xcode belum terpasang; rekomendasi awal Xcode 27.1 diterima, kompatibilitas perlu diperiksa sebelum instalasi. Minimum deployment usulan macOS 15.0 bukan jaminan kompatibilitas engine. Tidak ada pengujian runtime engine atau build macOS.
+
+## Entry point pembangunan aplikasi
+
+Master implementation plan: `../plans/2026-10-23-desktop-mvp-master-plan.md`. Dokumen tersebut mencakup pembangunan sampai aplikasi SwiftUI, memory, runtime installer dan .app/.dmg. Plan PoC lama hanya checklist validasi engine, bukan pengganti plan produk. Jika urutan atau usulan harness di dokumen ini berbeda, master plan yang lebih baru berlaku: gunakan adapter Swift dan tests produk sebagai PoC bila memungkinkan, tanpa kewajiban membuat harness Python lengkap. Jangan membuat putaran review handoff tambahan.
 
 ## Keputusan pengguna
 
