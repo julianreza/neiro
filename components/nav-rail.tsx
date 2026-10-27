@@ -1,8 +1,11 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useRef, useState } from "react";
-import type { CSSProperties, PointerEvent as ReactPointerEvent } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import type {
+  CSSProperties,
+  PointerEvent as ReactPointerEvent,
+} from "react";
 import type { LucideIcon } from "lucide-react";
 import { LogOut, Network } from "lucide-react";
 import {
@@ -13,20 +16,29 @@ import {
 
 export type NavItem = { href: string; label: string; icon: LucideIcon };
 
+/**
+ * Where each rail's active tab was on the previous page. The dashboard
+ * session remounts on every route change (it is keyed by pathname), so the
+ * rails cannot keep this in their own state; the shell owns one of these
+ * per shell instance and passes it down, so two shells never share it.
+ */
+export type RailMemory = {
+  desktopIndex: number | null;
+  mobileX: number | null;
+};
+
+/** Read/write access to a shell's RailMemory (keeps the ref in the shell). */
+export type RailMemoryStore = {
+  get: <K extends keyof RailMemory>(key: K) => RailMemory[K];
+  set: <K extends keyof RailMemory>(key: K, value: RailMemory[K]) => void;
+};
+
 type RailProps = {
   items: readonly NavItem[];
   pathname: string;
+  memory: RailMemoryStore;
   onSignOut: () => void;
 };
-
-/*
- * The dashboard shell remounts on every route change (it is keyed by
- * pathname), so component state cannot remember where the active tab was.
- * These module values survive the remount and let the tab slide FROM the
- * previous item instead of appearing at the new one.
- */
-let lastDesktopIndex: number | null = null;
-let lastMobileX: number | null = null;
 
 /** Icon leans a few pixels toward the mouse ("magnetic" hover). */
 function magnet(event: ReactPointerEvent<HTMLElement>) {
@@ -51,30 +63,36 @@ function unmagnet(event: ReactPointerEvent<HTMLElement>) {
  * - a soft pill follows the mouse (or keyboard focus) between items;
  * - icons lean toward the cursor and the arriving icon sends out a ring.
  */
-export function DesktopRail({ items, pathname, onSignOut }: RailProps) {
+export function DesktopRail({
+  items,
+  pathname,
+  memory,
+  onSignOut,
+}: RailProps) {
   const activeIndex = items.findIndex((item) => item.href === pathname);
-  const [notchIndex, setNotchIndex] = useState(
-    () => lastDesktopIndex ?? activeIndex,
-  );
   const [hover, setHover] = useState({ index: 0, visible: false });
   const notchRef = useRef<HTMLLIElement>(null);
 
-  useEffect(() => {
+  // Before paint: put the notch back on the previous item without a
+  // transition, then move it to the active one so the slide plays.
+  useLayoutEffect(() => {
     if (activeIndex < 0) return;
-    const from = lastDesktopIndex;
-    lastDesktopIndex = activeIndex;
+    const from = memory.get("desktopIndex");
+    memory.set("desktopIndex", activeIndex);
 
     const notch = notchRef.current;
-    if (notch && from !== null && from !== activeIndex) {
-      notch.dataset.dir = activeIndex > from ? "down" : "up";
-      notch.removeAttribute("data-moving");
-      void notch.offsetWidth; // restart the stretch animation
-      notch.setAttribute("data-moving", "");
-    }
+    if (!notch || from === null || from === activeIndex) return;
+    notch.style.transition = "none";
+    notch.style.setProperty("--rail-index", String(from));
+    void notch.offsetWidth; // commit the start position
+    notch.style.transition = "";
+    notch.style.setProperty("--rail-index", String(activeIndex));
 
-    const frame = requestAnimationFrame(() => setNotchIndex(activeIndex));
-    return () => cancelAnimationFrame(frame);
-  }, [activeIndex]);
+    notch.dataset.dir = activeIndex > from ? "down" : "up";
+    notch.removeAttribute("data-moving");
+    void notch.offsetWidth; // restart the stretch animation
+    notch.setAttribute("data-moving", "");
+  }, [activeIndex, memory]);
 
   const showHover = hover.visible && hover.index !== activeIndex;
 
@@ -97,7 +115,7 @@ export function DesktopRail({ items, pathname, onSignOut }: RailProps) {
             ref={notchRef}
             aria-hidden="true"
             className="nav-rail-notch"
-            style={{ "--rail-index": notchIndex } as CSSProperties}
+            style={{ "--rail-index": activeIndex } as CSSProperties}
           />
         )}
         <li
@@ -163,7 +181,12 @@ export function DesktopRail({ items, pathname, onSignOut }: RailProps) {
  * Mobile bottom bar. Items are spread with flex, so their positions are
  * measured; the page-colored bubble slides from the last item to the new one.
  */
-export function MobileRail({ items, pathname, onSignOut }: RailProps) {
+export function MobileRail({
+  items,
+  pathname,
+  memory,
+  onSignOut,
+}: RailProps) {
   const navRef = useRef<HTMLElement>(null);
   const bubbleRef = useRef<HTMLSpanElement>(null);
 
@@ -183,16 +206,17 @@ export function MobileRail({ items, pathname, onSignOut }: RailProps) {
       bubble.style.top = `${link.offsetTop}px`;
       bubble.style.transform = `translateX(${link.offsetLeft}px)`;
       bubble.style.opacity = "1";
-      lastMobileX = link.offsetLeft;
+      memory.set("mobileX", link.offsetLeft);
     }
 
-    const hadPrevious = lastMobileX !== null;
+    const previousX = memory.get("mobileX");
+    const hadPrevious = previousX !== null;
     if (hadPrevious) {
       // Start where the bubble was on the previous page, then slide.
       const link = nav.querySelector<HTMLElement>('[aria-current="page"]');
       bubble.style.transition = "none";
       bubble.style.top = `${link?.offsetTop ?? 0}px`;
-      bubble.style.transform = `translateX(${lastMobileX}px)`;
+      bubble.style.transform = `translateX(${previousX}px)`;
       bubble.style.opacity = "1";
       void bubble.offsetWidth;
     }
@@ -203,7 +227,7 @@ export function MobileRail({ items, pathname, onSignOut }: RailProps) {
       cancelAnimationFrame(frame);
       window.removeEventListener("resize", onResize);
     };
-  }, [pathname]);
+  }, [pathname, memory]);
 
   return (
     <nav

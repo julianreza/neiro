@@ -625,7 +625,12 @@ export function AgentsManager() {
                   aria-hidden="true"
                   data-live={anyLive || undefined}
                 />
-                <div className="team-branches">
+                <div
+                  className="team-branches"
+                  style={
+                    { "--branch-count": branches.length } as React.CSSProperties
+                  }
+                >
                   {branches.map((stage, i) => (
                     <div
                       key={stage.id}

@@ -1264,7 +1264,9 @@ section.console-lane[data-stage] > :first-child h2 {
 /* Desktop: classic org chart, lanes side by side. */
 @media (min-width: 1280px) {
   .team-branches {
-    grid-template-columns: repeat(5, minmax(0, 1fr));
+    /* Column count comes from the component (--branch-count), so adding
+       or removing a stage keeps the bus and drops lined up. */
+    grid-template-columns: repeat(var(--branch-count, 5), minmax(0, 1fr));
   }
 
   .team-branch {

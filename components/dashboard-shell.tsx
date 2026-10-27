@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useTheme } from "next-themes";
 import {
   Activity,
@@ -17,7 +17,11 @@ import { toast } from "sonner";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { TiltEffect } from "@/components/tilt-effect";
 import { DesktopRail, MobileRail } from "@/components/nav-rail";
-import type { NavItem } from "@/components/nav-rail";
+import type {
+  NavItem,
+  RailMemory,
+  RailMemoryStore,
+} from "@/components/nav-rail";
 import {
   CommandDialog,
   CommandEmpty,
@@ -41,8 +45,21 @@ const navigation: NavItem[] = [
 
 export function DashboardShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
+  // Lives outside the pathname-keyed session, so the nav rail can slide
+  // from the previous page's item after the session remounts.
+  const railRef = useRef<RailMemory>({ desktopIndex: null, mobileX: null });
+  const [railMemory] = useState<RailMemoryStore>(() => ({
+    get: (key) => railRef.current[key],
+    set: (key, value) => {
+      railRef.current[key] = value;
+    },
+  }));
   return (
-    <DashboardSession key={pathname} pathname={pathname}>
+    <DashboardSession
+      key={pathname}
+      pathname={pathname}
+      railMemory={railMemory}
+    >
       {children}
     </DashboardSession>
   );
@@ -51,9 +68,11 @@ export function DashboardShell({ children }: { children: React.ReactNode }) {
 function DashboardSession({
   children,
   pathname,
+  railMemory,
 }: {
   children: React.ReactNode;
   pathname: string;
+  railMemory: RailMemoryStore;
 }) {
   const [commandOpen, setCommandOpen] = useState(false);
   const router = useRouter();
@@ -79,10 +98,16 @@ function DashboardSession({
     }
   }
   async function signOut() {
+    const failed = "Could not sign out. Check your connection and try again.";
     try {
-      await fetch("/api/auth", { method: "DELETE" });
+      const res = await fetch("/api/auth", { method: "DELETE" });
+      if (!res.ok) {
+        // The session may still be valid server-side; don't pretend it ended.
+        toast.error(failed);
+        return;
+      }
     } catch {
-      toast.error("Could not sign out. Check your connection and try again.");
+      toast.error(failed);
       return;
     }
     router.push("/login");
@@ -107,6 +132,7 @@ function DashboardSession({
           <DesktopRail
             items={navigation}
             pathname={pathname}
+            memory={railMemory}
             onSignOut={() => void signOut()}
           />
         </aside>
@@ -160,6 +186,7 @@ function DashboardSession({
         <MobileRail
           items={navigation}
           pathname={pathname}
+          memory={railMemory}
           onSignOut={() => void signOut()}
         />
 
