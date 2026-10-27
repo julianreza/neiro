@@ -7,7 +7,7 @@ import type {
   PointerEvent as ReactPointerEvent,
 } from "react";
 import type { LucideIcon } from "lucide-react";
-import { LogOut, Network } from "lucide-react";
+import { LogOut, Network, PanelLeftClose, PanelLeftOpen } from "lucide-react";
 import {
   Tooltip,
   TooltipContent,
@@ -68,7 +68,11 @@ export function DesktopRail({
   pathname,
   memory,
   onSignOut,
-}: RailProps) {
+  expanded,
+  onToggle,
+}: RailProps & { expanded: boolean; onToggle: () => void }) {
+  // Names are on screen when expanded, so tooltips would only repeat them.
+  const tipOpen = expanded ? false : undefined;
   const activeIndex = items.findIndex((item) => item.href === pathname);
   const [hover, setHover] = useState({ index: 0, visible: false });
   const notchRef = useRef<HTMLLIElement>(null);
@@ -97,13 +101,18 @@ export function DesktopRail({
   const showHover = hover.visible && hover.index !== activeIndex;
 
   return (
-    <nav aria-label="Main" className="nav-rail flex w-[72px] flex-col">
-      <Link
-        href="/"
-        aria-label="Neiro home"
-        className="nav-rail-logo mx-auto mt-5 mb-8 flex size-10 items-center justify-center rounded-xl"
-      >
-        <Network className="size-5" aria-hidden="true" />
+    <nav
+      aria-label="Main"
+      className="nav-rail flex flex-col"
+      data-expanded={expanded || undefined}
+    >
+      <Link href="/" aria-label="Neiro home" className="nav-rail-brand mt-5 mb-8">
+        <span className="nav-rail-logo flex size-10 shrink-0 items-center justify-center rounded-xl">
+          <Network className="size-5" aria-hidden="true" />
+        </span>
+        <span className="nav-rail-label text-base font-semibold" aria-hidden="true">
+          Neiro
+        </span>
       </Link>
 
       <ul
@@ -134,11 +143,10 @@ export function DesktopRail({
               data-active={active || undefined}
               onPointerEnter={() => setHover({ index, visible: true })}
             >
-              <Tooltip>
+              <Tooltip open={tipOpen}>
                 <TooltipTrigger asChild>
                   <Link
                     href={href}
-                    aria-label={label}
                     aria-current={active ? "page" : undefined}
                     className="nav-rail-link"
                     onPointerMove={magnet}
@@ -146,7 +154,8 @@ export function DesktopRail({
                     onFocus={() => setHover({ index, visible: true })}
                     onBlur={() => setHover((h) => ({ ...h, visible: false }))}
                   >
-                    <Icon className="size-5" aria-hidden="true" />
+                    <Icon className="size-5 shrink-0" aria-hidden="true" />
+                    <span className="nav-rail-label">{label}</span>
                   </Link>
                 </TooltipTrigger>
                 <TooltipContent side="right">{label}</TooltipContent>
@@ -156,18 +165,43 @@ export function DesktopRail({
         })}
       </ul>
 
-      <div className="nav-rail-item mb-6">
-        <Tooltip>
+      <div className="nav-rail-item mb-2">
+        <Tooltip open={tipOpen}>
           <TooltipTrigger asChild>
             <button
               type="button"
-              aria-label="Sign out"
+              aria-expanded={expanded}
+              className="nav-rail-link"
+              onPointerMove={magnet}
+              onPointerLeave={unmagnet}
+              onClick={onToggle}
+            >
+              {expanded ? (
+                <PanelLeftClose className="size-5 shrink-0" aria-hidden="true" />
+              ) : (
+                <PanelLeftOpen className="size-5 shrink-0" aria-hidden="true" />
+              )}
+              <span className="nav-rail-label">
+                {expanded ? "Collapse menu" : "Expand menu"}
+              </span>
+            </button>
+          </TooltipTrigger>
+          <TooltipContent side="right">Expand menu</TooltipContent>
+        </Tooltip>
+      </div>
+
+      <div className="nav-rail-item mb-6">
+        <Tooltip open={tipOpen}>
+          <TooltipTrigger asChild>
+            <button
+              type="button"
               className="nav-rail-link"
               onPointerMove={magnet}
               onPointerLeave={unmagnet}
               onClick={onSignOut}
             >
-              <LogOut className="size-5" aria-hidden="true" />
+              <LogOut className="size-5 shrink-0" aria-hidden="true" />
+              <span className="nav-rail-label">Sign out</span>
             </button>
           </TooltipTrigger>
           <TooltipContent side="right">Sign out</TooltipContent>

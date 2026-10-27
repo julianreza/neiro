@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { useTheme } from "next-themes";
 import {
   Activity,
@@ -43,6 +43,32 @@ const navigation: NavItem[] = [
   { href: "/gateway", label: "9Router & VPS", icon: Network },
 ];
 
+const RAIL_KEY = "neiro.rail.expanded";
+const railListeners = new Set<() => void>();
+
+function subscribeRail(listener: () => void) {
+  railListeners.add(listener);
+  return () => railListeners.delete(listener);
+}
+
+/** Expanded by default; only an explicit collapse is remembered. */
+function readRail() {
+  try {
+    return localStorage.getItem(RAIL_KEY) !== "0";
+  } catch {
+    return true;
+  }
+}
+
+function writeRail(expanded: boolean) {
+  try {
+    localStorage.setItem(RAIL_KEY, expanded ? "1" : "0");
+  } catch {
+    // Storage blocked: the toggle still works for this page view.
+  }
+  railListeners.forEach((listener) => listener());
+}
+
 export function DashboardShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   // Lives outside the pathname-keyed session, so the nav rail can slide
@@ -75,6 +101,7 @@ function DashboardSession({
   railMemory: RailMemoryStore;
 }) {
   const [commandOpen, setCommandOpen] = useState(false);
+  const railExpanded = useSyncExternalStore(subscribeRail, readRail, () => true);
   const router = useRouter();
   const { setTheme } = useTheme();
   useEffect(() => {
@@ -134,6 +161,8 @@ function DashboardSession({
             pathname={pathname}
             memory={railMemory}
             onSignOut={() => void signOut()}
+            expanded={railExpanded}
+            onToggle={() => writeRail(!railExpanded)}
           />
         </aside>
 
