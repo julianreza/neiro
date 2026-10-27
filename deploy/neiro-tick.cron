@@ -1,0 +1,7 @@
+# Neiro VPS Cron Job Configuration
+# Add to crontab via `crontab -e` on your VPS.
+# Define NEIRO_URL and DASHBOARD_SECRET at the top or replace directly in the command:
+# NEIRO_URL=https://your-neiro-app.vercel.app
+# DASHBOARD_SECRET=your-secure-dashboard-secret
+
+* * * * * curl -fsS -m 55 -X POST "$NEIRO_URL/api/orchestrator/tick" -H "Authorization: Bearer $DASHBOARD_SECRET" -H "Content-Type: application/json" -d '{}' >/dev/null 2>&1
