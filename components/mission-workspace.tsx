@@ -6,7 +6,6 @@ import {
   ArrowRight,
   Check,
   ChevronDown,
-  Circle,
   Clock3,
   FileText,
   GitBranch,
@@ -30,6 +29,14 @@ import type { MissionDetailDTO, MissionPhase, MissionSummaryDTO } from "@/lib/ty
 import { formatCompactTokens } from "@/lib/utils";
 import { useLiveData } from "@/hooks/use-live-data";
 import { DataSourceBadge } from "@/components/data-source-badge";
+import {
+  AgentBot,
+  agentLook,
+  followPointer,
+  resetPointer,
+  roleForAgent,
+} from "@/components/agent-bot";
+import { MiniRocket, StatObject, statLook, type StatKind } from "@/components/stat-object";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -49,16 +56,26 @@ import {
   type ArtifactFile,
 } from "@/components/markdown-artifact-viewer";
 
-const stageColors: Record<TaskStage, string> = {
-  Queued: "text-muted-foreground",
-  "Awaiting routing": "text-status-warning",
-  Routed: "text-primary",
-  Coding: "text-status-running",
-  "QA check": "text-status-warning",
-  "Final review": "text-primary",
-  "Needs you": "text-status-danger",
-  Done: "text-status-success",
-};
+const PHASES = ["Plan DAG", "Write PRD", "Execute & verify", "Summary"] as const;
+
+/** Lane pill gradients, one per stage. */
+const stageLook = Object.fromEntries(
+  (
+    [
+      ["Queued", "#64748b", "#334155"],
+      ["Awaiting routing", "#f59e0b", "#78350f"],
+      ["Routed", "#14b8a6", "#134e4a"],
+      ["Coding", "#3b82f6", "#1e3a8a"],
+      ["QA check", "#8b5cf6", "#3b0764"],
+      ["Final review", "#ec4899", "#831843"],
+      ["Needs you", "#f43f5e", "#881337"],
+      ["Done", "#10b981", "#064e3b"],
+    ] as const
+  ).map(([stage, from, to]) => [
+    stage,
+    { "--stage-from": from, "--stage-to": to } as React.CSSProperties,
+  ]),
+) as Record<TaskStage, React.CSSProperties>;
 
 /** A task as the board renders it; `rowId` is the database id (live mode only). */
 type TaskView = DemoTask & { rowId?: string };
@@ -409,67 +426,101 @@ export function MissionWorkspace() {
                     : "Awaiting plan",
             detail: isLive ? `Phase: ${mission?.phase ?? "—"}` : "Sample data",
             icon: ActivityIcon,
-            accent: "violet",
+            kind: "mission",
           },
           {
             label: "Tasks completed",
             value: `${done} / ${tasks.length}`,
             detail: "Across execution pipeline",
             icon: Check,
-            accent: "emerald",
+            kind: "tasks",
           },
           {
             label: "Team capacity",
             value: isLive ? `${assignedAgents} assigned` : "6 agents",
             detail: isLive ? "Agents on this mission" : "Sample team",
             icon: Layers3,
-            accent: "sky",
+            kind: "team",
           },
           {
             label: "Token usage",
             value: formatCompactTokens(tokens),
             detail: isLive ? "Reported by Hermes" : "Sample usage",
             icon: Zap,
-            accent: "pink",
+            kind: "tokens",
           },
-        ].map(({ label, value, detail, icon: Icon, accent }, index) => (
+        ].map(({ label, value, detail, kind }, index) => (
           <div
-            className="card-trendy p-5"
+            className="stat-card"
             key={label}
-            style={{ "--i": index } as React.CSSProperties}
+            style={
+              {
+                "--i": index,
+                ...statLook(kind as StatKind),
+              } as React.CSSProperties
+            }
+            onPointerMove={followPointer}
+            onPointerLeave={resetPointer}
           >
-            <div className="flex items-center justify-between">
-              <span className="eyebrow">
-                {label}
-              </span>
-              {/* Same neutral card for all four; color lives only in the
-                  icon chip, so no single card shouts louder than the rest. */}
-              <span
-                data-accent={accent}
-                className="accent-icon flex size-7 items-center justify-center rounded-lg border"
-              >
-                <Icon className="size-3.5" />
-              </span>
+            <div className="flex min-w-0 flex-1 flex-col">
+              <span className="text-sm text-white/85">{label}</span>
+              <p className="stat-value tabular-nums">{value}</p>
+              <p className="mt-auto pt-2 text-xs text-white/75">{detail}</p>
             </div>
-            <p className="mt-3 text-2xl font-semibold tracking-tight tabular-nums">
-              {value}
-            </p>
-            <p className="mt-1 text-xs text-muted-foreground">{detail}</p>
+            <StatObject
+              kind={kind as StatKind}
+              label={label}
+              active={mission?.status === "running"}
+              progress={tasks.length ? done / tasks.length : 0}
+            />
           </div>
         ))}
       </section>
       <section
-        className="console-composer overflow-hidden rounded-lg border bg-card"
+        className="mission-chat"
         aria-labelledby="composer-title"
+        style={agentLook("PM")}
+        onPointerMove={followPointer}
+        onPointerLeave={resetPointer}
       >
-        <div className="flex items-center gap-2 border-b px-5 py-3">
-          <FileText className="size-4 text-primary" />
-          <h2 id="composer-title" className="text-xs font-medium">
-            What should your team build?
-          </h2>
-          <span className="eyebrow ml-auto">
-            Prompt → plan → execute
-          </span>
+        <div className="chat-thread" aria-live="polite">
+          <div className="chat-row">
+            <AgentBot
+              name="Orchestrator"
+              role="PM"
+              asleep={false}
+              working={mission?.status === "running"}
+            />
+            <div className="chat-bubble chat-bubble-bot">
+              <h2 id="composer-title">What should your team build today?</h2>
+              <p>Describe the outcome. I will plan it and hand out the work.</p>
+            </div>
+          </div>
+          {mission && (
+            <>
+              <p className="chat-bubble chat-bubble-user">{mission.title}</p>
+              <div className="chat-row">
+                <span className="chat-avatar-gap" aria-hidden="true" />
+                <div className="chat-bubble chat-bubble-bot">
+                  <p>
+                    {done === tasks.length && tasks.length > 0
+                      ? `Done. All ${tasks.length} tasks are finished.`
+                      : `On it. ${done} of ${tasks.length} tasks are done.`}
+                  </p>
+                  <div
+                    className="chat-progress"
+                    role="progressbar"
+                    aria-label="Mission progress"
+                    aria-valuemin={0}
+                    aria-valuemax={tasks.length}
+                    aria-valuenow={done}
+                  >
+                    <i style={{ width: `${tasks.length ? (done / tasks.length) * 100 : 0}%` }} />
+                  </div>
+                </div>
+              </div>
+            </>
+          )}
         </div>
         <form
           onSubmit={(event) => {
@@ -477,11 +528,8 @@ export function MissionWorkspace() {
             launch();
           }}
         >
-          <div className="p-5">
-            <Label
-              htmlFor="mission-prompt"
-              className="mb-3 text-xs text-muted-foreground"
-            >
+          <div className="chat-input">
+            <Label htmlFor="mission-prompt" className="sr-only">
               Mission objective
             </Label>
             <Textarea
@@ -495,13 +543,13 @@ export function MissionWorkspace() {
                   launch();
                 }
               }}
-              placeholder="Describe the outcome. Your team will handle the breakdown."
+              placeholder="Type a mission, for example: build a landing page for our app"
               className="min-h-24 resize-y border-0 bg-transparent p-0 text-base shadow-none focus-visible:ring-0 md:text-sm"
               maxLength={20000}
             />
           </div>
           <Collapsible>
-            <div className="flex flex-wrap items-center justify-between gap-3 border-t bg-secondary/15 px-5 py-3">
+            <div className="chat-actions flex flex-wrap items-center justify-between gap-3">
               <CollapsibleTrigger asChild>
                 <Button
                   type="button"
@@ -590,21 +638,14 @@ export function MissionWorkspace() {
         </form>
       </section>
       <section className="space-y-5">
-        <div className="flex flex-wrap items-center justify-between gap-4">
-          <div className="flex min-w-0 items-center gap-3">
-            <div className="flex size-9 shrink-0 items-center justify-center rounded-lg border">
-              <GitBranch className="size-4" />
-            </div>
-            <div className="min-w-0">
-              <label
-                htmlFor="mission-picker"
-                className="eyebrow mb-1 block"
-              >
-                Current mission
-              </label>
+        <div className="mission-pass">
+          <div className="pass-main">
+            <label htmlFor="mission-picker" className="pass-label">
+              Current mission
+            </label>
               <select
                 id="mission-picker"
-                className="w-full min-w-0 max-w-full truncate bg-transparent text-sm font-medium focus-visible:outline-2 focus-visible:outline-primary"
+                className="pass-select"
                 value={effectiveId ?? ""}
                 onChange={(event) => {
                   setSelectedId(event.target.value);
@@ -617,13 +658,35 @@ export function MissionWorkspace() {
                   </option>
                 ))}
               </select>
-            </div>
+            <ol className="pass-route" aria-label="Mission phases">
+              {PHASES.map((step, index) => (
+                <li
+                  key={step}
+                  aria-current={index === activeStep ? "step" : undefined}
+                  data-state={
+                    index < activeStep ? "done" : index === activeStep ? "now" : "next"
+                  }
+                >
+                  <span className="pass-stop" aria-hidden="true">
+                    {index === activeStep && <MiniRocket active={mission?.status === "running"} />}
+                  </span>
+                  <span className="pass-name">{step}</span>
+                </li>
+              ))}
+            </ol>
           </div>
-          <div className="flex items-center gap-3 text-xs">
-            <span className="inline-flex items-center gap-1.5 text-muted-foreground">
-              <Circle className="size-2 fill-current" />
-              {isLive ? "Live state" : isDemo ? "Demo state" : "Loading"}
+          <div className="pass-stub">
+            <span className="pass-label">Phase</span>
+            <span className="pass-count">
+              {Math.min(activeStep + 1, PHASES.length)}
+              <small>/{PHASES.length}</small>
             </span>
+            <span className="pass-label">{PHASES[Math.min(activeStep, PHASES.length - 1)]}</span>
+            <span className="pass-live">
+              <i aria-hidden="true" />
+              {isLive ? "Live" : isDemo ? "Demo" : "Loading"}
+            </span>
+            <div className="flex flex-wrap justify-center gap-1">
             {isLive && (
               <Button size="sm" variant="ghost" onClick={refresh}>
                 Refresh
@@ -643,6 +706,7 @@ export function MissionWorkspace() {
                 Remove from preview
               </Button>
             )}
+            </div>
           </div>
         </div>
         {mission?.lastError && (
@@ -664,39 +728,6 @@ export function MissionWorkspace() {
           </div>
         ) : mission ? (
           <>
-            <div className="card-trendy grid grid-cols-2 gap-3 p-4 lg:grid-cols-4">
-              {["Plan DAG", "Write PRD", "Execute & verify", "Summary"].map(
-                (step, index) => (
-                  <div
-                    key={step}
-                    aria-current={index === activeStep ? "step" : undefined}
-                    className={`flex items-center gap-3 text-sm ${index === activeStep ? "font-semibold text-foreground" : index < activeStep ? "text-foreground/90" : "text-muted-foreground"}`}
-                  >
-                    <span
-                      className={`flex size-7 shrink-0 items-center justify-center rounded-full border font-mono text-xs font-semibold ${
-                        index < activeStep
-                          ? "border-status-success/30 bg-status-success/10 text-status-success"
-                          : index === activeStep
-                            ? "border-status-running bg-status-running/15 text-status-running ring-2 ring-status-running/25"
-                            : "border-foreground/30 text-foreground/85"
-                      }`}
-                    >
-                      {index < activeStep ? (
-                        <Check className="size-3" />
-                      ) : (
-                        `0${index + 1}`
-                      )}
-                    </span>
-                    {step}
-                    {isDemo && index === 2 && (
-                      <span className="ml-auto rounded bg-secondary px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
-                        Demo
-                      </span>
-                    )}
-                  </div>
-                ),
-              )}
-            </div>
             {mission.status === "awaiting_plan_approval" && (
               <div
                 role="status"
@@ -764,6 +795,56 @@ export function MissionWorkspace() {
                     </p>
                   </div>
                 )}
+                {tasks.some((task) => task.approval) && (
+                  <section aria-labelledby="needs-you-heading" className="mb-6 space-y-3">
+                    <h3 id="needs-you-heading" className="text-sm font-semibold">
+                      Waiting for your OK
+                    </h3>
+                    {tasks
+                      .filter((task) => task.approval)
+                      .map((task) => (
+                        <article
+                          key={task.id}
+                          className="needs-you-card"
+                          style={agentLook(roleForAgent(task.agent))}
+                          onPointerMove={followPointer}
+                          onPointerLeave={resetPointer}
+                        >
+                          <AgentBot
+                            name={task.agent}
+                            role={roleForAgent(task.agent)}
+                            asleep={false}
+                            working
+                          />
+                          <div className="min-w-0 flex-1">
+                            <p className="text-sm text-white/85">
+                              {task.agent} needs your OK
+                            </p>
+                            <h4 className="needs-you-title">{task.title}</h4>
+                            <p className="mt-1 text-xs text-white/75">
+                              {task.id}
+                              {task.retries > 0 && ` · Retry ${task.retries}/${maxRetriesShown}`}
+                            </p>
+                          </div>
+                          <div className="flex shrink-0 flex-col gap-2">
+                            <Button
+                              className="agent-pill min-h-10"
+                              onClick={() => updateTask(task.id, "Coding")}
+                            >
+                              Approve
+                            </Button>
+                            <Button
+                              variant="ghost"
+                              className="agent-icon min-h-10 bg-black/20"
+                              onClick={() => denyTool(task.id)}
+                            >
+                              Deny
+                            </Button>
+                          </div>
+                        </article>
+                      ))}
+                  </section>
+                )}
                 {gateTasks.length > 0 && (
                   <section aria-labelledby="routing-gate-heading" className="mb-6 space-y-3">
                     <h3 id="routing-gate-heading" className="eyebrow">
@@ -788,15 +869,13 @@ export function MissionWorkspace() {
                     {stages.map((stage) => (
                       <div
                         key={stage}
-                        className="console-lane min-w-0"
+                        className="console-lane board-lane min-w-0"
                         data-stage={stage}
+                        style={stageLook[stage]}
                       >
-                        <h3 className="mb-4 flex items-center gap-2 px-1 text-xs font-medium">
-                          <Circle
-                            className={`size-2 fill-current ${stageColors[stage]}`}
-                          />
+                        <h3 className="board-pill">
                           {stage}
-                          <span className="ml-auto font-mono text-[10px] text-muted-foreground">
+                          <span>
                             {
                               tasks.filter((task) => task.stage === stage)
                                 .length
@@ -809,8 +888,17 @@ export function MissionWorkspace() {
                             .map((task) => (
                               <article
                                 key={task.id}
-                                className="console-task rounded-md border p-3"
+                                className="console-task board-task"
+                                style={agentLook(roleForAgent(task.agent))}
                               >
+                                <span className="board-bot">
+                                  <AgentBot
+                                    name={task.agent}
+                                    role={roleForAgent(task.agent)}
+                                    asleep={false}
+                                    working={task.stage === "Coding"}
+                                  />
+                                </span>
                                 <div className="flex items-center justify-between text-[10px]">
                                   <span className="font-mono text-muted-foreground">
                                     {task.id}
@@ -879,9 +967,17 @@ export function MissionWorkspace() {
                                 </button>
                               </article>
                             ))}
-                          {tasks.length > 0 && !tasks.some((task) => task.stage === stage) && (
-                            <div className="py-8 text-center text-xs text-muted-foreground">
-                              No tasks here yet
+                          {!tasks.some((task) => task.stage === stage) && (
+                            <div className="lane-empty" style={agentLook("PM")}>
+                              <span inert aria-hidden="true">
+                                <AgentBot
+                                  name="Idle agent"
+                                  role="PM"
+                                  asleep
+                                  working={false}
+                                />
+                              </span>
+                              Nothing here yet
                             </div>
                           )}
                         </div>
