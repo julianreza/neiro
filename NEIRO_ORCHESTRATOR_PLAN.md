@@ -1,12 +1,56 @@
-# Neiro — AI Team Orchestrator (Full-Stack + Latest shadcn/ui & Tailwind v4 Design System)
+# Neiro — AI Team Orchestrator
 
-## Context
+This document has two parts. **Shipped** describes what the code on `feat/phase-1-design-system` does today. **Planned — not in this PR** keeps the original design plan; where it disagrees with Shipped, Shipped is correct.
+
+## Shipped
+
+### Schema (`supabase/schema.sql`)
+
+Idempotent DDL (re-runnable). RLS is enabled on every table with zero policies, so only the server-side service-role client (`lib/supabase.ts`, `SUPABASE_SERVICE_ROLE_KEY`) can read or write.
+
+| Table | Columns |
+| --- | --- |
+| `agents` | `id text PK`, `name`, `role`, `stage` (`orchestrator`/`spec`/`workers`/`qa`/`reviewer`/`scheduled`), `specialty`, `model`, `profile`, `prompt`, `url`, `key_enc`, `enabled`, `active_run`, timestamps. Six starter agents are seeded. |
+| `missions` | `id text PK`, `title`, `prompt`, `status` (`running`/`awaiting_plan_approval`/`completed`/`cancelled`), `phase` (`planning`/`spec`/`executing`/`summarizing`/`done`), `pause_after_planning`, `max_parallel_workers` (1–10), `max_retries` (0–5), `workspace_path`, `run_id`, `run_agent_id`, `run_started_at`, `last_error`, `last_error_at`, timestamps |
+| `mission_tasks` | `id text PK`, `mission_id`, `task_key` (unique per mission), `title`, `stage` (`Queued`/`Coding`/`QA check`/`Final review`/`Needs you`/`Done`), `agent_id`, `agent_name`, `model`, `tokens`, `depends` (JSONB array of `task_key`s), `approval`, `retries`, `result` (requirements), `result_output` (coding output), `run_id`, `run_agent_id`, `run_started_at`, timestamps |
+| `mission_artifacts` | `id text PK`, `mission_id`, `task_id`, `title`, `kind` (`task_plan`/`prd`/`qa_report`/`review_report`/`mission_summary`), `content`, `dedupe_key` (unique), `created_at` |
+| `app_state` | `key text PK`, `value jsonb`, `updated_at` (holds `last_cron_tick_at`) |
+
+`neiro_claim_task(task_id, token)` atomically moves a `Queued` task to `Coding` while the mission is under `max_parallel_workers`. It is serialized per mission with an advisory lock and executable only by the service role.
+
+### Orchestrator (`lib/orchestrator.ts`)
+
+`advanceMission(id)` is called by `POST /api/orchestrator/tick` (VPS cron, `deploy/neiro-tick.cron`) and eagerly by the mission routes. Each call does at most one step per mission and per task:
+
+- **Compare-and-set**: every update is guarded on the observed `phase`/`stage` and `run_id`. A tick that loses the guard stops touching that row, so overlapping ticks never duplicate runs, artifacts or retries. Artifacts are inserted once per `dedupe_key`; planned tasks once per `task_key`.
+- **Run lifecycle**: a stage claims the row with a `claim:<uuid>` token, starts the Hermes run (with an `Idempotency-Key`), and stores its `run_id`. Later ticks poll `GET /v1/runs/{id}` and transition only when the run is terminal. Claims older than 5 minutes are released.
+- **Mission phases**: `planning` (orchestrator run → tasks + `task_plan`) → `spec` (spec run → `prd`; skipped if there is no spec agent) → `executing` → `summarizing` (`mission_summary`) → `done` / status `completed`. With `pause_after_planning`, the mission moves to status `awaiting_plan_approval` after `spec`, and nothing runs until `approve_plan`.
+- **Task stages**: `Queued` (all `depends` keys `Done` + a free worker slot) → `Coding` → `QA check` (`VERDICT: PASS|FAIL`) → `Final review` (`VERDICT: APPROVED|CHANGES_REQUESTED`) → `Done`. A failed run or gate re-queues the task while `retries < max_retries`, else moves it to `Needs you`. A missing QA or reviewer agent skips that gate.
+- **Errors**: failures are logged and stored in `missions.last_error`, which Mission control shows; the next successful pass clears it.
+
+### Dashboard data sources
+
+Each surface loads from its API and falls back to labelled sample data ("Demo data — reason") when the API is unavailable. See the table in `README.md`. Schedules are read-only. The dashboard does not auto-tick missions; the VPS cron does.
+
+## Planned — not in this PR
+
+These items from the original plan are **not built**. Do not code against them as if they exist:
+
+- `agents` columns `role_stage`, `slug`, `system_prompt`, `custom_base_url`, `custom_api_key`, `hermes_profile`, `avatar_color` (shipped: `stage`, `prompt`, `url`, `key_enc`, `profile`).
+- Mission statuses `planning`, `writing_spec`, `summarizing`, `needs_you`, `failed` (shipped: the 4 statuses plus a separate `phase`).
+- Columns `mission_artifacts.verdict`, `mission_artifacts.agent_id`, `mission_tasks.qa_feedback`/`review_feedback`/`pending_approval`/`hermes_session_id`, per-mission `total_tokens`.
+- 3-second browser auto-tick, `expired_404` recovery from session transcripts, git worktree isolation per task, least-loaded agent selection, live SSE run inspector, schedule CRUD from the dashboard, model combobox, setup banner and command-menu actions as specified below.
+- `lib/utils.ts` uses `clsx` + `tailwind-merge`, not the `cn` npm package named in Step 1.
+
+The original plan follows, unchanged except for heading levels.
+
+### Context
 
 Build **Neiro**, a Vercel-deployed Next.js 16 management dashboard and orchestration engine coordinating **Hermes Agents** on Tencent Cloud VPS via a single **9Router** LLM gateway and **Supabase Postgres** persistence. The UI uses a hardened operator control-room design system built on the latest **shadcn/ui (`radix-nova`)**, **Tailwind CSS v4** OKLCH semantic tokens, and a lean third-party stack (`sonner`, `cmdk`, `next-themes`, `@tailwindcss/typography`, `react-markdown` + `remark-gfm`, `date-fns`) with dark-first theming and a light-mode toggle for long-form spec reading. From a single prompt, Neiro drives autonomous PM task breakdown, PRD generation, parallel Worker execution, automated QA/Review retry gates, live SSE tool-stream inspection, Agent CRUD, Cron scheduling, and 24/7 VPS heartbeat monitoring.
 
-## Approach
+### Approach
 
-### Step 1: Dependencies, Latest `shadcn/ui` (`radix-nova`) + Tailwind v4 OKLCH Design System, and Theme Shell
+#### Step 1: Dependencies, Latest `shadcn/ui` (`radix-nova`) + Tailwind v4 OKLCH Design System, and Theme Shell
 
 Install the backend SDK, latest 2026 `shadcn/ui` Tailwind v4 foundation (`radix-ui` unified package, `cn` merge engine, `tw-animate-css`), and the lean third-party UI stack via Bun (preserving `@tailwindcss/turbopack` in `next.config.ts`—do **not** create `postcss.config.*` or `tailwind.config.*`, and do **not** commit `package-lock.json`):
 
@@ -85,7 +129,7 @@ Configure `shadcn/ui` manually first so the CLI never overwrites `next.config.ts
    - Set `<html lang="en" suppressHydrationWarning className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}>`.
    - Wrap `{children}` in `<ThemeProvider attribute="class" defaultTheme="dark" enableSystem disableTransitionOnChange>` + `<TooltipProvider delayDuration={150}>` + `<Toaster richColors closeButton position="bottom-right" />` (from `@/components/ui/sonner`).
 
-### Step 2: Environment Contract, Supabase Schema, and Domain Types (`supabase/schema.sql`, `lib/types.ts`, `lib/supabase.ts`)
+#### Step 2: Environment Contract, Supabase Schema, and Domain Types (`supabase/schema.sql`, `lib/types.ts`, `lib/supabase.ts`)
 
 1. Create `.env.example` documenting server-only variables (zero `NEXT_PUBLIC_*` secrets):
    - `DASHBOARD_SECRET=change-me-admin-passcode` (min 8 chars)
@@ -104,7 +148,7 @@ Configure `shadcn/ui` manually first so the CLI never overwrites `next.config.ts
    - `app_state`: `key text PK`, `value jsonb NOT NULL`, `updated_at timestamptz DEFAULT now()` (tracks `last_cron_tick_at`).
 3. Create `lib/types.ts` (strict domain interfaces, `AppConfigError` class with `code: "missing_supabase_env" | "missing_hermes_env" | "missing_ninerouter_env"`, `AgentPublic` omitting `custom_api_key` and adding `has_custom_key: boolean`, `MissionSummaryDTO`, `MissionDetailDTO`, `GatewayStatusDTO`) and `lib/supabase.ts` exporting `getSupabaseAdmin()` (`persistSession: false`, `autoRefreshToken: false`, throwing `AppConfigError("missing_supabase_env", ...)` when env vars are absent so Route Handlers return clean `503` JSON).
 
-### Step 3: Passcode Auth Gate & Accessible Login Surface (`lib/auth.ts`, `proxy.ts`, `app/api/auth/route.ts`, `app/login/page.tsx`)
+#### Step 3: Passcode Auth Gate & Accessible Login Surface (`lib/auth.ts`, `proxy.ts`, `app/api/auth/route.ts`, `app/login/page.tsx`)
 
 1. Create `lib/auth.ts` using Web Crypto (`crypto.subtle`) HMAC-SHA256:
    - `SESSION_COOKIE = "neiro_session"`, 7-day TTL (`604_800_000` ms).
@@ -120,7 +164,7 @@ Configure `shadcn/ui` manually first so the CLI never overwrites `next.config.ts
 4. Create `app/login/page.tsx` wrapping a `"use client"` `<LoginForm />` inside `<Suspense fallback={<LoginSkeleton />}>` (required by `cacheComponents: true` for `useSearchParams()`):
    - Uses shadcn `Card`, `Label`, `Input` (`type="password"`, `autoComplete="current-password"`, `text-base sm:text-sm` to prevent iOS Safari focus zoom), `Button`, and `Alert` (`role="alert"` for `401`/`503` recovery copy—submit button stays enabled when idle and shows `"Signing in..."` only in-flight, never disabled before validation). Includes `<ThemeToggle />` in top-right corner.
 
-### Step 4: Server-Side Hermes VPS Client, 9Router Client, and Autonomous DAG Engine (`lib/hermes.ts`, `lib/ninerouter.ts`, `lib/orchestrator-parsers.ts`, `lib/orchestrator.ts`)
+#### Step 4: Server-Side Hermes VPS Client, 9Router Client, and Autonomous DAG Engine (`lib/hermes.ts`, `lib/ninerouter.ts`, `lib/orchestrator-parsers.ts`, `lib/orchestrator.ts`)
 
 1. Create `lib/hermes.ts`:
    - `resolveAgentEndpoint(agent)` resolving `custom_base_url || HERMES_DEFAULT_URL`, `custom_api_key || HERMES_DEFAULT_KEY`, and `profilePrefix = hermes_profile !== "default" ? "/p/" + encodeURIComponent(hermes_profile) : ""`; throws `AppConfigError("missing_hermes_env", ...)` if missing.
@@ -138,7 +182,7 @@ Configure `shadcn/ui` manually first so the CLI never overwrites `next.config.ts
    - Enforces optimistic compare-and-set (`WHERE id = $id AND active_run_id = $observedRunId`) on every transition so concurrent browser + VPS cron ticks never duplicate artifacts or double-increment `retry_count`.
    - Recovers coding-stage `expired_404` runs via `getHermesSessionMessages` (using last assistant message if present, else re-queuing with retry cap); injects dedicated git worktree isolation instructions (`${workspace_path}/.neiro/${task_key}` on branch `neiro/${missionShortId}/${task_key}`) whenever `workspace_path` is provided.
 
-### Step 5: Next.js 16 Route Handlers (`app/api/**`) and VPS Cron Artifact (`deploy/neiro-tick.cron`)
+#### Step 5: Next.js 16 Route Handlers (`app/api/**`) and VPS Cron Artifact (`deploy/neiro-tick.cron`)
 
 Under `cacheComponents: true`, **never** export `dynamic`, `runtime`, `revalidate`, or `fetchCache`. Call `await connection()` from `"next/server"` at the top of every `GET` handler, use `RouteContext<"/api/...">` for `await ctx.params`, and map `AppConfigError` to HTTP `503 { error, code }`:
 
@@ -152,7 +196,7 @@ Under `cacheComponents: true`, **never** export `dynamic`, `runtime`, `revalidat
 8. Create `deploy/neiro-tick.cron` with header instructions for `NEIRO_URL` and `DASHBOARD_SECRET` plus:
    `* * * * * curl -fsS -m 55 -X POST "$NEIRO_URL/api/orchestrator/tick" -H "Authorization: Bearer $DASHBOARD_SECRET" -H "Content-Type: application/json" -d '{}' >/dev/null 2>&1`
 
-### Step 6: App Shell, `⌘K` Command Palette, and Four Hardened Operator Surfaces (`app/(dashboard)/**`, `components/**`)
+#### Step 6: App Shell, `⌘K` Command Palette, and Four Hardened Operator Surfaces (`app/(dashboard)/**`, `components/**`)
 
 Build the product control-room shell using shadcn `SidebarProvider` + `SidebarInset` (without uncached server `cookies()` reads so `cacheComponents: true` builds cleanly) and reset any open `Dialog` / `Sheet` / `CommandDialog` inside a `useEffect` watching `usePathname()` so Next.js 16 `<Activity>` route caching never preserves stale open overlays across navigation:
 
@@ -178,7 +222,7 @@ Build the product control-room shell using shadcn `SidebarProvider` + `SidebarIn
    - 3 status vitals `Card`s (`9Router LLM Gateway` latency + model count, `Tencent VPS Hermes` readiness + active runs, `24/7 Cron Heartbeat` showing `formatRelativeTime(cron.lastTickAt)` with emerald `<3m` / amber-red `missing` badge and 1-click **Copy crontab** button).
    - Filterable `Tabs` (`all`, `combo`, `chat`, `web`, `image`, `embedding`) + search `Input` over a `Table` of live 9Router models (`id`, `owned_by`, `kind`, 1-click copy model ID) and per-agent VPS health/capabilities matrix.
 
-## Critical files & anchors
+### Critical files & anchors
 
 - `next.config.ts` — Keeps `cacheComponents: true`, `partialPrefetching: true`, and `@tailwindcss/turbopack` CSS loader intact; forbids `dynamic`/`runtime`/`revalidate` exports in all pages, layouts, and API routes.
 - `app/globals.css` — Tailwind v4 CSS-first entry (`@import "tailwindcss"`, `@import "tw-animate-css"`, `@import "shadcn/tailwind.css"`, `@plugin "@tailwindcss/typography"`) defining `:root` paper-light and `.dark` control-room OKLCH tokens plus `prefers-reduced-motion` and `tabular-nums` rules.
@@ -186,7 +230,7 @@ Build the product control-room shell using shadcn `SidebarProvider` + `SidebarIn
 - `lib/orchestrator.ts` — Serverless-safe DAG state machine advancing `planning → writing_spec → running → summarizing → completed | needs_you` with optimistic SQL compare-and-set locking and Hermes `Idempotency-Key` protection.
 - `components/mission-workspace.tsx` — Primary operator surface uniting the 1-prompt mission composer, 3s auto-tick loop, 6-column Kanban board, `@tailwindcss/typography` Markdown artifact reader, and `RunInspectorSheet` SSE drawer.
 
-## Verification
+### Verification
 
 1. **Typegen, Strict TypeScript, Lint, and Next.js 16 Cache Components Production Build**:
    - From `/Users/rezajulian/Documents/neiro`, run:
@@ -204,7 +248,7 @@ Build the product control-room shell using shadcn `SidebarProvider` + `SidebarIn
      - On `/`, launch prompt `"Build discount coupon module with validation API and checkout UI"` in Auto-Pilot mode → observe live 3s progression across `Plan DAG` → `Write PRD` → parallel `Coding` → `QA check` (retry `0 → 1` on `T1` fail) → `Final review` → `Done`, inspect live SSE events in `RunInspectorSheet`, and read rendered GFM tables/code inside the `Artifacts` tab (`prose dark:prose-invert`).
      - Test responsive layout at `375px` (mobile `Sheet` sidebar + `16px` inputs + bottom `RunInspectorSheet`) and `1440px` (6-column Kanban + collapsible icon rail).
 
-## Assumptions & contingencies
+### Assumptions & contingencies
 
 - **Tailwind v4 `@tailwindcss/turbopack` CSS imports**: Assumes `@import "shadcn/tailwind.css";` and `@plugin "@tailwindcss/typography";` resolve cleanly through `@tailwindcss/turbopack` in `next.config.ts`. *Contingency*: if `@import "shadcn/tailwind.css"` fails CSS module resolution in `@tailwindcss/turbopack`, remove that single `@import` line from `app/globals.css`—all semantic theme variables, `@theme inline` mappings, and `tw-animate-css` keyframes are already declared directly in `app/globals.css`. If `@plugin "@tailwindcss/typography"` triggers a Turbopack loader error, style `.markdown-body` headings, tables, lists, and code blocks directly inside `app/globals.css` `@layer components`.
 - **Supabase availability during local UI smoke testing**: Assumes `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` point to a provisioned Supabase project in `.env.local`. *Contingency*: if live Supabase credentials are absent during local smoke testing, include a lightweight PostgREST `/rest/v1/{agents,missions,mission_tasks,mission_artifacts,app_state}` mock listener on `:54321` inside the temporary `scripts/mock-hermes.ts` harness (`SUPABASE_URL=http://127.0.0.1:54321 SUPABASE_SERVICE_ROLE_KEY=test-service-role-key`, deleted after verification) so production code remains 100% real `@supabase/supabase-js` with zero fake in-app adapters.
