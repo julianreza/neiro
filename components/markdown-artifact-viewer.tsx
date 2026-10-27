@@ -7,8 +7,20 @@ import { Copy, Download, FileText } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 
-export function MarkdownArtifactViewer({ title }: { title: string }) {
-  const artifacts = [
+export type ArtifactFile = { name: string; label: string; content: string };
+
+/**
+ * Shows mission artifacts. Pass `files` for real artifacts; without it the
+ * component renders clearly-labelled demo documents.
+ */
+export function MarkdownArtifactViewer({
+  title,
+  files,
+}: {
+  title: string;
+  files?: ArtifactFile[];
+}) {
+  const demoArtifacts: ArtifactFile[] = [
     {
       name: "PRD.md",
       label: "Product requirements",
@@ -21,8 +33,16 @@ export function MarkdownArtifactViewer({ title }: { title: string }) {
         "# Execution plan\n\nDemo plan for previewing the artifact reader.\n\n1. Define requirements and schema.\n2. Build API and interface in parallel.\n3. Verify behavior at the QA gate.\n4. Review and summarize deliverables.\n\n```text\nT1: Specification\nT2: Backend (depends on T1)\nT3: Frontend (depends on T1)\nT4: QA (depends on T2, T3)\n```",
     },
   ];
+  const artifacts = files ?? demoArtifacts;
   const [selected, setSelected] = useState(0);
-  const artifact = artifacts[selected];
+  const artifact = artifacts[Math.min(selected, artifacts.length - 1)];
+  if (!artifact) {
+    return (
+      <div className="rounded-lg border border-dashed p-8 text-center text-sm text-muted-foreground">
+        No artifacts yet. They appear here as agents finish planning, QA and review.
+      </div>
+    );
+  }
   return (
     <div className="grid min-h-96 overflow-hidden rounded-lg border md:grid-cols-[220px_1fr]">
       <div className="border-b bg-secondary/20 p-3 md:border-r md:border-b-0">
@@ -31,7 +51,7 @@ export function MarkdownArtifactViewer({ title }: { title: string }) {
         </p>
         {artifacts.map((item, index) => (
           <button
-            key={item.name}
+            key={`${item.name}-${index}`}
             onClick={() => setSelected(index)}
             className={`flex w-full items-center gap-3 rounded-md px-3 py-3 text-left text-xs ${selected === index ? "bg-secondary" : "hover:bg-secondary/50"}`}
           >

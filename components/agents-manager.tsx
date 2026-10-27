@@ -1,6 +1,9 @@
 "use client";
 
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useRef, useState, type FormEvent } from "react";
+import { useLiveData } from "@/hooks/use-live-data";
+import { DataSourceBadge } from "@/components/data-source-badge";
+import { Skeleton } from "@/components/ui/skeleton";
 import {
   Bot,
   Copy,
@@ -171,8 +174,46 @@ function blankAgent(): Agent {
 const selectClass =
   "h-10 w-full min-w-0 rounded-lg border border-input bg-background px-3 text-base outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 sm:text-sm";
 
+const DEMO_READ_ONLY =
+  "Demo mode: connect Supabase to add, edit or remove agents.";
+
+function parseAgents(json: unknown): Agent[] {
+  const rows = (json as { agents?: Record<string, unknown>[] } | null)?.agents;
+  if (!Array.isArray(rows)) throw new Error("Malformed /api/agents response");
+  return rows.map((row) => ({
+    id: String(row.id ?? ""),
+    name: String(row.name ?? ""),
+    role: String(row.role ?? ""),
+    stage: (row.stage as Agent["stage"]) ?? "workers",
+    specialty: String(row.specialty ?? ""),
+    model: String(row.model ?? ""),
+    profile: String(row.profile ?? "default"),
+    prompt: String(row.prompt ?? ""),
+    url: String(row.url ?? ""),
+    enabled: Boolean(row.enabled ?? true),
+    activeRun: Boolean(row.activeRun ?? row.active_run ?? false),
+  }));
+}
+
+async function sendJson(url: string, method: string, body?: unknown): Promise<string | null> {
+  try {
+    const res = await fetch(url, {
+      method,
+      headers: body === undefined ? undefined : { "Content-Type": "application/json" },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    if (res.ok) return null;
+    const data = (await res.json().catch(() => ({}))) as { error?: string };
+    return data.error ?? `Request failed (${res.status})`;
+  } catch {
+    return "Network error";
+  }
+}
+
 export function AgentsManager() {
-  const [agents, setAgents] = useState<Agent[]>(starters);
+  const live = useLiveData<Agent[]>("/api/agents", starters, parseAgents);
+  const readOnly = live.source !== "live";
+  const agents: Agent[] = live.source === "loading" ? [] : live.data;
   const [search, setSearch] = useState("");
   const [draft, setDraft] = useState<Agent | null>(null);
   const [deleting, setDeleting] = useState<Agent | null>(null);
@@ -181,41 +222,6 @@ export function AgentsManager() {
   const [formError, setFormError] = useState("");
   const actionOrigin = useRef<HTMLButtonElement | null>(null);
 
-  async function loadAgents() {
-    try {
-      const res = await fetch("/api/agents");
-      if (res.ok) {
-        const data = await res.json();
-        if (Array.isArray(data.agents) && data.agents.length > 0) {
-          setAgents(data.agents);
-        }
-      }
-    } catch {
-      // Keep starters
-    }
-  }
-
-  useEffect(() => {
-    let ignore = false;
-    async function init() {
-      try {
-        const res = await fetch("/api/agents");
-        if (res.ok) {
-          const data = await res.json();
-          if (!ignore && Array.isArray(data.agents) && data.agents.length > 0) {
-            setAgents(data.agents);
-          }
-        }
-      } catch {
-        // Keep starters
-      }
-    }
-    init();
-    return () => {
-      ignore = true;
-    };
-  }, []);
-
   const visible = agents.filter((agent) =>
     `${agent.name} ${agent.specialty} ${agent.role} ${agent.model} ${agent.profile}`
       .toLowerCase()
@@ -223,29 +229,26 @@ export function AgentsManager() {
   );
 
   function edit(agent: Agent, trigger: HTMLButtonElement) {
+    if (readOnly) {
+      toast.error(DEMO_READ_ONLY);
+      return;
+    }
     actionOrigin.current = trigger;
     setFormError("");
     setDraft({ ...agent });
   }
 
   async function toggleAgent(agent: Agent, enabled: boolean) {
-    setAgents((current) =>
-      current.map((item) =>
-        item.id === agent.id ? { ...item, enabled } : item,
-      ),
-    );
-    try {
-      const res = await fetch(`/api/agents/${agent.id}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ enabled }),
-      });
-      if (res.ok) {
-        toast.success(`${agent.name} ${enabled ? "enabled" : "disabled"}`);
-      }
-    } catch {
-      toast.error("Database sync failed");
+    if (readOnly) {
+      toast.error(DEMO_READ_ONLY);
+      return;
     }
+    const error = await sendJson(`/api/agents/${encodeURIComponent(agent.id)}`, "PATCH", {
+      enabled,
+    });
+    if (error) toast.error(`Could not update ${agent.name}: ${error}`);
+    else toast.success(`${agent.name} ${enabled ? "enabled" : "disabled"}`);
+    live.reload();
   }
 
   async function save(event: FormEvent<HTMLFormElement>) {
@@ -277,48 +280,31 @@ export function AgentsManager() {
       url: draft.url.trim(),
     };
 
-    setAgents((current) =>
-      !isNew
-        ? current.map((agent) => (agent.id === draft.id ? saved : agent))
-        : [...current, saved],
-    );
-    setDraft(null);
-
-    try {
-      if (isNew) {
-        await fetch("/api/agents", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(saved),
-        });
-      } else {
-        await fetch(`/api/agents/${saved.id}`, {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(saved),
-        });
-      }
-      toast.success(`${saved.name} saved to Supabase`);
-    } catch {
-      toast.error("Saved locally");
+    const error = isNew
+      ? await sendJson("/api/agents", "POST", saved)
+      : await sendJson(`/api/agents/${encodeURIComponent(saved.id)}`, "PATCH", saved);
+    if (error) {
+      setFormError(`Could not save: ${error}`);
+      return;
     }
+    setDraft(null);
+    toast.success(`${saved.name} saved`);
+    live.reload();
   }
 
   async function restore() {
-    try {
-      const res = await fetch("/api/agents/seed", { method: "POST" });
-      if (res.ok) {
-        await loadAgents();
-        setSearch("");
-        toast.success("Starter team restored in Supabase");
-        return;
-      }
-    } catch {
-      // fallback
+    if (readOnly) {
+      toast.error(DEMO_READ_ONLY);
+      return;
     }
-    setAgents(starters);
+    const error = await sendJson("/api/agents/seed", "POST");
+    if (error) {
+      toast.error(`Could not restore starters: ${error}`);
+      return;
+    }
     setSearch("");
     toast.success("Starter team restored");
+    live.reload();
   }
 
   function restoreFocus(event: Event) {
@@ -341,13 +327,21 @@ export function AgentsManager() {
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
-          <Button className="min-h-10" variant="outline" onClick={restore}>
+          <Button
+            className="min-h-10"
+            variant="outline"
+            onClick={restore}
+            disabled={readOnly}
+            title={readOnly ? DEMO_READ_ONLY : undefined}
+          >
             <RotateCcw />
             Restore starters
           </Button>
           <Button
             id="new-demo-agent"
             className="console-launch min-h-10"
+            disabled={readOnly}
+            title={readOnly ? DEMO_READ_ONLY : undefined}
             onClick={(event) => edit(blankAgent(), event.currentTarget)}
           >
             <Plus />
@@ -356,19 +350,33 @@ export function AgentsManager() {
         </div>
       </header>
 
-      <div className="flex items-start gap-3 border border-dashed bg-muted/30 p-4 text-sm">
-        <Unplug className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
-        <div>
-          <span className="font-medium">
-            Demo workspace. No agents connected.
-          </span>
-          <p className="mt-1 text-muted-foreground">
-            All profiles, runs, and capabilities below are sample data. Changes
-            last only on this page; refreshing resets them. No requests are sent
-            to a gateway or model provider.
-          </p>
+      {live.source === "demo" && (
+        <div
+          role="status"
+          className="flex items-start gap-3 border border-dashed bg-muted/30 p-4 text-sm"
+        >
+          <Unplug className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+          <div>
+            <span className="flex flex-wrap items-center gap-2 font-medium">
+              Demo workspace. No agents connected.
+              <DataSourceBadge source="demo" reason={live.reason} />
+            </span>
+            <p className="mt-1 text-muted-foreground">
+              The profiles below are sample data and cannot be changed here. No
+              requests are sent to a gateway or model provider. Connect Supabase
+              to manage your real team.
+            </p>
+          </div>
         </div>
-      </div>
+      )}
+
+      {live.source === "loading" && (
+        <div className="grid gap-6 md:grid-cols-2 xl:grid-cols-3" aria-busy="true" aria-label="Loading agents">
+          <Skeleton className="h-56 w-full" />
+          <Skeleton className="h-56 w-full" />
+          <Skeleton className="h-56 w-full" />
+        </div>
+      )}
 
       <section
         className="flex flex-wrap items-end justify-between gap-4"
@@ -388,12 +396,12 @@ export function AgentsManager() {
           </div>
         </div>
         <p className="text-sm text-muted-foreground" aria-live="polite">
-          {visible.length} of {agents.length} demo agents ·{" "}
-          {agents.filter((agent) => agent.enabled).length} enabled locally
+          {visible.length} of {agents.length} {readOnly ? "demo " : ""}agents ·{" "}
+          {agents.filter((agent) => agent.enabled).length} enabled
         </p>
       </section>
 
-      {visible.length === 0 ? (
+      {live.source === "loading" ? null : visible.length === 0 ? (
         <section className="flex min-h-64 flex-col items-center justify-center gap-4 border border-dashed p-8 text-center">
           <Bot className="size-8 text-muted-foreground" />
           <div>
@@ -405,7 +413,7 @@ export function AgentsManager() {
             <p className="mt-2 text-sm text-muted-foreground">
               {agents.length
                 ? "Try a different name, model, or profile."
-                : "Create a demo agent or restore the starter team. Nothing will be connected."}
+                : "Create an agent or restore the starter team."}
             </p>
           </div>
           {agents.length ? (
@@ -415,9 +423,11 @@ export function AgentsManager() {
           ) : (
             <Button
               onClick={(event) => edit(blankAgent(), event.currentTarget)}
+              disabled={readOnly}
+              title={readOnly ? DEMO_READ_ONLY : undefined}
             >
               <Plus />
-              Create demo agent
+              Create agent
             </Button>
           )}
         </section>
@@ -467,12 +477,14 @@ export function AgentsManager() {
                           </p>
                         </div>
                       </div>
-                      <Badge
-                        variant="outline"
-                        className="border-amber-500/30 text-amber-500 bg-amber-500/5 text-[10px]"
-                      >
-                        Demo
-                      </Badge>
+                      {readOnly && (
+                        <Badge
+                          variant="outline"
+                          className="border-amber-500/30 text-amber-500 bg-amber-500/5 text-[10px]"
+                        >
+                          Demo
+                        </Badge>
+                      )}
                     </div>
                     <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-2 text-xs">
                       <dt className="text-muted-foreground">Model</dt>
@@ -485,10 +497,12 @@ export function AgentsManager() {
                         htmlFor={`enabled-${agent.id}`}
                         className="text-xs"
                       >
-                        {agent.enabled ? "Enabled in demo" : "Disabled in demo"}
+                        {agent.enabled ? "Enabled" : "Disabled"}
                       </Label>
                       <Switch
                         id={`enabled-${agent.id}`}
+                        disabled={readOnly}
+                        title={readOnly ? DEMO_READ_ONLY : undefined}
                         checked={agent.enabled}
                         onCheckedChange={(enabled) =>
                           toggleAgent(agent, enabled)
@@ -498,8 +512,9 @@ export function AgentsManager() {
                     {agent.activeRun && (
                       <p className="flex items-start gap-2 text-xs text-amber-700 dark:text-amber-400">
                         <ShieldAlert className="size-4 shrink-0" />
-                        Demo run M-104 assigned. Deletion blocked until
-                        released.
+                        {readOnly
+                          ? "Demo run M-104 assigned. Deletion blocked until released."
+                          : "Assigned to an active run. Deletion is blocked until the run ends."}
                       </p>
                     )}
                     <div className="flex flex-wrap gap-1">
@@ -519,6 +534,8 @@ export function AgentsManager() {
                         className="min-h-10"
                         variant="ghost"
                         aria-label={`Edit ${agent.name}`}
+                        disabled={readOnly}
+                        title={readOnly ? DEMO_READ_ONLY : undefined}
                         onClick={(event) => edit(agent, event.currentTarget)}
                       >
                         <Pencil />
@@ -528,6 +545,8 @@ export function AgentsManager() {
                         className="min-h-10"
                         variant="ghost"
                         aria-label={`Clone ${agent.name}`}
+                        disabled={readOnly}
+                        title={readOnly ? DEMO_READ_ONLY : undefined}
                         onClick={(event) =>
                           edit(
                             {
@@ -547,6 +566,8 @@ export function AgentsManager() {
                         className="min-h-10"
                         variant="ghost"
                         aria-label={`Delete ${agent.name}`}
+                        disabled={readOnly}
+                        title={readOnly ? DEMO_READ_ONLY : undefined}
                         onClick={(event) => {
                           actionOrigin.current = event.currentTarget;
                           setDeleting(agent);
@@ -595,7 +616,7 @@ export function AgentsManager() {
         >
           <DialogHeader>
             <DialogTitle>
-              {draft?.id ? "Edit demo agent" : "New demo agent"}
+              {draft?.id ? "Edit agent" : "New agent"}
             </DialogTitle>
             <DialogDescription>
               Local configuration only. No deployment, connection, or model
@@ -764,7 +785,7 @@ export function AgentsManager() {
                   checked={draft.enabled}
                   onCheckedChange={(enabled) => setDraft({ ...draft, enabled })}
                 />
-                <Label htmlFor="agent-form-enabled">Enabled in demo</Label>
+                <Label htmlFor="agent-form-enabled">Enabled</Label>
               </div>
               {formError && (
                 <p role="alert" className="text-sm text-destructive">
@@ -781,7 +802,7 @@ export function AgentsManager() {
                   Cancel
                 </Button>
                 <Button className="min-h-10" type="submit">
-                  Save demo agent
+                  Save agent
                 </Button>
               </div>
             </form>
@@ -799,13 +820,13 @@ export function AgentsManager() {
           <DialogHeader>
             <DialogTitle>
               {deleting?.activeRun
-                ? "Demo run blocks deletion"
+                ? "Active run blocks deletion"
                 : `Delete ${deleting?.name ?? "agent"}?`}
             </DialogTitle>
             <DialogDescription>
               {deleting?.activeRun
-                ? "Neiro has sample mission M-104 assigned. This demonstrates the active-run conflict, not a real running mission. Release the sample assignment, then delete the agent."
-                : "This removes the agent from this local demo only. Starter agents can be restored; custom agents cannot be recovered."}
+                ? "This agent is assigned to an active run. Stop or finish the run on Mission control, then delete the agent."
+                : "This permanently removes the agent from Supabase. Starter agents can be restored; custom agents cannot be recovered."}
             </DialogDescription>
           </DialogHeader>
           <div className="flex flex-wrap justify-end gap-2">
@@ -816,43 +837,23 @@ export function AgentsManager() {
             >
               Cancel
             </Button>
-            {deleting?.activeRun ? (
-              <Button
-                className="min-h-10"
-                onClick={() => {
-                  setAgents((current) =>
-                    current.map((agent) =>
-                      agent.id === deleting.id
-                        ? { ...agent, activeRun: false }
-                        : agent,
-                    ),
-                  );
-                  setDeleting({ ...deleting, activeRun: false });
-                  toast.success(
-                    "Sample assignment released locally. No mission was stopped.",
-                  );
-                }}
-              >
-                Release demo assignment
-              </Button>
-            ) : (
+            {deleting?.activeRun ? null : (
               <Button
                 className="min-h-10"
                 variant="destructive"
                 onClick={async () => {
                   if (!deleting) return;
-                  const id = deleting.id;
-                  setAgents((current) => current.filter((a) => a.id !== id));
-                  try {
-                    await fetch(`/api/agents/${id}`, { method: "DELETE" });
-                    toast.success(`${deleting.name} deleted from Supabase`);
-                  } catch {
-                    toast.error("Deleted locally");
-                  }
+                  const error = await sendJson(
+                    `/api/agents/${encodeURIComponent(deleting.id)}`,
+                    "DELETE",
+                  );
+                  if (error) toast.error(`Could not delete ${deleting.name}: ${error}`);
+                  else toast.success(`${deleting.name} deleted`);
                   setDeleting(null);
+                  live.reload();
                 }}
               >
-                Delete demo agent
+                Delete agent
               </Button>
             )}
           </div>

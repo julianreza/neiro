@@ -1,10 +1,12 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { Cable, Check, Copy, RefreshCw, Search, Unplug } from "lucide-react";
 import { toast } from "sonner";
 import type { GatewayStatusDTO } from "@/lib/types";
 import { Badge } from "@/components/ui/badge";
+import { DataSourceBadge } from "@/components/data-source-badge";
+import { useLiveData } from "@/hooks/use-live-data";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -124,78 +126,48 @@ const capabilities = [
 const cronSample =
   '# Example only: replace both placeholders on your VPS. Not deployed.\n* * * * * curl --fail --silent --show-error -X POST \\\n  -H "Authorization: Bearer <DASHBOARD_SECRET>" \\\n  "<NEIRO_URL>/api/orchestrator/tick"';
 
+type ModelRow = (typeof models)[number];
+
+function parseStatus(json: unknown): GatewayStatusDTO | null {
+  const body = json as Partial<GatewayStatusDTO> | null;
+  if (!body || typeof body !== "object" || !body.checkedAt) {
+    throw new Error("Malformed /api/gateway/status response");
+  }
+  return body as GatewayStatusDTO;
+}
+
+function parseModels(json: unknown): ModelRow[] {
+  const list = (json as { models?: { id: string; owned_by?: string }[] } | null)?.models;
+  if (!Array.isArray(list)) throw new Error("Malformed /api/gateway/models response");
+  return list.map((item) => ({
+    id: item.id,
+    name: item.id.split("/").pop() || item.id,
+    type: "chat" as Exclude<Category, "all">,
+    provider: item.owned_by || "9Router",
+  }));
+}
+
 export function GatewayMonitor() {
   const [category, setCategory] = useState<Category>("all");
   const [query, setQuery] = useState("");
-  const [liveStatus, setLiveStatus] = useState<GatewayStatusDTO | null>(null);
-  const [displayModels, setDisplayModels] = useState<typeof models>(models);
-  const [refreshing, setRefreshing] = useState(false);
+  const status = useLiveData<GatewayStatusDTO | null>("/api/gateway/status", null, parseStatus);
+  const modelList = useLiveData<ModelRow[]>("/api/gateway/models", models, parseModels);
+  const liveStatus = status.source === "live" ? status.data : null;
+  const displayModels: ModelRow[] = modelList.source === "loading" ? [] : modelList.data;
+  const modelsAreSample = modelList.source !== "live";
+  const statusLoading = status.source === "loading";
+  const anyDemo = status.source === "demo" || modelList.source === "demo";
+  const demoReason =
+    status.source === "demo"
+      ? `status: ${status.reason}`
+      : modelList.source === "demo"
+        ? `models: ${modelList.reason}`
+        : undefined;
 
-  useEffect(() => {
-    let ignore = false;
-    async function fetchStatus() {
-      try {
-        const [statusRes, modelsRes] = await Promise.all([
-          fetch("/api/gateway/status"),
-          fetch("/api/gateway/models"),
-        ]);
-        if (!ignore && statusRes.ok) {
-          const s = await statusRes.json();
-          setLiveStatus(s);
-        }
-        if (!ignore && modelsRes.ok) {
-          const m = await modelsRes.json();
-          if (Array.isArray(m.models) && m.models.length > 0) {
-            setDisplayModels(
-              m.models.map((item: { id: string; owned_by?: string }) => ({
-                id: item.id,
-                name: item.id.split("/").pop() || item.id,
-                type: "chat" as Exclude<Category, "all">,
-                provider: item.owned_by || "9Router",
-              })),
-            );
-          }
-        }
-      } catch {
-        // Keep initial values
-      }
-    }
-    fetchStatus();
-    return () => {
-      ignore = true;
-    };
-  }, []);
-
-  async function refreshStatus() {
-    setRefreshing(true);
-    try {
-      const [statusRes, modelsRes] = await Promise.all([
-        fetch("/api/gateway/status"),
-        fetch("/api/gateway/models"),
-      ]);
-      if (statusRes.ok) {
-        const s = await statusRes.json();
-        setLiveStatus(s);
-      }
-      if (modelsRes.ok) {
-        const m = await modelsRes.json();
-        if (Array.isArray(m.models) && m.models.length > 0) {
-          setDisplayModels(
-            m.models.map((item: { id: string; owned_by?: string }) => ({
-              id: item.id,
-              name: item.id.split("/").pop() || item.id,
-              type: "chat" as Exclude<Category, "all">,
-              provider: item.owned_by || "9Router",
-            })),
-          );
-        }
-      }
-      toast.success("Gateway status updated");
-    } catch {
-      toast.error("Failed to refresh gateway status");
-    } finally {
-      setRefreshing(false);
-    }
+  function refreshStatus() {
+    status.reload();
+    modelList.reload();
+    toast.info("Re-checking gateway status");
   }
 
   const filtered = displayModels.filter(
@@ -221,39 +193,45 @@ export function GatewayMonitor() {
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div className="space-y-2">
           <p className="text-xs font-medium uppercase tracking-widest text-muted-foreground">
-            Infrastructure / demo
+            Infrastructure{anyDemo ? " / demo" : ""}
           </p>
           <h1 className="text-3xl font-semibold tracking-tight">Gateway</h1>
-          <p className="max-w-2xl text-sm text-muted-foreground">
-            Inspect the connection map, sample model routes, and agent
-            capabilities before connecting your infrastructure.
+          <p className="flex max-w-2xl flex-wrap items-center gap-2 text-sm text-muted-foreground">
+            Inspect the connection map, model routes, and agent capabilities.
+            <DataSourceBadge source={anyDemo ? "demo" : "live"} reason={demoReason} />
           </p>
         </div>
         <Button
           variant="outline"
           className="min-h-10"
-          disabled={refreshing}
+          disabled={statusLoading}
           onClick={refreshStatus}
         >
           <RefreshCw
-            className={refreshing ? "animate-spin" : ""}
+            className={statusLoading ? "animate-spin" : ""}
             aria-hidden="true"
           />
-          {refreshing ? "Checking..." : "Refresh status"}
+          {statusLoading ? "Checking..." : "Refresh status"}
         </Button>
       </div>
 
-      <div className="flex gap-3 rounded-lg border bg-muted/30 p-4 text-sm">
-        <Unplug
-          className="mt-0.5 size-4 shrink-0 text-muted-foreground"
-          aria-hidden="true"
-        />
-        <p>
-          <span className="font-medium">Disconnected demo.</span> No health
-          checks or environment inspection have run. Models, capabilities, and
-          connection details below are illustrative, not live telemetry.
-        </p>
-      </div>
+      {anyDemo && (
+        <div role="status" className="flex gap-3 rounded-lg border bg-muted/30 p-4 text-sm">
+          <Unplug
+            className="mt-0.5 size-4 shrink-0 text-muted-foreground"
+            aria-hidden="true"
+          />
+          <p>
+            <span className="font-medium">Partly sample data.</span>{" "}
+            {status.source === "demo"
+              ? `Health checks could not run (${status.reason}). `
+              : ""}
+            {modelList.source === "demo"
+              ? `The model catalog below is a sample (${modelList.reason}).`
+              : ""}
+          </p>
+        </div>
+      )}
 
       <section aria-labelledby="gateway-vitals" className="space-y-4">
         <h2 id="gateway-vitals" className="text-lg font-semibold">
@@ -267,7 +245,9 @@ export function GatewayMonitor() {
               detail:
                 liveStatus?.supabase?.status === "connected"
                   ? `Connected (${liveStatus?.supabase?.latencyMs ?? 0}ms)`
-                  : "Database disconnected",
+                  : statusLoading
+                    ? "Checking…"
+                    : liveStatus?.supabase?.error || "Database disconnected",
               note: "Missions, tasks DAG, and agent registry state.",
             },
             {
@@ -276,7 +256,9 @@ export function GatewayMonitor() {
               detail:
                 liveStatus?.nineRouter?.status === "connected"
                   ? `Online (${displayModels.length} models, ${liveStatus?.nineRouter?.latencyMs ?? 0}ms)`
-                  : "LLM Gateway unreachable",
+                  : statusLoading
+                    ? "Checking…"
+                    : liveStatus?.nineRouter?.error || "LLM Gateway unreachable",
               note: "LLM inference router and model discovery.",
             },
             {
@@ -285,7 +267,9 @@ export function GatewayMonitor() {
               detail:
                 liveStatus?.hermes?.status === "connected"
                   ? `Agent runtime ready (${liveStatus?.hermes?.latencyMs ?? 0}ms)`
-                  : "Hermes VPS skipped (local testing)",
+                  : statusLoading
+                    ? "Checking…"
+                    : liveStatus?.hermes?.error || "Hermes VPS unreachable",
               note: "Autonomous coding agent runtime.",
             },
           ].map((vital) => (
@@ -356,7 +340,7 @@ export function GatewayMonitor() {
       <section className="min-w-0 space-y-4" aria-labelledby="models-heading">
         <div>
           <h2 id="models-heading" className="text-lg font-semibold">
-            Sample model catalog
+            {modelsAreSample ? "Sample model catalog" : "Model catalog"}
           </h2>
           <p className="text-sm text-muted-foreground">
             Illustrative IDs only. Availability, permissions, and pricing are
@@ -365,7 +349,9 @@ export function GatewayMonitor() {
         </div>
         <div className="grid items-end gap-4 sm:grid-cols-[minmax(0,1fr)_12rem]">
           <div className="space-y-2">
-            <Label htmlFor="model-search">Search sample models</Label>
+            <Label htmlFor="model-search">
+              {modelsAreSample ? "Search sample models" : "Search models"}
+            </Label>
             <div className="relative">
               <Search
                 className="pointer-events-none absolute top-3 left-3 size-4 text-muted-foreground"
@@ -399,7 +385,9 @@ export function GatewayMonitor() {
           </div>
         </div>
         <p className="text-xs text-muted-foreground" aria-live="polite">
-          {filtered.length} sample {filtered.length === 1 ? "model" : "models"}
+          {modelList.source === "loading"
+            ? "Loading models…"
+            : `${filtered.length} ${modelsAreSample ? "sample " : ""}${filtered.length === 1 ? "model" : "models"}`}
         </p>
         <div className="console-table min-w-0 overflow-hidden rounded-lg border">
           <Table className="min-w-[680px]">
@@ -407,7 +395,7 @@ export function GatewayMonitor() {
               <TableRow>
                 <TableHead className="pl-4">Model</TableHead>
                 <TableHead>Category</TableHead>
-                <TableHead>Sample ID</TableHead>
+                <TableHead>{modelsAreSample ? "Sample ID" : "Model ID"}</TableHead>
                 <TableHead>Provider / route</TableHead>
                 <TableHead className="pr-4 text-right">Action</TableHead>
               </TableRow>
@@ -432,8 +420,10 @@ export function GatewayMonitor() {
                       variant="ghost"
                       size="sm"
                       className="min-h-10"
-                      aria-label={`Copy sample ID ${model.id}`}
-                      onClick={() => void copy(model.id, "Sample model ID")}
+                      aria-label={`Copy model ID ${model.id}`}
+                      onClick={() =>
+                        void copy(model.id, modelsAreSample ? "Sample model ID" : "Model ID")
+                      }
                     >
                       <Copy aria-hidden="true" /> Copy ID
                     </Button>
@@ -448,9 +438,11 @@ export function GatewayMonitor() {
                 className="mx-auto size-6 text-muted-foreground"
                 aria-hidden="true"
               />
-              <h3 className="font-medium">No sample models match</h3>
+              <h3 className="font-medium">No models match</h3>
               <p className="text-sm text-muted-foreground">
-                Try another name or category. This list is a fixed demo catalog.
+                {modelsAreSample
+                  ? "Try another name or category. This list is a fixed demo catalog."
+                  : "Try another name or category."}
               </p>
               <Button
                 variant="outline"

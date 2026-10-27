@@ -18,9 +18,14 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { initialMissions, stages, updateDemoTask } from "@/lib/demo-missions";
-import type { DemoMission, TaskStage } from "@/lib/demo-missions";
+import type { DemoMission, DemoTask, TaskStage } from "@/lib/demo-missions";
+import type { MissionDetailDTO, MissionPhase, MissionSummaryDTO } from "@/lib/types";
 import { formatCompactTokens } from "@/lib/utils";
+import { useLiveData } from "@/hooks/use-live-data";
+import { DataSourceBadge } from "@/components/data-source-badge";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
+import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -32,7 +37,10 @@ import {
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
 import { RunInspectorSheet } from "@/components/run-inspector-sheet";
-import { MarkdownArtifactViewer } from "@/components/markdown-artifact-viewer";
+import {
+  MarkdownArtifactViewer,
+  type ArtifactFile,
+} from "@/components/markdown-artifact-viewer";
 
 const stageColors: Record<TaskStage, string> = {
   Queued: "text-muted-foreground",
@@ -43,103 +51,231 @@ const stageColors: Record<TaskStage, string> = {
   Done: "text-status-success",
 };
 
+/** A task as the board renders it; `rowId` is the database id (live mode only). */
+type TaskView = DemoTask & { rowId?: string };
+
+type MissionView = Omit<DemoMission, "tasks"> & {
+  tasks: TaskView[];
+  phase?: MissionPhase;
+  lastError?: string | null;
+  artifacts?: ArtifactFile[];
+};
+
+const PHASE_STEP: Record<MissionPhase, number> = {
+  planning: 0,
+  spec: 1,
+  executing: 2,
+  summarizing: 3,
+  done: 4,
+};
+
+function parseMissionList(json: unknown): MissionView[] {
+  const list = (json as { missions?: MissionSummaryDTO[] } | null)?.missions;
+  if (!Array.isArray(list)) throw new Error("Malformed /api/missions response");
+  return list.map((m) => ({
+    id: m.id,
+    title: m.title,
+    prompt: m.prompt,
+    status: m.status,
+    phase: m.phase,
+    lastError: m.lastError,
+    tasks: [],
+  }));
+}
+
+function parseMissionDetail(json: unknown): MissionView | null {
+  const m = (json as { mission?: MissionDetailDTO } | null)?.mission;
+  if (!m) throw new Error("Malformed /api/missions/:id response");
+  return {
+    id: m.id,
+    title: m.title,
+    prompt: m.prompt,
+    status: m.status,
+    phase: m.phase,
+    lastError: m.lastError,
+    tasks: m.tasks.map((t) => ({
+      id: t.taskKey ?? t.id.slice(0, 8),
+      rowId: t.id,
+      title: t.title,
+      stage: t.stage,
+      agent: t.agentName || "Unassigned",
+      model: t.model,
+      tokens: t.tokens,
+      depends: t.depends,
+      approval: t.approval,
+      retries: t.retries,
+    })),
+    artifacts: m.artifacts.map((a) => ({
+      name: `${a.kind.toUpperCase()}.md`,
+      label: a.title,
+      content: a.content,
+    })),
+  };
+}
+
+function parseIntOr(value: string, fallback: number): number {
+  const n = Number.parseInt(value, 10);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+async function postJson(url: string, body: unknown): Promise<{ ok: boolean; data: Record<string, unknown> }> {
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+    if (!res.ok && typeof data.error !== "string") data.error = `Request failed (${res.status})`;
+    return { ok: res.ok, data };
+  } catch {
+    return { ok: false, data: { error: "Network error" } };
+  }
+}
+
 export function MissionWorkspace() {
-  const [missions, setMissions] = useState<DemoMission[]>(initialMissions);
-  const [selectedId, setSelectedId] = useState(initialMissions[0].id);
+  const list = useLiveData<MissionView[]>("/api/missions", initialMissions, parseMissionList);
+  const isLive = list.source === "live";
+  const isDemo = list.source === "demo";
+  const [demoMissions, setDemoMissions] = useState<MissionView[]>(initialMissions);
+  const missions: MissionView[] = isLive ? list.data : isDemo ? demoMissions : [];
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const effectiveId = missions.some((m) => m.id === selectedId)
+    ? selectedId
+    : (missions[0]?.id ?? null);
+  const detail = useLiveData<MissionView | null>(
+    isLive && effectiveId ? `/api/missions/${encodeURIComponent(effectiveId)}` : null,
+    null,
+    parseMissionDetail,
+  );
   const [prompt, setPrompt] = useState("");
   const [pause, setPause] = useState(false);
   const [workspace, setWorkspace] = useState("");
   const [workers, setWorkers] = useState("3");
   const [retries, setRetries] = useState("2");
+  const [launching, setLaunching] = useState(false);
   const [inspected, setInspected] = useState<string | null>(null);
   const input = useRef<HTMLTextAreaElement>(null);
-  const mission = missions.find((item) => item.id === selectedId);
+  const mission: MissionView | null | undefined = isLive
+    ? detail.source === "live"
+      ? detail.data
+      : null
+    : missions.find((item) => item.id === effectiveId);
+  const loading =
+    list.source === "loading" || (isLive && effectiveId !== null && detail.source === "loading");
   const tasks = mission?.tasks ?? [];
   const done = tasks.filter((task) => task.stage === "Done").length;
   const tokens = tasks.reduce((sum, task) => sum + task.tokens, 0);
+  const activeStep = isLive && mission?.phase ? PHASE_STEP[mission.phase] : 2;
+  const maxRetriesShown = parseIntOr(retries, 2);
+  const assignedAgents = new Set(tasks.map((t) => t.agent).filter((a) => a && a !== "Unassigned")).size;
+
   useEffect(() => {
     if (new URLSearchParams(window.location.search).has("compose"))
       input.current?.focus();
-
-    async function fetchMissions() {
-      try {
-        const res = await fetch("/api/missions");
-        if (res.ok) {
-          const data = await res.json();
-          if (Array.isArray(data.missions) && data.missions.length > 0) {
-            setMissions(data.missions);
-            setSelectedId(data.missions[0].id);
-          }
-        }
-      } catch {
-        // Fallback to local demo missions
-      }
-    }
-    fetchMissions();
   }, []);
+
+  function refresh() {
+    list.reload();
+    detail.reload();
+  }
+
   async function launch() {
     if (!prompt.trim()) {
       input.current?.focus();
       toast.error("Describe the mission objective first");
       return;
     }
-    const id = crypto.randomUUID();
-    const next: DemoMission = {
-      id,
+    if (!isLive) {
+      toast.error("Demo mode: connect Supabase to launch missions.");
+      return;
+    }
+    setLaunching(true);
+    const { ok, data } = await postJson("/api/missions", {
       title: prompt.trim().split("\n")[0].slice(0, 80),
       prompt: prompt.trim(),
-      status: "awaiting_plan_approval",
-      tasks: [
-        {
-          id: "T1",
-          title: "Review the mission and define acceptance criteria",
-          stage: "Queued",
-          agent: "PM orchestrator",
-          model: "claude-sonnet",
-          tokens: 0,
-          depends: [],
-          retries: 0,
-        },
-      ],
-    };
-    setMissions((items) => [next, ...items]);
-    setSelectedId(id);
-    setPrompt("");
-
-    try {
-      const res = await fetch("/api/missions", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          title: next.title,
-          prompt: next.prompt,
-          pause_after_planning: pause,
-          workspace_path: workspace || undefined,
-          max_parallel_workers: Number(workers) || 3,
-          max_retries: Number(retries) || 2,
-        }),
-      });
-      if (res.ok) {
-        toast.success("Mission persisted to Supabase");
-      } else {
-        toast.success(
-          `Mission created. ${pause ? "Plan approval selected." : "Execution pending."}`,
-        );
-      }
-    } catch {
-      toast.success(
-        `Mission created. ${pause ? "Plan approval selected." : "Execution pending."}`,
-      );
+      pause_after_planning: pause,
+      workspace_path: workspace.trim() || undefined,
+      max_parallel_workers: parseIntOr(workers, 3),
+      max_retries: parseIntOr(retries, 2),
+    });
+    setLaunching(false);
+    if (!ok) {
+      toast.error(String(data.error));
+      return;
     }
+    const created = data.mission as { id?: string } | undefined;
+    if (created?.id) setSelectedId(created.id);
+    setPrompt("");
+    toast.success(
+      pause ? "Mission launched. It will pause for plan approval." : "Mission launched.",
+    );
+    refresh();
   }
+
+  async function missionControl(action: "approve_plan" | "cancel") {
+    if (!mission) return;
+    if (!isLive) {
+      setDemoMissions((items) =>
+        items.map((item) =>
+          item.id === mission.id
+            ? { ...item, status: action === "approve_plan" ? "running" : "cancelled" }
+            : item,
+        ),
+      );
+      return;
+    }
+    const { ok, data } = await postJson(
+      `/api/missions/${encodeURIComponent(mission.id)}/control`,
+      { action },
+    );
+    if (!ok) toast.error(String(data.error));
+    else toast.success(action === "approve_plan" ? "Plan approved" : "Mission cancelled");
+    refresh();
+  }
+
+  async function taskControl(id: string, action: string, label: string) {
+    const task = tasks.find((t) => t.id === id);
+    if (!mission || !task?.rowId) return;
+    const { ok, data } = await postJson(
+      `/api/missions/${encodeURIComponent(mission.id)}/tasks/${encodeURIComponent(task.rowId)}/control`,
+      { action },
+    );
+    if (!ok) toast.error(String(data.error));
+    else toast.success(`${id}: ${label}`);
+    refresh();
+  }
+
   function updateTask(id: string, stage: TaskStage) {
-    setMissions((items) =>
+    if (isLive) {
+      const action =
+        stage === "Done"
+          ? ["mark_done", "marked done"]
+          : stage === "Queued"
+            ? ["retry", "queued for retry"]
+            : stage === "Needs you"
+              ? ["stop", "stopped"]
+              : stage === "Coding"
+                ? ["approve_tool", "tool approved"]
+                : null;
+      if (action) void taskControl(id, action[0], action[1]);
+      return;
+    }
+    setDemoMissions((items) =>
       items.map((item) =>
-        item.id === selectedId ? updateDemoTask(item, id, stage) : item,
+        item.id === effectiveId
+          ? (updateDemoTask(item as DemoMission, id, stage) as MissionView)
+          : item,
       ),
     );
     toast.success(`Demo ${id}: ${stage.toLowerCase()}`);
   }
+
+  function denyTool(id: string) {
+    if (isLive) void taskControl(id, "deny_tool", "tool denied");
+    else updateTask(id, "Queued");
+  }
+
   return (
     <div className="space-y-8 p-4 md:p-8">
       <div className="flex flex-wrap items-end justify-between gap-4">
@@ -147,8 +283,12 @@ export function MissionWorkspace() {
           <h1 className="text-3xl font-semibold tracking-tight">
             Mission control
           </h1>
-          <p className="mt-2 text-sm text-muted-foreground">
+          <p className="mt-2 flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
             One objective. A team built to move it forward.
+            <DataSourceBadge
+              source={list.source}
+              reason={list.source === "demo" ? list.reason : undefined}
+            />
           </p>
         </div>
         <Button
@@ -180,7 +320,7 @@ export function MissionWorkspace() {
                   : mission?.status === "cancelled"
                     ? "Cancelled"
                     : "Awaiting plan",
-            detail: "Local demonstration",
+            detail: isLive ? `Phase: ${mission?.phase ?? "—"}` : "Sample data",
             icon: ActivityIcon,
             color: "text-amber-500 bg-amber-500/10 border-amber-500/20",
           },
@@ -193,15 +333,15 @@ export function MissionWorkspace() {
           },
           {
             label: "TEAM CAPACITY",
-            value: "6 agents",
-            detail: "Sample team ready",
+            value: isLive ? `${assignedAgents} assigned` : "6 agents",
+            detail: isLive ? "Agents on this mission" : "Sample team",
             icon: Layers3,
             color: "text-sky-400 bg-sky-500/10 border-sky-500/20",
           },
           {
             label: "TOKEN USAGE",
             value: formatCompactTokens(tokens),
-            detail: "Illustrative usage",
+            detail: isLive ? "Reported by Hermes" : "Sample usage",
             icon: Zap,
             color: "text-amber-400 bg-amber-500/10 border-amber-500/20",
           },
@@ -283,10 +423,21 @@ export function MissionWorkspace() {
                 <span className="hidden text-[10px] text-muted-foreground sm:block">
                   ⌘ / Ctrl + Enter
                 </span>
-                <Button type="submit" className="console-launch">
+                <Button
+                  type="submit"
+                  className="console-launch"
+                  disabled={!isLive || launching}
+                  aria-describedby={!isLive ? "launch-disabled-reason" : undefined}
+                  title={!isLive ? "Demo mode: connect Supabase to launch missions" : undefined}
+                >
                   <Play className="size-3.5" />
-                  Launch demo mission
+                  {launching ? "Launching…" : "Launch mission"}
                 </Button>
+                {!isLive && (
+                  <span id="launch-disabled-reason" className="sr-only">
+                    Launching is disabled in demo mode. Connect Supabase to launch missions.
+                  </span>
+                )}
               </div>
             </div>
             <CollapsibleContent>
@@ -332,8 +483,9 @@ export function MissionWorkspace() {
                 </div>
               </div>
               <p className="border-t px-5 py-3 text-xs text-muted-foreground">
-                Options preview only. No workspace or parallel execution is
-                started.
+                {isLive
+                  ? "Applied to this mission: the orchestrator enforces the pause, worker cap and retry cap."
+                  : "Demo mode: these options are saved only when Supabase is connected."}
               </p>
             </CollapsibleContent>
           </Collapsible>
@@ -355,7 +507,7 @@ export function MissionWorkspace() {
               <select
                 id="mission-picker"
                 className="w-full min-w-0 max-w-full truncate bg-transparent text-sm font-medium focus-visible:outline-2 focus-visible:outline-primary"
-                value={selectedId}
+                value={effectiveId ?? ""}
                 onChange={(event) => {
                   setSelectedId(event.target.value);
                   setInspected(null);
@@ -372,44 +524,66 @@ export function MissionWorkspace() {
           <div className="flex items-center gap-3 text-xs">
             <span className="inline-flex items-center gap-1.5 text-muted-foreground">
               <Circle className="size-2 fill-current" />
-              Demo state
+              {isLive ? "Live state" : isDemo ? "Demo state" : "Loading"}
             </span>
-            <Button
-              size="sm"
-              variant="ghost"
-              onClick={() => {
-                setMissions((items) =>
-                  items.filter((item) => item.id !== selectedId),
-                );
-                setSelectedId(
-                  missions.find((item) => item.id !== selectedId)?.id ?? "",
-                );
-              }}
-            >
-              Remove from preview
-            </Button>
+            {isLive && (
+              <Button size="sm" variant="ghost" onClick={refresh}>
+                Refresh
+              </Button>
+            )}
+            {isDemo && (
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() => {
+                  setDemoMissions((items) =>
+                    items.filter((item) => item.id !== effectiveId),
+                  );
+                  setSelectedId(null);
+                }}
+              >
+                Remove from preview
+              </Button>
+            )}
           </div>
         </div>
-        {mission ? (
+        {mission?.lastError && (
+          <Alert variant="destructive" role="alert">
+            <AlertTitle>Orchestrator error</AlertTitle>
+            <AlertDescription>{mission.lastError}</AlertDescription>
+          </Alert>
+        )}
+        {isLive && detail.source === "demo" && (
+          <Alert variant="destructive" role="alert">
+            <AlertTitle>Could not load this mission</AlertTitle>
+            <AlertDescription>{detail.reason}</AlertDescription>
+          </Alert>
+        )}
+        {loading ? (
+          <div className="space-y-3" aria-busy="true" aria-label="Loading missions">
+            <Skeleton className="h-14 w-full" />
+            <Skeleton className="h-64 w-full" />
+          </div>
+        ) : mission ? (
           <>
             <div className="card-trendy grid grid-cols-2 gap-3 p-4 lg:grid-cols-4">
               {["Plan DAG", "Write PRD", "Execute & verify", "Summary"].map(
                 (step, index) => (
                   <div
                     key={step}
-                    className={`flex items-center gap-3 text-xs ${index === 2 ? "text-foreground" : "text-muted-foreground"}`}
+                    className={`flex items-center gap-3 text-xs ${index === activeStep ? "text-foreground" : "text-muted-foreground"}`}
                   >
                     <span
-                      className={`flex size-6 shrink-0 items-center justify-center rounded-full border font-mono text-[10px] ${index < 2 ? "border-primary/20 bg-primary/10 text-primary" : ""}`}
+                      className={`flex size-6 shrink-0 items-center justify-center rounded-full border font-mono text-[10px] ${index < activeStep ? "border-primary/20 bg-primary/10 text-primary" : ""}`}
                     >
-                      {index < 2 ? (
+                      {index < activeStep ? (
                         <Check className="size-3" />
                       ) : (
                         `0${index + 1}`
                       )}
                     </span>
                     {step}
-                    {index === 2 && (
+                    {isDemo && index === 2 && (
                       <span className="ml-auto rounded bg-primary/10 px-1.5 py-0.5 text-[9px] text-primary">
                         DEMO
                       </span>
@@ -424,35 +598,18 @@ export function MissionWorkspace() {
                 className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-status-warning/30 bg-status-warning/5 p-4"
               >
                 <p className="text-sm">
-                  Preview plan ready. Approve to explore the local task board.
+                  {isLive
+                    ? "Plan and PRD are ready. Review the artifacts, then approve to start execution."
+                    : "Preview plan ready. Approve to explore the local task board."}
                 </p>
                 <div className="flex gap-2">
-                  <Button
-                    size="sm"
-                    onClick={() =>
-                      setMissions((items) =>
-                        items.map((item) =>
-                          item.id === selectedId
-                            ? { ...item, status: "running" }
-                            : item,
-                        ),
-                      )
-                    }
-                  >
-                    Approve demo plan
+                  <Button size="sm" onClick={() => void missionControl("approve_plan")}>
+                    {isLive ? "Approve plan" : "Approve demo plan"}
                   </Button>
                   <Button
                     size="sm"
                     variant="outline"
-                    onClick={() =>
-                      setMissions((items) =>
-                        items.map((item) =>
-                          item.id === selectedId
-                            ? { ...item, status: "cancelled" }
-                            : item,
-                        ),
-                      )
-                    }
+                    onClick={() => void missionControl("cancel")}
                   >
                     Cancel mission
                   </Button>
@@ -471,12 +628,17 @@ export function MissionWorkspace() {
                   </TabsTrigger>
                   <TabsTrigger value="artifacts">
                     <FileText className="size-3.5" />
-                    Artifacts <span className="font-mono text-[10px]">2</span>
+                    Artifacts{" "}
+                    <span className="font-mono text-[10px]">
+                      {isLive ? (mission.artifacts?.length ?? 0) : 2}
+                    </span>
                   </TabsTrigger>
                 </TabsList>
-                <span className="hidden text-[10px] text-muted-foreground sm:block">
-                  SAMPLE WORKFLOW · NO LIVE EXECUTION
-                </span>
+                {isDemo && (
+                  <span className="hidden text-[10px] text-muted-foreground sm:block">
+                    SAMPLE WORKFLOW · NO LIVE EXECUTION
+                  </span>
+                )}
               </div>
               <TabsContent value="board" className="mt-5">
                 <div className="overflow-x-auto pb-4">
@@ -513,7 +675,7 @@ export function MissionWorkspace() {
                                   </span>
                                   {task.retries > 0 && (
                                     <span className="text-status-warning">
-                                      Retry {task.retries}/{retries}
+                                      Retry {task.retries}/{maxRetriesShown}
                                     </span>
                                   )}
                                 </div>
@@ -559,9 +721,7 @@ export function MissionWorkspace() {
                                       size="sm"
                                       variant="outline"
                                       className="h-7 flex-1 text-[10px]"
-                                      onClick={() =>
-                                        updateTask(task.id, "Queued")
-                                      }
+                                      onClick={() => denyTool(task.id)}
                                     >
                                       Deny
                                     </Button>
@@ -588,7 +748,10 @@ export function MissionWorkspace() {
                 </div>
               </TabsContent>
               <TabsContent value="artifacts" className="mt-5">
-                <MarkdownArtifactViewer title={mission.title} />
+                <MarkdownArtifactViewer
+                  title={mission.title}
+                  files={isLive ? mission.artifacts : undefined}
+                />
               </TabsContent>
             </Tabs>
           </>
@@ -599,8 +762,7 @@ export function MissionWorkspace() {
               A clear objective is all it takes.
             </h2>
             <p className="mt-2 text-sm text-muted-foreground">
-              Plan a DAG, write requirements, execute, then verify. Try a demo
-              mission.
+              Plan a DAG, write requirements, execute, then verify.
             </p>
             <div className="mt-5 flex flex-wrap justify-center gap-2">
               {[
@@ -625,12 +787,13 @@ export function MissionWorkspace() {
         )}
       </section>
       <div aria-live="polite" className="sr-only">
-        {mission?.title}: {done} of {tasks.length} tasks done. Demo only.
+        {mission?.title}: {done} of {tasks.length} tasks done.
+        {isDemo ? " Demo data." : ""}
       </div>
       <footer className="flex flex-wrap justify-between gap-2 border-t pt-4 text-[10px] text-muted-foreground">
         <span className="flex items-center gap-2">
           <Square className="size-2.5" />
-          Neiro / local preview
+          {isLive ? "Neiro / live" : "Neiro / local preview"}
         </span>
         <span>Hermes agents · 9Router inference · Supabase state</span>
       </footer>
