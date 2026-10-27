@@ -1,0 +1,29 @@
+{
+  "decisions": [
+    {
+      "id": "f5-mission-controls",
+      "title": "Pause/retries/workers controls: implement or remove?",
+      "options": ["Implement them in API, schema and engine", "Remove them from the UI for now"],
+      "recommended": "Implement them in API, schema and engine",
+      "answer": "Implement them in API, schema and engine"
+    },
+    {
+      "id": "f7-demo-data",
+      "title": "Demo data on dashboard surfaces",
+      "options": ["Keep fallback, add loading state and visible Demo badge", "Remove demo fallbacks entirely"],
+      "recommended": "Keep fallback, add loading state and visible Demo badge",
+      "answer": "Keep fallback, add loading state and visible Demo badge"
+    },
+    {
+      "id": "fix-location",
+      "title": "Where do the fixes land?",
+      "options": ["New commits on feat/phase-1-design-system (updates PR #1)", "Separate follow-up PR"],
+      "recommended": "New commits on feat/phase-1-design-system (updates PR #1)",
+      "answer": "New commits on feat/phase-1-design-system (updates PR #1)"
+    }
+  ],
+  "blocking": null,
+  "context": {
+    "template": "lib/orchestrator.ts"
+  }
+}
