@@ -55,25 +55,26 @@
 
 :root {
   --radius: 0.5rem;
-  --background: #f8fafc;
-  --foreground: #090d16;
+  --canvas: #eef0f4;
+  --background: #fafbfc;
+  --foreground: #111318;
   --card: #ffffff;
   --card-foreground: var(--foreground);
   --popover: #ffffff;
   --popover-foreground: var(--foreground);
-  --primary: #d97706;
+  --primary: #0f766e;
   --primary-foreground: #ffffff;
-  --secondary: #f1f5f9;
+  --secondary: #f1f3f6;
   --secondary-foreground: var(--foreground);
-  --muted: #f1f5f9;
-  --muted-foreground: #64748b;
-  --accent: #f1f5f9;
+  --muted: #f1f3f6;
+  --muted-foreground: #545a66;
+  --accent: #f1f3f6;
   --accent-foreground: var(--foreground);
   --destructive: #dc2626;
   --destructive-foreground: #ffffff;
-  --border: #e2e8f0;
-  --input: #cbd5e1;
-  --ring: #d97706;
+  --border: #e3e6eb;
+  --input: #cfd4dc;
+  --ring: #0f766e;
   --status-running: #2563eb;
   --status-warning: #d97706;
   --status-success: #059669;
@@ -89,39 +90,41 @@
   --sidebar-primary-foreground: var(--primary-foreground);
   --sidebar-accent: #fef3c7;
   --sidebar-accent-foreground: #92400e;
-  --sidebar-border: #e2e8f0;
+  --sidebar-border: #e3e6eb;
   --sidebar-ring: var(--ring);
   --surface-edge: rgba(255, 255, 255, 0.8);
-  --surface-shadow: rgba(15, 23, 42, 0.06);
-  --primary-edge: #b45309;
+  --surface-shadow: rgba(15, 23, 42, 0.07);
+  --primary-edge: #115e59;
 }
 
 .dark {
-  --background: #090a0f;
-  --foreground: #f8fafc;
-  --card: #11131a;
-  --popover: #11131a;
-  --primary: #f59e0b;
-  --primary-foreground: #090a0f;
-  --secondary: #171922;
-  --muted: #171922;
-  --muted-foreground: #94a3b8;
+  --canvas: #08090b;
+  --background: #111216;
+  --foreground: #f5f6f8;
+  --card: #18191e;
+  --popover: #18191e;
+  --primary: #2dd4bf;
+  --primary-foreground: #111216;
+  --secondary: #222329;
+  --accent: #222329;
+  --muted: #222329;
+  --muted-foreground: #c0c4cc;
   --destructive: #ef4444;
   --destructive-foreground: #ffffff;
-  --border: rgba(255, 255, 255, 0.08);
-  --input: rgba(255, 255, 255, 0.14);
-  --ring: #f59e0b;
+  --border: rgba(255, 255, 255, 0.09);
+  --input: rgba(255, 255, 255, 0.16);
+  --ring: #2dd4bf;
   --status-running: #38bdf8;
   --status-warning: #fbbf24;
   --status-success: #10b981;
   --status-danger: #f43f5e;
-  --sidebar: #0b0c12;
-  --sidebar-accent: rgba(245, 158, 11, 0.12);
-  --sidebar-accent-foreground: #fbbf24;
-  --sidebar-border: rgba(255, 255, 255, 0.07);
+  --sidebar: #111216;
+  --sidebar-accent: rgba(20, 184, 166, 0.12);
+  --sidebar-accent-foreground: #2dd4bf;
+  --sidebar-border: rgba(255, 255, 255, 0.08);
   --surface-edge: rgba(255, 255, 255, 0.1);
   --surface-shadow: rgba(0, 0, 0, 0.5);
-  --primary-edge: #d97706;
+  --primary-edge: #14b8a6;
 }
 
 @layer base {
@@ -130,7 +133,8 @@
   }
 
   body {
-    @apply bg-background text-foreground font-sans;
+    @apply text-foreground font-sans;
+    background: var(--canvas);
   }
 
   button:not(:disabled),
@@ -141,6 +145,33 @@
 
 .tabular-nums {
   font-variant-numeric: tabular-nums;
+}
+
+/* Casing rules:
+   - Eyebrows (small labels above headings/stats): write the source text in
+     sentence case; this class alone makes it uppercase. Never type caps.
+   - Machine IDs (model IDs, env vars, profiles): keep their real casing and
+     wrap them in .code-chip so the shift reads as intentional. */
+.eyebrow {
+  font-size: 0.6875rem;
+  line-height: 1rem;
+  font-weight: 500;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--muted-foreground);
+}
+
+.code-chip {
+  display: inline-block;
+  border: 1px solid var(--border);
+  border-radius: 0.375rem;
+  background: var(--secondary);
+  padding: 0.0625rem 0.375rem;
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  line-height: 1.25rem;
+  text-transform: none;
+  letter-spacing: 0;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -180,86 +211,604 @@ select option {
   text-wrap: balance;
 }
 
-.neiro-console [data-sidebar="menu-button"][data-active="true"] {
-  color: var(--sidebar-accent-foreground);
-  background: var(--sidebar-accent);
-  box-shadow: inset 0 1px 0 0 rgba(255, 255, 255, 0.08);
+/* ------------------------------------------------------------------
+   Navigation rail (floating pill, carved-out active tab).
+   The active item gets the page background plus two inverted corners
+   (box-shadow trick), so it looks "bitten" out of the rail.
+   ------------------------------------------------------------------ */
+.neiro-console {
+  /* Teal rail. */
+  --rail: #14b8a6;
+  --rail-deep: #0e7490;
+  --rail-active: #0f766e;
+  --rail-ink: #ffffff;
+  --notch: var(--background);
+  --notch-r: 22px;
+}
+
+.dark .neiro-console {
+  --rail: #0f766e;
+  --rail-deep: #164e63;
+  --rail-active: #2dd4bf;
+}
+
+.nav-rail {
+  background: linear-gradient(180deg, var(--rail) 0%, var(--rail-deep) 100%);
+  color: var(--rail-ink);
+  border-radius: 28px;
+  /* No outer drop shadow: it would paint a dark seam across the notch
+     opening and visually cut the rail off from the content. */
+  box-shadow: inset 0 1px 0 0 rgba(255, 255, 255, 0.2);
+}
+
+.nav-rail-logo {
+  background: rgba(255, 255, 255, 0.18);
+  color: var(--rail-ink);
+  box-shadow: inset 0 1px 0 0 rgba(255, 255, 255, 0.3);
+}
+
+.nav-rail-item {
+  position: relative;
+  height: 52px;
+  margin-left: 10px;
+}
+
+.nav-rail-link {
+  display: flex;
+  height: 100%;
+  width: 52px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 16px;
+  color: color-mix(in srgb, var(--rail-ink) 85%, transparent);
+  transition:
+    background-color 0.2s ease,
+    color 0.2s ease,
+    transform 0.2s ease;
+}
+
+.nav-rail-link:hover {
+  background: rgba(255, 255, 255, 0.14);
+  color: var(--rail-ink);
+}
+
+.nav-rail-link:focus-visible {
+  outline: 2px solid var(--rail-ink);
+  outline-offset: -4px;
+}
+
+/* Carved-out active tab. It is ONE element (.nav-rail-notch) that slides
+   between items, so switching pages shows the tab moving to the new item.
+   Step = item height (52px) + list gap (16px). */
+.nav-rail-list {
+  position: relative;
+}
+
+.nav-rail-item[data-active] .nav-rail-link,
+.nav-rail-item .nav-rail-link {
+  position: relative;
+  z-index: 1;
+}
+
+.nav-rail-notch {
+  position: absolute;
+  top: 0;
+  left: 10px;
+  /* Overlap the rail edge by 2px so no anti-aliased rail sliver shows
+     between the notch and the content. */
+  right: -2px;
+  height: 52px;
+  background: var(--notch);
+  border-radius: var(--notch-r) 0 0 var(--notch-r);
+  pointer-events: none;
+  transform: translateY(calc(var(--rail-index, 0) * 68px));
+  transition: transform 0.45s cubic-bezier(0.34, 1.25, 0.64, 1);
+}
+
+.nav-rail-notch::before,
+.nav-rail-notch::after {
+  content: "";
+  position: absolute;
+  right: 0;
+  width: var(--notch-r);
+  height: var(--notch-r);
+  background: transparent;
+  pointer-events: none;
+}
+
+.nav-rail-notch::before {
+  top: calc(var(--notch-r) * -1);
+  border-bottom-right-radius: var(--notch-r);
+  box-shadow: 6px 6px 0 6px var(--notch);
+}
+
+.nav-rail-notch::after {
+  bottom: calc(var(--notch-r) * -1);
+  border-top-right-radius: var(--notch-r);
+  box-shadow: 6px -6px 0 6px var(--notch);
+}
+
+.nav-rail-item[data-active] .nav-rail-link {
+  color: var(--rail-active);
+  background: transparent;
+  /* Pops in as the sliding tab arrives. */
+  animation: rail-pop 0.35s cubic-bezier(0.34, 1.56, 0.64, 1) 0.18s both;
+}
+
+.nav-rail-item[data-active] .nav-rail-link svg {
+  filter: drop-shadow(0 0 6px color-mix(in srgb, var(--rail-active) 55%, transparent));
+}
+
+/* A ring bursts out of the icon once the tab lands. */
+.nav-rail-item[data-active] .nav-rail-link::after {
+  content: "";
+  position: absolute;
+  inset: 6px;
+  border-radius: 14px;
+  border: 2px solid var(--rail-active);
+  opacity: 0;
+  pointer-events: none;
+  animation: rail-burst 0.6s ease-out 0.3s;
+}
+
+/* The notch stretches toward where it is going, then settles (liquid). */
+.nav-rail-notch[data-dir="down"] {
+  transform-origin: 50% 0%;
+}
+
+.nav-rail-notch[data-dir="up"] {
+  transform-origin: 50% 100%;
+}
+
+.nav-rail-notch[data-moving] {
+  animation: notch-stretch 0.55s cubic-bezier(0.3, 0.7, 0.4, 1);
+}
+
+/* Soft pill that follows the mouse between items. */
+.nav-rail-hover {
+  position: absolute;
+  top: 0;
+  left: 10px;
+  width: 52px;
+  height: 52px;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.16);
+  box-shadow: inset 0 1px 0 0 rgba(255, 255, 255, 0.25);
+  pointer-events: none;
+  opacity: 0;
+  transform: translateY(calc(var(--hover-index, 0) * 68px)) scale(0.8);
+  transition:
+    transform 0.35s cubic-bezier(0.34, 1.4, 0.64, 1),
+    opacity 0.2s ease;
+}
+
+.nav-rail-hover[data-visible] {
+  opacity: 1;
+  transform: translateY(calc(var(--hover-index, 0) * 68px)) scale(1);
+}
+
+/* The pill replaces the per-item hover fill inside the list. */
+.nav-rail-list .nav-rail-link:hover {
+  background: transparent;
+}
+
+/* Icons lean toward the cursor, grow on hover, squish on press. */
+.nav-rail-link svg {
+  translate: var(--mx, 0) var(--my, 0);
+  transition:
+    translate 0.18s ease-out,
+    scale 0.2s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.nav-rail-link:hover svg {
+  scale: 1.15;
+}
+
+.nav-rail-link:active svg {
+  scale: 0.85;
+}
+
+@keyframes rail-pop {
+  from { transform: scale(0.7); }
+  to { transform: scale(1); }
+}
+
+@keyframes rail-burst {
+  from { opacity: 0.8; transform: scale(0.6); }
+  to { opacity: 0; transform: scale(1.3); }
+}
+
+@keyframes notch-stretch {
+  0% { scale: 1 1; }
+  35% { scale: 1 1.35; }
+  65% { scale: 1 0.9; }
+  85% { scale: 1 1.04; }
+  100% { scale: 1 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .nav-rail-notch,
+  .nav-rail-hover,
+  .nav-rail-link svg,
+  .nav-rail-mobile-bubble {
+    transition: none !important;
+  }
+  .nav-rail-notch[data-moving],
+  .nav-rail-item[data-active] .nav-rail-link,
+  .nav-rail-item[data-active] .nav-rail-link::after {
+    animation: none;
+  }
+  .nav-rail-link svg {
+    translate: none;
+  }
+}
+
+/* Mobile bottom bar: same colors, active icon in a page-colored bubble. */
+.nav-rail-mobile {
+  border-radius: 9999px;
+}
+
+.nav-rail-mobile-link {
+  display: flex;
+  width: 3rem;
+  height: 3rem;
+  align-items: center;
+  justify-content: center;
+  border-radius: 9999px;
+  color: color-mix(in srgb, var(--rail-ink) 85%, transparent);
+}
+
+.nav-rail-mobile-link[data-active] {
+  color: var(--rail-active);
+}
+
+/* Page-colored bubble behind the active item; slides between items. */
+.nav-rail-mobile-link {
+  position: relative;
+  z-index: 1;
+}
+
+.nav-rail-mobile-bubble {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 3rem;
+  height: 3rem;
+  border-radius: 9999px;
+  background: var(--notch);
+  pointer-events: none;
+  opacity: 0;
+  transition:
+    transform 0.45s cubic-bezier(0.34, 1.25, 0.64, 1),
+    opacity 0.2s ease;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .nav-rail-mobile-link[data-active] {
+    animation: rail-pop 0.35s cubic-bezier(0.34, 1.56, 0.64, 1);
+  }
+}
+
+/* Two-layer body: a neutral "canvas" around one rounded app frame that
+   holds the rail and the page, so everything reads as one surface. */
+.app-canvas {
+  background: var(--canvas);
+}
+
+.app-frame {
+  background: var(--background);
+  border-radius: 2.5rem;
+  overflow: clip;
+  box-shadow:
+    0 0 0 1px var(--border),
+    0 30px 80px -30px var(--surface-shadow);
+}
+
+@media (max-width: 767px) {
+  .app-frame {
+    border-radius: 1.5rem;
+  }
 }
 
 .console-main {
-  background: var(--background);
+  background: transparent;
 }
 
 .console-main > header {
-  background: color-mix(in srgb, var(--card) 85%, transparent);
+  background: color-mix(in srgb, var(--background) 75%, transparent);
   backdrop-filter: blur(12px);
 }
 
 /* Modern 3D Floating Cards */
+/* ------------------------------------------------------------------
+   Color + depth layer
+   Accent colors are decorative identity (lanes, stat cards), never the
+   primary action: teal (--primary) is the brand and main-button color.
+   ------------------------------------------------------------------ */
+:root {
+  --c-violet: #7c3aed;
+  --c-sky: #0284c7;
+  --c-emerald: #059669;
+  --c-pink: #db2777;
+  --c-indigo: #4f46e5;
+  --c-teal: #0d9488;
+}
+
+.dark {
+  --c-violet: #b47cff;
+  --c-sky: #22d3ee;
+  --c-emerald: #2ef2a0;
+  --c-pink: #ff5cb8;
+  --c-indigo: #8b93ff;
+  --c-teal: #2ee6d0;
+}
+
+[data-accent="violet"] { --card-accent: var(--c-violet); }
+[data-accent="sky"] { --card-accent: var(--c-sky); }
+[data-accent="emerald"] { --card-accent: var(--c-emerald); }
+[data-accent="pink"] { --card-accent: var(--c-pink); }
+[data-accent="indigo"] { --card-accent: var(--c-indigo); }
+[data-accent="teal"] { --card-accent: var(--c-teal); }
+
+/* Agent lanes: each pipeline stage gets its own hue. */
+.console-lane[data-stage="orchestrator"] { --card-accent: var(--c-violet); }
+.console-lane[data-stage="spec"] { --card-accent: var(--c-sky); }
+.console-lane[data-stage="workers"] { --card-accent: var(--c-emerald); }
+.console-lane[data-stage="qa"] { --card-accent: var(--c-pink); }
+.console-lane[data-stage="reviewer"] { --card-accent: var(--c-indigo); }
+.console-lane[data-stage="scheduled"] { --card-accent: var(--c-teal); }
+
+/* Lane header: colored underline + colored name, so each lane reads as its own team. */
+section.console-lane[data-stage] > :first-child {
+  border-bottom: 2px solid var(--card-accent, var(--border));
+}
+
+section.console-lane[data-stage] > :first-child h2 {
+  color: var(--card-accent, inherit);
+}
+
+.lane-avatar {
+  color: var(--foreground);
+  background: color-mix(in srgb, var(--card-accent, var(--foreground)) 40%, transparent);
+  border-color: color-mix(in srgb, var(--card-accent, var(--border)) 85%, transparent);
+}
+
+.accent-icon {
+  color: var(--foreground);
+  background: color-mix(in srgb, var(--card-accent, var(--muted-foreground)) 40%, transparent);
+  border-color: color-mix(in srgb, var(--card-accent, var(--border)) 85%, transparent);
+}
+
+.console-main {
+  position: relative;
+  isolation: isolate;
+  overflow: clip;
+}
+
+/* 3D floating cards. --rx / --ry are set by <TiltEffect> from the pointer;
+   without JS (or with reduced motion) the card simply lifts. */
 .card-trendy {
-  border: 1px solid var(--border);
+  --rx: 0deg;
+  --ry: 0deg;
+  --mx: 50%;
+  --my: 50%;
+  position: relative;
+  border: 1px solid color-mix(in srgb, var(--card-accent, var(--border)) 45%, var(--border));
+  border-top: 3px solid var(--card-accent, var(--border));
   background:
-    linear-gradient(
-      180deg,
-      rgba(255, 255, 255, 0.025) 0%,
-      rgba(255, 255, 255, 0) 100%
+    radial-gradient(
+      120% 80% at 0% 0%,
+      color-mix(in srgb, var(--card-accent, transparent) 36%, transparent),
+      transparent 75%
     ),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.025) 0%, rgba(255, 255, 255, 0) 100%),
     var(--card);
   box-shadow:
     inset 0 1px 0 0 var(--surface-edge),
     0 4px 20px -2px var(--surface-shadow);
   border-radius: 0.875rem;
+  transform: perspective(900px) rotateX(var(--rx)) rotateY(var(--ry));
+  transform-style: preserve-3d;
   transition:
-    transform 0.2s cubic-bezier(0.16, 1, 0.3, 1),
-    box-shadow 0.2s ease,
-    border-color 0.2s ease;
+    transform 0.35s cubic-bezier(0.16, 1, 0.3, 1),
+    box-shadow 0.25s ease,
+    border-color 0.25s ease;
+  animation: card-rise 0.55s cubic-bezier(0.16, 1, 0.3, 1) backwards;
+  animation-delay: calc(var(--i, 0) * 70ms);
+}
+
+/* Pointer-following light spot. */
+.card-trendy::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  opacity: 0;
+  background: radial-gradient(
+    240px circle at var(--mx) var(--my),
+    color-mix(in srgb, var(--card-accent, #ffffff) 40%, transparent),
+    transparent 65%
+  );
+  transition: opacity 0.25s ease;
 }
 
 .card-trendy:hover {
-  transform: translateY(-2px);
+  transform: perspective(900px) rotateX(var(--rx)) rotateY(var(--ry)) translateY(-4px);
   box-shadow:
     inset 0 1px 0 0 rgba(255, 255, 255, 0.15),
-    0 12px 28px -6px var(--surface-shadow);
-  border-color: rgba(245, 158, 11, 0.3);
+    0 18px 40px -12px color-mix(in srgb, var(--card-accent, #000000) 80%, var(--surface-shadow));
+  border-color: color-mix(in srgb, var(--card-accent, var(--primary)) 100%, transparent);
 }
 
-/* Glowing Primary Launch Buttons with tactile 3D sheen */
+.card-trendy:hover::after {
+  opacity: 1;
+}
+
+@keyframes card-rise {
+  from {
+    opacity: 0;
+    transform: perspective(900px) rotateX(8deg) translateY(14px);
+  }
+  to {
+    opacity: 1;
+    transform: perspective(900px) rotateX(0deg) translateY(0);
+  }
+}
+
+/* Live "connected" dot. */
+.pulse-dot {
+  position: relative;
+  display: inline-block;
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 9999px;
+  background: var(--status-success);
+}
+
+.pulse-dot::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: inherit;
+  animation: pulse-ring 1.8s ease-out infinite;
+}
+
+@keyframes pulse-ring {
+  from { transform: scale(1); opacity: 0.7; }
+  to { transform: scale(2.6); opacity: 0; }
+}
+
+/* Primary action: the one teal, raised "keycap" button per screen.
+   Bright gradient + solid bottom edge (3D) + teal halo, so it wins over
+   the colorful cards around it. */
 .console-launch,
 .btn-glow {
   position: relative;
-  font-weight: 600;
-  border: 1px solid rgba(255, 255, 255, 0.15);
-  background: linear-gradient(180deg, #fbbf24 0%, #f59e0b 100%);
-  color: #090a0f !important;
+  overflow: hidden;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  padding-inline: 1.25rem;
+  min-height: 2.75rem;
+  border: 1px solid #99f6e4;
+  background: linear-gradient(180deg, #5eead4 0%, #2dd4bf 45%, #14b8a6 100%);
+  color: #042f2e !important;
   box-shadow:
-    inset 0 1px 0 0 rgba(255, 255, 255, 0.4),
-    0 4px 14px -1px rgba(245, 158, 11, 0.35);
-  border-radius: 0.625rem;
+    inset 0 1px 0 0 rgba(255, 255, 255, 0.7),
+    inset 0 -2px 0 0 rgba(17, 94, 89, 0.35),
+    0 4px 0 0 #0f766e,
+    0 0 0 4px rgba(45, 212, 191, 0.18),
+    0 10px 30px -4px rgba(20, 184, 166, 0.65);
+  border-radius: 0.75rem;
   transition:
     transform 140ms ease,
     box-shadow 140ms ease,
     filter 140ms ease;
+  animation: launch-attract 2.4s ease-in-out 0.8s 3;
 }
 
-.console-launch:hover,
-.btn-glow:hover {
-  filter: brightness(1.05);
-  transform: translateY(-1px);
+.console-launch:hover:not(:disabled),
+.btn-glow:hover:not(:disabled) {
+  filter: brightness(1.08) saturate(1.1);
+  transform: translateY(-2px);
+  box-shadow:
+    inset 0 1px 0 0 rgba(255, 255, 255, 0.8),
+    inset 0 -2px 0 0 rgba(17, 94, 89, 0.35),
+    0 6px 0 0 #0f766e,
+    0 0 0 6px rgba(45, 212, 191, 0.25),
+    0 16px 40px -4px rgba(20, 184, 166, 0.8);
+}
+
+/* Three gentle halo pulses after the page loads, then it stays still. */
+@keyframes launch-attract {
+  0%, 100% {
+    box-shadow:
+      inset 0 1px 0 0 rgba(255, 255, 255, 0.7),
+      inset 0 -2px 0 0 rgba(17, 94, 89, 0.35),
+      0 4px 0 0 #0f766e,
+      0 0 0 4px rgba(45, 212, 191, 0.18),
+      0 10px 30px -4px rgba(20, 184, 166, 0.65);
+  }
+  50% {
+    box-shadow:
+      inset 0 1px 0 0 rgba(255, 255, 255, 0.7),
+      inset 0 -2px 0 0 rgba(17, 94, 89, 0.35),
+      0 4px 0 0 #0f766e,
+      0 0 0 10px rgba(45, 212, 191, 0),
+      0 10px 40px 0 rgba(20, 184, 166, 0.85);
+  }
+}
+
+/* Disabled primary: stays bright teal (owner's choice), but is marked as
+   locked so it still reads as "not available yet":
+   - a lock icon on the right (::after),
+   - no hover lift, press, glow pulse or light sweep,
+   - pointer events back on, so the title tooltip explains why. */
+.console-launch:disabled,
+.btn-glow:disabled {
+  padding-right: 2.25rem;
+  filter: saturate(0.85);
+  box-shadow:
+    inset 0 1px 0 0 rgba(255, 255, 255, 0.6),
+    0 3px 0 0 #0f766e,
+    0 6px 18px -6px rgba(20, 184, 166, 0.45);
+  animation: none;
+  cursor: not-allowed;
+  pointer-events: auto;
+  opacity: 1;
+}
+
+.console-launch:disabled::after,
+.btn-glow:disabled::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  right: 0.75rem;
+  width: 0.875rem;
+  height: 0.875rem;
+  transform: translateY(-50%);
+  background: currentColor;
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='4' y='11' width='16' height='10' rx='2'/%3E%3Cpath d='M8 11V7a4 4 0 0 1 8 0v4'/%3E%3C/svg%3E") center / contain no-repeat;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='4' y='11' width='16' height='10' rx='2'/%3E%3Cpath d='M8 11V7a4 4 0 0 1 8 0v4'/%3E%3C/svg%3E") center / contain no-repeat;
+  opacity: 0.75;
+}
+
+.console-launch:active:not(:disabled),
+.btn-glow:active:not(:disabled) {
+  transform: translateY(3px);
   box-shadow:
     inset 0 1px 0 0 rgba(255, 255, 255, 0.5),
-    0 6px 20px -2px rgba(245, 158, 11, 0.45);
+    0 1px 0 0 #0f766e,
+    0 0 0 4px rgba(45, 212, 191, 0.18),
+    0 4px 12px 0 rgba(20, 184, 166, 0.4);
 }
 
-.console-launch:active,
-.btn-glow:active {
-  transform: translateY(1px);
-  box-shadow:
-    inset 0 1px 0 0 rgba(0, 0, 0, 0.2),
-    0 2px 6px 0 rgba(245, 158, 11, 0.25);
+/* Light sweep across the primary button on hover. */
+.console-launch::before,
+.btn-glow::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(
+    110deg,
+    transparent 30%,
+    rgba(255, 255, 255, 0.45) 50%,
+    transparent 70%
+  );
+  transform: translateX(-120%);
+}
+
+.console-launch:hover:not(:disabled)::before,
+.btn-glow:hover:not(:disabled)::before {
+  transition: transform 0.7s ease;
+  transform: translateX(120%);
 }
 
 /* Composer Console */
 .console-composer {
+  position: relative;
   border: 1px solid var(--border);
   border-radius: 1rem;
   background: linear-gradient(
@@ -276,10 +825,10 @@ select option {
 }
 
 .console-composer:focus-within {
-  border-color: rgba(245, 158, 11, 0.5);
+  border-color: rgba(20, 184, 166, 0.5);
   box-shadow:
     inset 0 1px 0 0 rgba(255, 255, 255, 0.15),
-    0 12px 36px -8px rgba(245, 158, 11, 0.15);
+    0 12px 36px -8px rgba(20, 184, 166, 0.15);
 }
 
 .console-composer textarea {
@@ -309,11 +858,11 @@ select option {
 }
 
 .console-task:hover {
-  transform: translateY(-2px);
-  border-color: rgba(245, 158, 11, 0.35);
+  transform: perspective(700px) rotateX(3deg) translateY(-3px);
+  border-color: color-mix(in srgb, var(--c-sky) 45%, transparent);
   box-shadow:
     inset 0 1px 0 0 rgba(255, 255, 255, 0.12),
-    0 8px 20px -4px var(--surface-shadow);
+    0 12px 24px -8px color-mix(in srgb, var(--c-sky) 30%, var(--surface-shadow));
 }
 
 /* Table and Containers */
@@ -337,5 +886,534 @@ select option {
   .console-task {
     transition: none !important;
     transform: none !important;
+    animation: none !important;
+  }
+
+  .pulse-dot::after,
+  .console-launch::before,
+  .btn-glow::before {
+    animation: none !important;
+    transition: none !important;
+  }
+
+  .card-trendy::after {
+    display: none;
+  }
+}
+
+/* Empty board columns: dashed outline so they read as "waiting", not broken. */
+.console-tray.border-dashed {
+  border-style: dashed;
+}
+
+/* ------------------------------------------------------------------
+   Login: "team lane" layout.
+   A teal rail (same colors as the dashboard nav rail) lists the agent
+   lanes; the last lane is "You" and reacts to the form state:
+   idle -> soft ring, typing -> brighter ring, pending -> pulse,
+   error -> danger color.
+   ------------------------------------------------------------------ */
+.login-shell {
+  --rail: #14b8a6;
+  --rail-deep: #0e7490;
+  --rail-ink: #ffffff;
+  --you: #5eead4;
+  position: relative;
+  min-height: 100svh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4rem 1rem;
+  background: var(--canvas);
+  color: var(--foreground);
+}
+
+.dark .login-shell {
+  --rail: #0f766e;
+  --rail-deep: #164e63;
+}
+
+.login-card {
+  width: 100%;
+  max-width: 48rem;
+  display: grid;
+  grid-template-columns: 15rem 1fr;
+  overflow: hidden;
+  border-radius: 1.75rem;
+  border: 1px solid var(--border);
+  background: var(--card);
+  color: var(--card-foreground);
+  box-shadow: 0 30px 80px -30px var(--surface-shadow);
+}
+
+.login-rail {
+  display: flex;
+  flex-direction: column;
+  gap: 2.25rem;
+  padding: 2rem 1.75rem;
+  background: linear-gradient(180deg, var(--rail) 0%, var(--rail-deep) 100%);
+  color: var(--rail-ink);
+}
+
+.login-rail-logo {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.5rem;
+  height: 2.5rem;
+  border-radius: 0.875rem;
+  background: rgba(255, 255, 255, 0.18);
+  box-shadow: inset 0 1px 0 0 rgba(255, 255, 255, 0.3);
+}
+
+.login-lanes {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 1.125rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* The line that joins the lanes, from Orchestrator down to You. */
+.login-lanes::before {
+  content: "";
+  position: absolute;
+  top: 0.5rem;
+  bottom: 0.5rem;
+  left: calc(0.4375rem - 1px);
+  width: 2px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.35);
+}
+
+.login-lane {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 0.875rem;
+  font-size: 0.875rem;
+  color: rgba(255, 255, 255, 0.88);
+  animation: login-lane-in 420ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+  animation-delay: calc(var(--i, 0) * 80ms + 120ms);
+}
+
+.login-lane-dot {
+  position: relative;
+  z-index: 1;
+  flex-shrink: 0;
+  width: 0.875rem;
+  height: 0.875rem;
+  border-radius: 9999px;
+  background: #ccfbf1;
+  transition: box-shadow 200ms ease, background-color 200ms ease;
+}
+
+.login-lane[data-you] {
+  font-weight: 600;
+  color: var(--rail-ink);
+}
+
+.login-lane[data-you] .login-lane-dot {
+  background: var(--you);
+  box-shadow: 0 0 0 4px rgba(94, 234, 212, 0.3);
+}
+
+.login-lane[data-you][data-status="typing"] .login-lane-dot {
+  box-shadow:
+    0 0 0 5px rgba(94, 234, 212, 0.45),
+    0 0 18px 4px rgba(94, 234, 212, 0.6);
+}
+
+.login-lane[data-you][data-status="pending"] .login-lane-dot {
+  animation: login-you-pulse 1s ease-in-out infinite;
+}
+
+.login-lane[data-you][data-status="error"] .login-lane-dot {
+  background: var(--status-danger);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--status-danger) 35%, transparent);
+}
+
+.login-rail-note {
+  margin-top: auto;
+  font-size: 0.8125rem;
+  color: rgba(255, 255, 255, 0.85);
+}
+
+.login-form-side {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 1.75rem;
+  padding: 3rem 2.75rem;
+}
+
+@keyframes login-lane-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes login-you-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 4px rgba(94, 234, 212, 0.3);
+  }
+  50% {
+    box-shadow:
+      0 0 0 8px rgba(94, 234, 212, 0.15),
+      0 0 22px 6px rgba(94, 234, 212, 0.7);
+  }
+}
+
+/* Phone: the rail moves on top of the form. Lanes stay a vertical list
+   with their labels (6 labels do not fit side by side), just tighter. */
+@media (max-width: 640px) {
+  .login-shell {
+    padding: 4.5rem 0.75rem 2rem;
+  }
+
+  .login-card {
+    grid-template-columns: 1fr;
+    border-radius: 1.5rem;
+  }
+
+  .login-rail {
+    gap: 1.25rem;
+    padding: 1.25rem 1.5rem;
+  }
+
+  .login-lanes {
+    gap: 0.625rem;
+  }
+
+  .login-lane {
+    font-size: 0.8125rem;
+  }
+
+  .login-rail-note {
+    display: none;
+  }
+
+  .login-form-side {
+    padding: 2rem 1.5rem;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .login-lane,
+  .login-lane[data-you][data-status="pending"] .login-lane-dot {
+    animation: none;
+  }
+}
+
+/* ------------------------------------------------------------------
+   AI team: org-chart tree (Orchestrator at the top).
+   Orchestrator on top -> trunk -> a bus -> one drop per lane.
+   Lines are a faint base plus moving teal dashes ("work flowing").
+   A branch only flows when it has at least one enabled agent, so the
+   motion tells you which lanes are live. On load the lines draw in
+   (trunk, then bus, then drops) and each lane's cards rise as its
+   drop reaches them. Hovering a lane speeds up and brightens its path.
+   ------------------------------------------------------------------ */
+.team-tree {
+  --tree-gap: 1.5rem;
+  --tree-drop: 2.5rem;
+  --tree-base: color-mix(in srgb, var(--primary) 22%, var(--border));
+  --tree-flow: var(--primary);
+}
+
+/* One color for the whole team; plain cards, no colored washes. */
+.team-tree .console-lane[data-stage] {
+  --card-accent: var(--primary);
+}
+
+.team-tree section.console-lane[data-stage] > :first-child {
+  border-bottom-color: color-mix(in srgb, var(--primary) 45%, var(--border));
+}
+
+.team-tree section.console-lane[data-stage] > :first-child h2 {
+  color: var(--foreground);
+}
+
+.team-tree .card-trendy {
+  background: var(--card);
+  border: 1px solid var(--border);
+}
+
+.team-tree .card-trendy::after {
+  background: radial-gradient(
+    220px circle at var(--mx) var(--my),
+    color-mix(in srgb, var(--primary) 12%, transparent),
+    transparent 65%
+  );
+}
+
+.team-tree .card-trendy:hover {
+  border-color: color-mix(in srgb, var(--primary) 60%, var(--border));
+  box-shadow:
+    inset 0 1px 0 0 var(--surface-edge),
+    0 14px 32px -14px color-mix(in srgb, var(--primary) 40%, var(--surface-shadow));
+}
+
+.team-tree .team-empty {
+  border-color: color-mix(in srgb, var(--primary) 45%, var(--border));
+  background: color-mix(in srgb, var(--primary) 4%, transparent);
+}
+
+.team-root {
+  max-width: 32rem;
+  margin-inline: auto;
+}
+
+/* Shared line paint: moving dashes over a faint base. */
+.team-trunk,
+.team-branch::before,
+.team-branch::after {
+  background-color: var(--tree-base);
+  background-repeat: repeat;
+}
+
+.team-trunk,
+.team-branch::after {
+  background-image: repeating-linear-gradient(
+    180deg,
+    var(--tree-flow) 0 8px,
+    transparent 8px 20px
+  );
+  background-size: 100% 20px;
+}
+
+.team-branch::before {
+  background-image: repeating-linear-gradient(
+    90deg,
+    var(--tree-flow) 0 8px,
+    transparent 8px 20px
+  );
+  background-size: 20px 100%;
+}
+
+/* Lanes with no enabled agent: still connected, but not flowing. */
+.team-trunk:not([data-live]),
+.team-branch:not([data-live])::after,
+.team-branch:not([data-live])::before {
+  background-image: none;
+}
+
+.team-trunk {
+  position: relative;
+  width: 2px;
+  height: var(--tree-drop);
+  margin-inline: auto;
+  border-radius: 2px;
+  transform-origin: top;
+  animation:
+    tree-draw-y 0.35s ease-out 0.1s both,
+    tree-flow-y 0.9s linear infinite;
+}
+
+.team-branches {
+  display: grid;
+  gap: var(--tree-gap);
+}
+
+.team-branch {
+  position: relative;
+  min-width: 0;
+}
+
+.team-branch::before,
+.team-branch::after {
+  content: "";
+  position: absolute;
+  pointer-events: none;
+  border-radius: 2px;
+}
+
+/* A glowing packet that rides down each live drop. */
+.team-pulse {
+  position: absolute;
+  z-index: 1;
+  width: 8px;
+  height: 8px;
+  border-radius: 9999px;
+  background: var(--primary);
+  box-shadow: 0 0 10px 3px color-mix(in srgb, var(--primary) 60%, transparent);
+  opacity: 0;
+  pointer-events: none;
+}
+
+.team-branch:not([data-live]) .team-pulse {
+  display: none;
+}
+
+/* Hover a lane: its path brightens and flows faster. */
+.team-branch:hover::before,
+.team-branch:hover::after,
+.team-tree:has(.team-branch[data-live]:hover) .team-trunk {
+  animation-duration: 0.35s, 0.4s;
+  filter: drop-shadow(0 0 4px color-mix(in srgb, var(--primary) 70%, transparent));
+}
+
+/* Desktop: classic org chart, lanes side by side. */
+@media (min-width: 1280px) {
+  .team-branches {
+    /* Column count comes from the component (--branch-count), so adding
+       or removing a stage keeps the bus and drops lined up. */
+    grid-template-columns: repeat(var(--branch-count, 5), minmax(0, 1fr));
+  }
+
+  .team-branch {
+    padding-top: var(--tree-drop);
+  }
+
+  /* Bus: each lane draws its slice; the ends stop at the outer drops. */
+  .team-branch::before {
+    top: 0;
+    left: calc(var(--tree-gap) / -2);
+    right: calc(var(--tree-gap) / -2);
+    height: 2px;
+    animation:
+      tree-draw-x 0.35s ease-out 0.45s both,
+      tree-flow-x 0.9s linear infinite;
+  }
+
+  .team-branch[data-side="left"]::before {
+    transform-origin: right;
+    animation-name: tree-draw-x, tree-flow-x-left;
+  }
+
+  .team-branch[data-side="right"]::before {
+    transform-origin: left;
+  }
+
+  .team-branch:first-child::before {
+    left: 50%;
+  }
+
+  .team-branch:last-child::before {
+    right: 50%;
+  }
+
+  /* Drop from the bus into the lane. */
+  .team-branch::after {
+    top: 0;
+    left: calc(50% - 1px);
+    width: 2px;
+    height: var(--tree-drop);
+    transform-origin: top;
+    animation:
+      tree-draw-y 0.3s ease-out calc(0.8s + var(--b, 0) * 60ms) both,
+      tree-flow-y 0.9s linear infinite;
+  }
+
+  .team-pulse {
+    top: -4px;
+    left: calc(50% - 4px);
+    animation: tree-pulse-drop 2.4s ease-in calc(1.4s + var(--b, 0) * 0.35s) infinite;
+  }
+
+  /* Cards rise once their drop has arrived. */
+  .team-branch .card-trendy {
+    animation-delay: calc(1s + var(--b, 0) * 80ms);
+  }
+}
+
+/* Smaller screens: a vertical tree, lanes stacked off a left spine. */
+@media (max-width: 1279px) {
+  .team-root {
+    max-width: none;
+  }
+
+  .team-trunk {
+    margin-inline: 0.75rem 0;
+  }
+
+  .team-branches {
+    position: relative;
+    padding-left: 2rem;
+  }
+
+  /* Spine. */
+  .team-branches::before {
+    content: "";
+    position: absolute;
+    top: 0;
+    bottom: 1.5rem;
+    left: calc(0.75rem);
+    width: 2px;
+    border-radius: 2px;
+    background-color: var(--tree-base);
+  }
+
+  /* Stub from the spine into each lane header. */
+  .team-branch::before {
+    top: 0.75rem;
+    left: -1.25rem;
+    width: 1.25rem;
+    height: 2px;
+    transform-origin: left;
+    animation:
+      tree-draw-x 0.3s ease-out calc(0.4s + var(--b, 0) * 70ms) both,
+      tree-flow-x 0.9s linear infinite;
+  }
+
+  .team-branch::after,
+  .team-pulse {
+    display: none;
+  }
+
+  .team-branch .card-trendy {
+    animation-delay: calc(0.5s + var(--b, 0) * 70ms);
+  }
+}
+
+@keyframes tree-draw-y {
+  from { transform: scaleY(0); }
+  to { transform: scaleY(1); }
+}
+
+@keyframes tree-draw-x {
+  from { transform: scaleX(0); }
+  to { transform: scaleX(1); }
+}
+
+@keyframes tree-flow-y {
+  from { background-position: 0 0; }
+  to { background-position: 0 20px; }
+}
+
+@keyframes tree-flow-x {
+  from { background-position: 0 0; }
+  to { background-position: 20px 0; }
+}
+
+@keyframes tree-flow-x-left {
+  from { background-position: 0 0; }
+  to { background-position: -20px 0; }
+}
+
+@keyframes tree-pulse-drop {
+  0% { opacity: 0; transform: translateY(0); }
+  15% { opacity: 1; }
+  45% { opacity: 1; transform: translateY(var(--tree-drop)); }
+  60%, 100% { opacity: 0; transform: translateY(var(--tree-drop)); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .team-trunk,
+  .team-branch::before,
+  .team-branch::after {
+    animation: none !important;
+    transform: none;
+  }
+  .team-pulse {
+    display: none;
   }
 }

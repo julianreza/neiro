@@ -313,11 +313,189 @@ export function AgentsManager() {
     else document.getElementById("new-demo-agent")?.focus();
   }
 
+  const renderLane = (stage: (typeof stages)[number], index: number) => {
+    const members = visible.filter((agent) => agent.stage === stage.id);
+    return (
+      <section
+        key={stage.id}
+        className="console-lane min-w-0 space-y-3"
+        aria-labelledby={`stage-${stage.id}`}
+        data-stage={stage.id}
+      >
+        <div className="border-b pb-3">
+          <div>
+            <h2
+              id={`stage-${stage.id}`}
+              className="flex items-center gap-2 font-semibold"
+            >
+              <span className="font-mono text-xs text-muted-foreground">
+                0{index + 1}
+              </span>
+              {stage.name}
+              <span
+                className="rounded-full bg-secondary px-2 py-0.5 text-xs font-medium tabular-nums text-muted-foreground"
+                aria-label={`${members.length} ${members.length === 1 ? "agent" : "agents"}`}
+              >
+                {members.length}
+              </span>
+            </h2>
+            <p className="mt-1 text-xs text-muted-foreground">
+              {stage.detail}
+            </p>
+          </div>
+        </div>
+        {members.map((agent, memberIndex) => (
+          <article
+            key={agent.id}
+            className="card-trendy space-y-4 p-5"
+            style={{ "--i": index + memberIndex } as React.CSSProperties}
+          >
+            <div className="flex items-start justify-between gap-3">
+              <div className="flex items-start gap-3 min-w-0">
+                <span className="lane-avatar flex size-10 shrink-0 items-center justify-center rounded-xl border text-xs font-semibold">
+                  {agent.name.slice(0, 2).toUpperCase()}
+                </span>
+                <div className="min-w-0">
+                  <h3 className="break-words font-semibold text-base tracking-tight">
+                    {agent.name}
+                  </h3>
+                  <p className="mt-0.5 break-words text-xs text-muted-foreground">
+                    {agent.specialty}
+                  </p>
+                </div>
+              </div>
+              {readOnly && (
+                <Badge
+                  variant="outline"
+                  className="text-muted-foreground text-[10px]"
+                >
+                  Demo
+                </Badge>
+              )}
+            </div>
+            <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-2 text-xs">
+              <dt className="text-muted-foreground">Model</dt>
+              <dd className="break-words">{agent.model}</dd>
+              <dt className="text-muted-foreground">Profile</dt>
+              <dd className="min-w-0">
+                <code className="code-chip break-all">{agent.profile}</code>
+              </dd>
+            </dl>
+            <div className="flex min-h-11 items-center justify-between gap-2 border-y py-2">
+              <Label
+                htmlFor={`enabled-${agent.id}`}
+                className="text-xs"
+              >
+                {agent.enabled ? "Enabled" : "Disabled"}
+              </Label>
+              <Switch
+                id={`enabled-${agent.id}`}
+                disabled={readOnly}
+                title={readOnly ? DEMO_READ_ONLY : undefined}
+                checked={agent.enabled}
+                onCheckedChange={(enabled) =>
+                  toggleAgent(agent, enabled)
+                }
+              />
+            </div>
+            {agent.activeRun && (
+              <p className="flex items-start gap-2 text-xs text-amber-700 dark:text-amber-400">
+                <ShieldAlert className="size-4 shrink-0" />
+                {readOnly
+                  ? "Demo run M-104 assigned. Deletion blocked until released."
+                  : "Assigned to an active run. Deletion is blocked until the run ends."}
+              </p>
+            )}
+            <div className="flex flex-wrap gap-1">
+              <Button
+                className="min-h-10"
+                variant="outline"
+                onClick={(event) => {
+                  actionOrigin.current = event.currentTarget;
+                  setPreview(agent);
+                  setProbeShown(false);
+                }}
+              >
+                <FlaskConical />
+                Preview
+              </Button>
+              <Button
+                className="min-h-10"
+                variant="ghost"
+                aria-label={`Edit ${agent.name}`}
+                disabled={readOnly}
+                title={readOnly ? DEMO_READ_ONLY : undefined}
+                onClick={(event) => edit(agent, event.currentTarget)}
+              >
+                <Pencil />
+                <span className="sr-only">Edit</span>
+              </Button>
+              <Button
+                className="min-h-10"
+                variant="ghost"
+                aria-label={`Clone ${agent.name}`}
+                disabled={readOnly}
+                title={readOnly ? DEMO_READ_ONLY : undefined}
+                onClick={(event) =>
+                  edit(
+                    {
+                      ...agent,
+                      id: "",
+                      name: `${agent.name} copy`,
+                      activeRun: false,
+                    },
+                    event.currentTarget,
+                  )
+                }
+              >
+                <Copy />
+                <span className="sr-only">Clone</span>
+              </Button>
+              <Button
+                className="min-h-10"
+                variant="ghost"
+                aria-label={`Delete ${agent.name}`}
+                disabled={readOnly}
+                title={readOnly ? DEMO_READ_ONLY : undefined}
+                onClick={(event) => {
+                  actionOrigin.current = event.currentTarget;
+                  setDeleting(agent);
+                }}
+              >
+                <Trash2 />
+                <span className="sr-only">Delete</span>
+              </Button>
+            </div>
+          </article>
+        ))}
+        {!members.length && (
+          <div className="team-empty rounded-xl border border-dashed p-4 text-sm text-muted-foreground">
+            {search
+              ? "No matches in this stage."
+              : "No specialist assigned."}
+            <Button
+              className="mt-3 flex min-h-10"
+              variant="outline"
+              onClick={(event) =>
+                edit(
+                  { ...blankAgent(), stage: stage.id },
+                  event.currentTarget,
+                )
+              }
+            >
+              Add to {stage.name.toLowerCase()}
+            </Button>
+          </div>
+        )}
+      </section>
+    );
+  };
+
   return (
     <div className="space-y-8 p-4 md:p-8">
       <header className="flex flex-wrap items-start justify-between gap-4">
         <div className="space-y-2">
-          <p className="text-xs font-medium tracking-[0.18em] text-muted-foreground uppercase">
+          <p className="eyebrow">
             People, translated into agents
           </p>
           <h1 className="text-3xl font-semibold tracking-tight">AI team</h1>
@@ -432,175 +610,43 @@ export function AgentsManager() {
           )}
         </section>
       ) : (
-        <div className="grid items-start gap-6 md:grid-cols-2 xl:grid-cols-3">
-          {stages.map((stage, index) => {
-            const members = visible.filter((agent) => agent.stage === stage.id);
+        <div className="team-tree">
+          {(() => {
+            const [root, ...branches] = stages;
+            const isLive = (id: Stage) =>
+              visible.some((agent) => agent.stage === id && agent.enabled);
+            const anyLive = visible.some((agent) => agent.enabled);
+            const middle = (branches.length - 1) / 2;
             return (
-              <section
-                key={stage.id}
-                className="console-lane min-w-0 space-y-3"
-                aria-labelledby={`stage-${stage.id}`}
-                data-stage={stage.id}
-              >
-                <div className="flex items-start justify-between border-b pb-3">
-                  <div>
-                    <h2
-                      id={`stage-${stage.id}`}
-                      className="flex items-center gap-2 font-semibold"
+              <>
+                <div className="team-root">{renderLane(root, 0)}</div>
+                <div
+                  className="team-trunk"
+                  aria-hidden="true"
+                  data-live={anyLive || undefined}
+                />
+                <div
+                  className="team-branches"
+                  style={
+                    { "--branch-count": branches.length } as React.CSSProperties
+                  }
+                >
+                  {branches.map((stage, i) => (
+                    <div
+                      key={stage.id}
+                      className="team-branch"
+                      data-live={isLive(stage.id) || undefined}
+                      data-side={i < middle ? "left" : "right"}
+                      style={{ "--b": i } as React.CSSProperties}
                     >
-                      <span className="font-mono text-xs text-muted-foreground">
-                        0{index + 1}
-                      </span>
-                      {stage.name}
-                    </h2>
-                    <p className="mt-1 text-xs text-muted-foreground">
-                      {stage.detail}
-                    </p>
-                  </div>
-                  <span className="font-mono text-xs text-muted-foreground">
-                    {members.length.toString().padStart(2, "0")}
-                  </span>
+                      <span className="team-pulse" aria-hidden="true" />
+                      {renderLane(stage, i + 1)}
+                    </div>
+                  ))}
                 </div>
-                {members.map((agent) => (
-                  <article key={agent.id} className="card-trendy space-y-4 p-5">
-                    <div className="flex items-start justify-between gap-3">
-                      <div className="flex items-start gap-3 min-w-0">
-                        <span className="flex size-10 shrink-0 items-center justify-center rounded-xl border border-amber-500/20 bg-amber-500/10 text-xs font-semibold text-amber-500">
-                          {agent.name.slice(0, 2).toUpperCase()}
-                        </span>
-                        <div className="min-w-0">
-                          <h3 className="break-words font-semibold text-base tracking-tight">
-                            {agent.name}
-                          </h3>
-                          <p className="mt-0.5 break-words text-xs text-muted-foreground">
-                            {agent.specialty}
-                          </p>
-                        </div>
-                      </div>
-                      {readOnly && (
-                        <Badge
-                          variant="outline"
-                          className="border-amber-500/30 text-amber-500 bg-amber-500/5 text-[10px]"
-                        >
-                          Demo
-                        </Badge>
-                      )}
-                    </div>
-                    <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-2 text-xs">
-                      <dt className="text-muted-foreground">Model</dt>
-                      <dd className="break-words">{agent.model}</dd>
-                      <dt className="text-muted-foreground">Profile</dt>
-                      <dd className="break-words font-mono">{agent.profile}</dd>
-                    </dl>
-                    <div className="flex min-h-11 items-center justify-between gap-2 border-y py-2">
-                      <Label
-                        htmlFor={`enabled-${agent.id}`}
-                        className="text-xs"
-                      >
-                        {agent.enabled ? "Enabled" : "Disabled"}
-                      </Label>
-                      <Switch
-                        id={`enabled-${agent.id}`}
-                        disabled={readOnly}
-                        title={readOnly ? DEMO_READ_ONLY : undefined}
-                        checked={agent.enabled}
-                        onCheckedChange={(enabled) =>
-                          toggleAgent(agent, enabled)
-                        }
-                      />
-                    </div>
-                    {agent.activeRun && (
-                      <p className="flex items-start gap-2 text-xs text-amber-700 dark:text-amber-400">
-                        <ShieldAlert className="size-4 shrink-0" />
-                        {readOnly
-                          ? "Demo run M-104 assigned. Deletion blocked until released."
-                          : "Assigned to an active run. Deletion is blocked until the run ends."}
-                      </p>
-                    )}
-                    <div className="flex flex-wrap gap-1">
-                      <Button
-                        className="min-h-10"
-                        variant="outline"
-                        onClick={(event) => {
-                          actionOrigin.current = event.currentTarget;
-                          setPreview(agent);
-                          setProbeShown(false);
-                        }}
-                      >
-                        <FlaskConical />
-                        Preview
-                      </Button>
-                      <Button
-                        className="min-h-10"
-                        variant="ghost"
-                        aria-label={`Edit ${agent.name}`}
-                        disabled={readOnly}
-                        title={readOnly ? DEMO_READ_ONLY : undefined}
-                        onClick={(event) => edit(agent, event.currentTarget)}
-                      >
-                        <Pencil />
-                        <span className="sr-only">Edit</span>
-                      </Button>
-                      <Button
-                        className="min-h-10"
-                        variant="ghost"
-                        aria-label={`Clone ${agent.name}`}
-                        disabled={readOnly}
-                        title={readOnly ? DEMO_READ_ONLY : undefined}
-                        onClick={(event) =>
-                          edit(
-                            {
-                              ...agent,
-                              id: "",
-                              name: `${agent.name} copy`,
-                              activeRun: false,
-                            },
-                            event.currentTarget,
-                          )
-                        }
-                      >
-                        <Copy />
-                        <span className="sr-only">Clone</span>
-                      </Button>
-                      <Button
-                        className="min-h-10"
-                        variant="ghost"
-                        aria-label={`Delete ${agent.name}`}
-                        disabled={readOnly}
-                        title={readOnly ? DEMO_READ_ONLY : undefined}
-                        onClick={(event) => {
-                          actionOrigin.current = event.currentTarget;
-                          setDeleting(agent);
-                        }}
-                      >
-                        <Trash2 />
-                        <span className="sr-only">Delete</span>
-                      </Button>
-                    </div>
-                  </article>
-                ))}
-                {!members.length && (
-                  <div className="border border-dashed p-4 text-sm text-muted-foreground">
-                    {search
-                      ? "No matches in this stage."
-                      : "No specialist assigned."}
-                    <Button
-                      className="mt-2 block min-h-10"
-                      variant="ghost"
-                      onClick={(event) =>
-                        edit(
-                          { ...blankAgent(), stage: stage.id },
-                          event.currentTarget,
-                        )
-                      }
-                    >
-                      Add to {stage.name.toLowerCase()}
-                    </Button>
-                  </div>
-                )}
-              </section>
+              </>
             );
-          })}
+          })()}
         </div>
       )}
 

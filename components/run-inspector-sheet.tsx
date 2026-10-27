@@ -39,8 +39,8 @@ export function RunInspectorSheet({
         className="max-h-[92dvh] overflow-y-auto sm:max-w-xl"
       >
         <SheetHeader>
-          <p className="mb-2 font-mono text-[10px] tracking-widest text-primary">
-            RUN INSPECTOR · DEMO
+          <p className="eyebrow mb-2">
+            Run inspector · demo
           </p>
           <SheetTitle>
             {task?.id} / {task?.title}

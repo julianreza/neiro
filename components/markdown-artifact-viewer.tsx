@@ -46,8 +46,8 @@ export function MarkdownArtifactViewer({
   return (
     <div className="grid min-h-96 overflow-hidden rounded-lg border md:grid-cols-[220px_1fr]">
       <div className="border-b bg-secondary/20 p-3 md:border-r md:border-b-0">
-        <p className="px-3 py-2 text-[10px] tracking-widest text-muted-foreground">
-          WORKSPACE FILES
+        <p className="eyebrow px-3 py-2">
+          Workspace files
         </p>
         {artifacts.map((item, index) => (
           <button
