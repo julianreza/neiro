@@ -158,3 +158,117 @@ VALUES
     false
   )
 ON CONFLICT (id) DO NOTHING;
+
+-- =====================================================================
+-- 8. Migration: orchestrator correctness fixes (PR #1 review)
+--    Idempotent: safe to re-run on an existing database.
+-- =====================================================================
+
+-- 8.1 missions: operator controls, engine phase + run tracking, last error
+ALTER TABLE missions ADD COLUMN IF NOT EXISTS pause_after_planning BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE missions ADD COLUMN IF NOT EXISTS max_parallel_workers INT NOT NULL DEFAULT 3;
+ALTER TABLE missions ADD COLUMN IF NOT EXISTS max_retries INT NOT NULL DEFAULT 2;
+ALTER TABLE missions ADD COLUMN IF NOT EXISTS workspace_path TEXT;
+ALTER TABLE missions ADD COLUMN IF NOT EXISTS phase TEXT NOT NULL DEFAULT 'planning';
+ALTER TABLE missions ADD COLUMN IF NOT EXISTS run_id TEXT;
+ALTER TABLE missions ADD COLUMN IF NOT EXISTS run_agent_id TEXT;
+ALTER TABLE missions ADD COLUMN IF NOT EXISTS run_started_at TIMESTAMPTZ;
+ALTER TABLE missions ADD COLUMN IF NOT EXISTS last_error TEXT;
+ALTER TABLE missions ADD COLUMN IF NOT EXISTS last_error_at TIMESTAMPTZ;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'missions_max_parallel_workers_chk') THEN
+    ALTER TABLE missions ADD CONSTRAINT missions_max_parallel_workers_chk
+      CHECK (max_parallel_workers BETWEEN 1 AND 10);
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'missions_max_retries_chk') THEN
+    ALTER TABLE missions ADD CONSTRAINT missions_max_retries_chk
+      CHECK (max_retries BETWEEN 0 AND 5);
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'missions_phase_chk') THEN
+    ALTER TABLE missions ADD CONSTRAINT missions_phase_chk
+      CHECK (phase IN ('planning', 'spec', 'executing', 'summarizing', 'done'));
+  END IF;
+END $$;
+
+-- 8.2 mission_tasks: DAG key, run tracking, coding output
+ALTER TABLE mission_tasks ADD COLUMN IF NOT EXISTS task_key TEXT;
+ALTER TABLE mission_tasks ADD COLUMN IF NOT EXISTS run_id TEXT;
+ALTER TABLE mission_tasks ADD COLUMN IF NOT EXISTS run_agent_id TEXT;
+ALTER TABLE mission_tasks ADD COLUMN IF NOT EXISTS run_started_at TIMESTAMPTZ;
+ALTER TABLE mission_tasks ADD COLUMN IF NOT EXISTS result_output TEXT;
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_mission_tasks_key
+  ON mission_tasks(mission_id, task_key) WHERE task_key IS NOT NULL;
+
+-- 8.3 mission_artifacts: idempotent inserts
+--     dedupe_key: plan:<missionId> | prd:<missionId> | summary:<missionId>
+--                 | qa:<taskId>:<retries> | review:<taskId>:<retries>
+ALTER TABLE mission_artifacts ADD COLUMN IF NOT EXISTS dedupe_key TEXT;
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_mission_artifacts_dedupe
+  ON mission_artifacts(dedupe_key);
+
+-- 8.4 Atomic task claim honoring missions.max_parallel_workers.
+--     Serialized per mission with a transaction-scoped advisory lock so two
+--     concurrent ticks cannot both see spare capacity and both claim.
+CREATE OR REPLACE FUNCTION neiro_claim_task(p_task_id TEXT, p_token TEXT)
+RETURNS BOOLEAN
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  v_mission TEXT;
+  v_max INT;
+  v_active INT;
+  v_rows INT;
+BEGIN
+  SELECT t.mission_id, m.max_parallel_workers
+    INTO v_mission, v_max
+    FROM mission_tasks t
+    JOIN missions m ON m.id = t.mission_id
+   WHERE t.id = p_task_id;
+
+  IF v_mission IS NULL THEN
+    RETURN false;
+  END IF;
+
+  PERFORM pg_advisory_xact_lock(hashtext(v_mission));
+
+  SELECT count(*) INTO v_active
+    FROM mission_tasks
+   WHERE mission_id = v_mission
+     AND (stage IN ('Coding', 'QA check', 'Final review') OR run_id IS NOT NULL);
+
+  IF v_active >= v_max THEN
+    RETURN false;
+  END IF;
+
+  UPDATE mission_tasks
+     SET stage = 'Coding',
+         run_id = p_token,
+         run_started_at = NOW(),
+         updated_at = NOW()
+   WHERE id = p_task_id
+     AND stage = 'Queued'
+     AND run_id IS NULL;
+
+  GET DIAGNOSTICS v_rows = ROW_COUNT;
+  RETURN v_rows = 1;
+END
+$$;
+
+-- Callable only by the service role (matches the zero-policy RLS model).
+REVOKE ALL ON FUNCTION neiro_claim_task(TEXT, TEXT) FROM PUBLIC;
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
+    REVOKE ALL ON FUNCTION neiro_claim_task(TEXT, TEXT) FROM anon;
+  END IF;
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
+    REVOKE ALL ON FUNCTION neiro_claim_task(TEXT, TEXT) FROM authenticated;
+  END IF;
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'service_role') THEN
+    GRANT EXECUTE ON FUNCTION neiro_claim_task(TEXT, TEXT) TO service_role;
+  END IF;
+END $$;

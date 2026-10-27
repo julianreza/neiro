@@ -1,5 +1,6 @@
 export type AppConfigErrorCode =
   | "missing_supabase_env"
+  | "public_service_role_key"
   | "missing_hermes_env"
   | "missing_ninerouter_env";
 
@@ -46,11 +47,30 @@ export type MissionStatus =
   | "completed"
   | "cancelled";
 
+/** Engine phase, independent of the operator-facing status. */
+export type MissionPhase =
+  | "planning"
+  | "spec"
+  | "executing"
+  | "summarizing"
+  | "done";
+
 export type Mission = {
   id: string;
   title: string;
   prompt: string;
   status: MissionStatus;
+  phase: MissionPhase;
+  pauseAfterPlanning: boolean;
+  maxParallelWorkers: number;
+  maxRetries: number;
+  workspacePath: string | null;
+  /** Active Hermes run id, or a `claim:<uuid>` token while a run is being started. */
+  runId: string | null;
+  runAgentId: string | null;
+  runStartedAt: string | null;
+  lastError: string | null;
+  lastErrorAt: string | null;
   createdAt?: string;
   updatedAt?: string;
 };
@@ -76,6 +96,14 @@ export type MissionTask = {
   approval: boolean;
   retries: number;
   result?: string | null;
+  /** Planner key (e.g. "T1"); `depends` entries refer to these keys. Null on legacy rows. */
+  taskKey: string | null;
+  /** Active Hermes run id, or a `claim:<uuid>` token while a run is being started. */
+  runId: string | null;
+  runAgentId: string | null;
+  runStartedAt: string | null;
+  /** Output of the completed coding run. */
+  resultOutput: string | null;
   createdAt?: string;
   updatedAt?: string;
 };
@@ -87,6 +115,7 @@ export type MissionArtifact = {
   title: string;
   kind: string;
   content: string;
+  dedupeKey: string | null;
   createdAt?: string;
 };
 
@@ -109,9 +138,35 @@ export type GatewayServiceStatus = {
   error?: string;
 };
 
+export type GatewayConfiguredFlags = {
+  supabase: boolean;
+  hermes: boolean;
+  ninerouter: boolean;
+};
+
+export type GatewayCronStatus = {
+  lastTickAt: string | null;
+  healthy: boolean;
+};
+
+export type GatewayProbeResult = {
+  ok: boolean;
+  latencyMs: number;
+  error?: string;
+};
+
+export type AgentHealth = GatewayProbeResult & {
+  agentId: string;
+  name: string;
+};
+
 export type GatewayStatusDTO = {
+  configured: GatewayConfiguredFlags;
+  cron: GatewayCronStatus;
   supabase: GatewayServiceStatus;
   hermes: GatewayServiceStatus;
   nineRouter: GatewayServiceStatus;
+  defaultHermes: GatewayProbeResult;
+  agentsHealth: AgentHealth[];
   checkedAt: string;
 };

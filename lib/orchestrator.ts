@@ -1,465 +1,710 @@
-import { getSupabaseAdmin } from "@/lib/supabase";
+/**
+ * Neiro orchestrator: a poll-driven state machine.
+ *
+ * Every tick (browser auto-tick, VPS cron, or an API route) calls
+ * advanceMission(). Ticks may overlap, so:
+ *  - every state change is a guarded update on the state this tick observed
+ *    (compare-and-set); losing the guard means another tick already did the
+ *    work, and this tick stops touching that entity;
+ *  - a stage first *claims* the entity with a `claim:<uuid>` token, then
+ *    starts its Hermes run, then swaps the token for the real run id;
+ *  - a run is only read on a later tick, and a transition happens only once
+ *    Hermes reports the run terminal.
+ *
+ * Mission phases: planning → spec → executing → summarizing → done.
+ * Task stages:    Queued → Coding → QA check → Final review → Done
+ *                 (failed gates go back to Queued, or to "Needs you").
+ */
 import {
-  Agent,
-  Mission,
-  MissionStatus,
-  MissionTask,
-  MissionArtifact,
-  MissionDetailDTO,
-  TaskStage,
-  AgentStage,
-} from "@/lib/types";
-import {
-  startHermesRun,
-  getHermesRun,
   createHermesSession,
+  getHermesRun,
+  startHermesRun,
+  type HermesRunStatus,
+  type HermesStartRunInput,
+  type HermesStartRunResult,
 } from "@/lib/hermes";
 import {
-  extractPlanFromOrchestratorOutput,
   extractGateVerdict,
+  extractPlanFromOrchestratorOutput,
+  truncateMiddle,
 } from "@/lib/orchestrator-parsers";
+import {
+  createSupabaseStore,
+  type MissionGuard,
+  type OrchestratorStore,
+  type TaskGuard,
+} from "@/lib/orchestrator-store";
+import type {
+  Agent,
+  AgentStage,
+  MissionDetailDTO,
+  MissionPhase,
+  MissionTask,
+  TaskStage,
+} from "@/lib/types";
+
+/* ------------------------------------------------------------------ */
+/* Dependencies                                                        */
+/* ------------------------------------------------------------------ */
+
+export interface HermesClient {
+  startRun(agent: Agent, input: HermesStartRunInput): Promise<HermesStartRunResult>;
+  getRun(agent: Agent, runId: string): Promise<HermesRunStatus>;
+  createSession(agent: Agent, title: string): Promise<string>;
+}
+
+export type OrchestratorDeps = {
+  store: OrchestratorStore;
+  hermes: HermesClient;
+  now: () => Date;
+  newId: () => string;
+};
+
+const realHermes: HermesClient = {
+  startRun: startHermesRun,
+  getRun: getHermesRun,
+  createSession: createHermesSession,
+};
+
+function resolveDeps(deps?: Partial<OrchestratorDeps>): OrchestratorDeps {
+  return {
+    store: deps?.store ?? createSupabaseStore(),
+    hermes: deps?.hermes ?? realHermes,
+    now: deps?.now ?? (() => new Date()),
+    newId: deps?.newId ?? (() => crypto.randomUUID()),
+  };
+}
 
 export type AdvanceActiveMissionsResult = {
   advancedCount: number;
   errors: string[];
 };
 
-// Database row mappings
-function mapAgentRow(row: Record<string, unknown>): Agent {
-  return {
-    id: String(row.id ?? ""),
-    name: String(row.name ?? ""),
-    role: String(row.role ?? ""),
-    stage: (row.stage as AgentStage) || "workers",
-    specialty: String(row.specialty ?? ""),
-    model: String(row.model ?? "Claude Sonnet 4.6"),
-    profile: String(row.profile ?? "default"),
-    prompt: String(row.prompt ?? ""),
-    url: String(row.url ?? ""),
-    key_enc: typeof row.key_enc === "string" ? row.key_enc : null,
-    enabled: Boolean(row.enabled ?? true),
-    activeRun: Boolean(row.active_run ?? false),
-    createdAt: typeof row.created_at === "string" ? row.created_at : undefined,
-    updatedAt: typeof row.updated_at === "string" ? row.updated_at : undefined,
-  };
+/* ------------------------------------------------------------------ */
+/* Constants & small helpers                                           */
+/* ------------------------------------------------------------------ */
+
+const CLAIM_PREFIX = "claim:";
+/** A claim older than this is assumed orphaned (crash between claim and start). */
+const STALE_CLAIM_MS = 5 * 60 * 1000;
+const MAX_ERROR_CHARS = 1000;
+const MAX_PROMPT_CONTEXT_CHARS = 12_000;
+
+const SUCCESS_STATUSES = new Set(["completed", "succeeded", "success"]);
+const FAILURE_STATUSES = new Set([
+  "failed",
+  "error",
+  "cancelled",
+  "canceled",
+  "expired",
+  "expired_404",
+]);
+
+type RunOutcome = "pending" | "success" | "failure";
+
+function classifyRun(status: string): RunOutcome {
+  const s = status.toLowerCase();
+  if (SUCCESS_STATUSES.has(s)) return "success";
+  if (FAILURE_STATUSES.has(s)) return "failure";
+  return "pending";
 }
 
-function mapMissionRow(row: Record<string, unknown>): Mission {
-  return {
-    id: String(row.id ?? ""),
-    title: String(row.title ?? ""),
-    prompt: String(row.prompt ?? ""),
-    status: (row.status as MissionStatus) || "running",
-    createdAt: typeof row.created_at === "string" ? row.created_at : undefined,
-    updatedAt: typeof row.updated_at === "string" ? row.updated_at : undefined,
-  };
+const isClaim = (runId: string | null): runId is string =>
+  runId !== null && runId.startsWith(CLAIM_PREFIX);
+
+function isStale(startedAt: string | null, now: Date): boolean {
+  if (!startedAt) return true;
+  const t = new Date(startedAt).getTime();
+  return Number.isNaN(t) || now.getTime() - t > STALE_CLAIM_MS;
 }
 
-function mapTaskRow(row: Record<string, unknown>): MissionTask {
-  const rawDepends = row.depends;
-  const depends = Array.isArray(rawDepends)
-    ? rawDepends.map((d) => String(d))
-    : [];
+const errorMessage = (err: unknown): string =>
+  err instanceof Error ? err.message : String(err);
 
-  return {
-    id: String(row.id ?? ""),
-    missionId: String(row.mission_id ?? ""),
-    title: String(row.title ?? ""),
-    stage: (row.stage as TaskStage) || "Queued",
-    agentId: typeof row.agent_id === "string" ? row.agent_id : null,
-    agentName: String(row.agent_name ?? ""),
-    model: String(row.model ?? ""),
-    tokens: Number(row.tokens ?? 0),
-    depends,
-    approval: Boolean(row.approval ?? false),
-    retries: Number(row.retries ?? 0),
-    result: typeof row.result === "string" ? row.result : null,
-    createdAt: typeof row.created_at === "string" ? row.created_at : undefined,
-    updatedAt: typeof row.updated_at === "string" ? row.updated_at : undefined,
-  };
-}
+/** Agent stage that runs each active task stage. */
+const TASK_STAGE_AGENT: Partial<Record<TaskStage, AgentStage>> = {
+  Coding: "workers",
+  "QA check": "qa",
+  "Final review": "reviewer",
+};
 
-function mapArtifactRow(row: Record<string, unknown>): MissionArtifact {
-  return {
-    id: String(row.id ?? ""),
-    missionId: String(row.mission_id ?? ""),
-    taskId: typeof row.task_id === "string" ? row.task_id : null,
-    title: String(row.title ?? ""),
-    kind: String(row.kind ?? "document"),
-    content: String(row.content ?? ""),
-    createdAt: typeof row.created_at === "string" ? row.created_at : undefined,
-  };
-}
+const TASK_STAGE_KEY: Partial<Record<TaskStage, string>> = {
+  Coding: "code",
+  "QA check": "qa",
+  "Final review": "review",
+};
+
+/** Per-pass context: problems worth surfacing on the mission as last_error. */
+type PassContext = { problems: string[] };
+
+/* ------------------------------------------------------------------ */
+/* Agent selection                                                     */
+/* ------------------------------------------------------------------ */
 
 export async function pickStageAgent(
-  stage: string,
+  stage: AgentStage,
   specialty?: string,
+  deps?: Partial<OrchestratorDeps>,
 ): Promise<Agent | null> {
-  const supabase = getSupabaseAdmin();
-  const { data: rows, error } = await supabase
-    .from("agents")
-    .select("*")
-    .eq("enabled", true)
-    .eq("stage", stage);
-
-  if (error || !rows || rows.length === 0) {
-    return null;
-  }
-
-  const agents = rows.map((r) => mapAgentRow(r as Record<string, unknown>));
+  const { store } = resolveDeps(deps);
+  const agents = await store.listEnabledAgents(stage);
+  if (agents.length === 0) return null;
 
   if (specialty) {
-    const exact = agents.find(
-      (a) => a.specialty.toLowerCase() === specialty.toLowerCase(),
-    );
+    const exact = agents.find((a) => a.specialty.toLowerCase() === specialty.toLowerCase());
     if (exact) return exact;
   }
 
-  const fullstack = agents.find(
-    (a) => a.specialty.toLowerCase() === "fullstack" || a.specialty.toLowerCase().includes("fullstack"),
-  );
-  if (fullstack) return fullstack;
-
-  return agents[0];
+  const fullstack = agents.find((a) => a.specialty.toLowerCase().includes("fullstack"));
+  return fullstack ?? agents[0];
 }
 
-export async function getMissionDetail(missionId: string): Promise<MissionDetailDTO> {
-  const supabase = getSupabaseAdmin();
+/** Agent for a task stage; coding falls back to the orchestrator like before. */
+async function pickTaskAgent(
+  stage: TaskStage,
+  task: MissionTask,
+  d: OrchestratorDeps,
+): Promise<Agent | null> {
+  const agentStage = TASK_STAGE_AGENT[stage];
+  if (!agentStage) return null;
+  const agent = await pickStageAgent(agentStage, stage === "Coding" ? task.agentName : undefined, d);
+  if (agent || stage !== "Coding") return agent;
+  return pickStageAgent("orchestrator", undefined, d);
+}
 
-  const [mRes, tRes, aRes] = await Promise.all([
-    supabase.from("missions").select("*").eq("id", missionId).single(),
-    supabase.from("mission_tasks").select("*").eq("mission_id", missionId).order("created_at", { ascending: true }),
-    supabase.from("mission_artifacts").select("*").eq("mission_id", missionId).order("created_at", { ascending: true }),
-  ]);
-
-  if (mRes.error || !mRes.data) {
-    throw new Error(`Mission ${missionId} not found`);
+/** The agent that owns a run (needed to reach its Hermes server). */
+async function findRunAgent(
+  runAgentId: string | null,
+  stages: AgentStage[],
+  d: OrchestratorDeps,
+): Promise<Agent | null> {
+  for (const stage of stages) {
+    const agents = await d.store.listEnabledAgents(stage);
+    const match = runAgentId ? agents.find((a) => a.id === runAgentId) : undefined;
+    if (match) return match;
   }
-
-  const mission = mapMissionRow(mRes.data as Record<string, unknown>);
-  const tasks = (tRes.data || []).map((r) => mapTaskRow(r as Record<string, unknown>));
-  const artifacts = (aRes.data || []).map((r) => mapArtifactRow(r as Record<string, unknown>));
-
-  return {
-    ...mission,
-    tasks,
-    artifacts,
-  };
+  return null;
 }
 
-export async function advanceMission(missionId: string): Promise<MissionDetailDTO> {
-  const supabase = getSupabaseAdmin();
-  const detail = await getMissionDetail(missionId);
+/* ------------------------------------------------------------------ */
+/* Public API                                                          */
+/* ------------------------------------------------------------------ */
 
-  // If already terminal, return
-  if (detail.status === "completed" || detail.status === "cancelled") {
+export async function getMissionDetail(
+  missionId: string,
+  deps?: Partial<OrchestratorDeps>,
+): Promise<MissionDetailDTO> {
+  return resolveDeps(deps).store.getMissionDetail(missionId);
+}
+
+/**
+ * Advance one mission by at most one step per entity. Safe to call
+ * concurrently: overlapping calls never duplicate a run, an artifact or a
+ * retry. Missions that are not `running` (awaiting approval, completed,
+ * cancelled) are left untouched.
+ */
+export async function advanceMission(
+  missionId: string,
+  deps?: Partial<OrchestratorDeps>,
+): Promise<MissionDetailDTO> {
+  const d = resolveDeps(deps);
+  const detail = await d.store.getMissionDetail(missionId);
+
+  if (detail.status !== "running") {
     return detail;
   }
 
-  // 1. Planning stage: mission has no tasks yet
-  if (detail.tasks.length === 0) {
-    const pmAgent = await pickStageAgent("orchestrator");
-    if (!pmAgent) {
-      return detail;
-    }
+  const ctx: PassContext = { problems: [] };
 
-    const planRunResult = await startHermesRun(pmAgent, {
-      prompt: `Break down the following mission into sequential/parallel execution tasks in JSON format with fields: tasks: [{ taskKey: "T1", title: string, description: string, specialty: string, dependsOn: string[] }].\n\nMission Objective: ${detail.prompt}`,
-      idempotencyKey: `plan-${detail.id}`,
-    });
-
-    if (planRunResult.kind === "deferred") {
-      return detail;
-    }
-
-    const runStatus = await getHermesRun(pmAgent, planRunResult.runId);
-    const outputText = runStatus.output || "";
-
-    if (!outputText && runStatus.status !== "completed") {
-      return detail;
-    }
-
-    const parsedPlan = extractPlanFromOrchestratorOutput(outputText, detail.prompt);
-
-    // Insert task_plan artifact
-    await supabase.from("mission_artifacts").insert({
-      id: crypto.randomUUID(),
-      mission_id: detail.id,
-      title: "Task Breakdown Plan",
-      kind: "task_plan",
-      content: outputText || JSON.stringify(parsedPlan, null, 2),
-    });
-
-    // Insert tasks into mission_tasks
-    const taskInserts = parsedPlan.tasks.map((t) => ({
-      id: crypto.randomUUID(),
-      mission_id: detail.id,
-      title: t.title,
-      stage: "Queued",
-      agent_name: t.specialty,
-      model: pmAgent.model,
-      tokens: 0,
-      depends: t.dependsOn,
-      approval: false,
-      retries: 0,
-      result: t.description,
-    }));
-
-    if (taskInserts.length > 0) {
-      await supabase.from("mission_tasks").insert(taskInserts);
-    }
-
-    // Try spec writer stage if spec agent exists
-    const specAgent = await pickStageAgent("spec");
-    if (specAgent) {
-      const specRun = await startHermesRun(specAgent, {
-        prompt: `Write a Product Requirements Document (PRD) for this mission:\n\nMission Objective: ${detail.prompt}\n\nTasks:\n${JSON.stringify(parsedPlan.tasks, null, 2)}`,
-        idempotencyKey: `spec-${detail.id}`,
-      });
-
-      if (specRun.kind === "started") {
-        const specStatus = await getHermesRun(specAgent, specRun.runId);
-        if (specStatus.output) {
-          await supabase.from("mission_artifacts").insert({
-            id: crypto.randomUUID(),
-            mission_id: detail.id,
-            title: "Product Requirements Document (PRD)",
-            kind: "prd",
-            content: specStatus.output,
-          });
-        }
-      }
-    }
-
-    return getMissionDetail(missionId);
+  switch (detail.phase) {
+    case "planning":
+    case "spec":
+      await stepMissionRun(detail, d, ctx);
+      break;
+    case "executing":
+      await stepTasks(detail, d, ctx);
+      break;
+    case "summarizing":
+      await stepSummarize(detail, d);
+      break;
+    case "done":
+      break;
   }
 
-  // 2. Running stage: reconcile active tasks
-
-  // Check if all tasks are Done
-  if (detail.tasks.length > 0 && detail.tasks.every((t) => t.stage === "Done")) {
-      // Create mission summary artifact
-      const summaryAgent = (await pickStageAgent("reviewer")) || (await pickStageAgent("orchestrator"));
-      if (summaryAgent) {
-        const summaryOutput = `Mission completed successfully. All ${detail.tasks.length} tasks passed QA and final review.`;
-        await supabase.from("mission_artifacts").insert({
-          id: crypto.randomUUID(),
-          mission_id: detail.id,
-          title: "Mission Summary",
-          kind: "mission_summary",
-          content: summaryOutput,
-        });
-      }
-
-      await supabase
-        .from("missions")
-        .update({ status: "completed", updated_at: new Date().toISOString() })
-        .eq("id", detail.id);
-    return getMissionDetail(missionId);
+  if (ctx.problems.length > 0) {
+    await d.store.setMissionError(missionId, ctx.problems.join("; ").slice(0, MAX_ERROR_CHARS));
+  } else if (detail.lastError) {
+    await d.store.setMissionError(missionId, null);
   }
 
-  // Process tasks
-  for (const task of detail.tasks) {
-    if (task.stage === "Done" || task.stage === "Needs you") {
-      continue;
-    }
-
-    // Check dependencies
-    const depsDone = task.depends.every((dep) => {
-      // dep can be title or key, check matches
-      return detail.tasks.some(
-        (t) => (t.id === dep || t.title.includes(dep)) && t.stage === "Done",
-      );
-    });
-
-    if (!depsDone && task.depends.length > 0) {
-      continue;
-    }
-
-    if (task.stage === "Queued") {
-      // Start Coding stage
-      const workerAgent = (await pickStageAgent("workers")) || (await pickStageAgent("orchestrator"));
-      if (!workerAgent) continue;
-
-      let sessionId: string | undefined;
-      try {
-        sessionId = await createHermesSession(workerAgent, `Task: ${task.title}`);
-      } catch {
-        // Fallback without session
-      }
-
-      const runResult = await startHermesRun(workerAgent, {
-        prompt: `Execute the following task:\nTitle: ${task.title}\nRequirements: ${task.result || task.title}`,
-        sessionId,
-        idempotencyKey: `code-${task.id}-${task.retries}`,
-      });
-
-      if (runResult.kind === "started") {
-        await supabase
-          .from("mission_tasks")
-          .update({
-            stage: "Coding",
-            agent_id: workerAgent.id,
-            agent_name: workerAgent.name,
-            model: workerAgent.model,
-            updated_at: new Date().toISOString(),
-          })
-          .eq("id", task.id);
-      }
-    } else if (task.stage === "Coding") {
-      // Check Coding result -> transition to QA check
-      const qaAgent = await pickStageAgent("qa");
-      if (qaAgent) {
-        const qaRun = await startHermesRun(qaAgent, {
-          prompt: `Verify the deliverables for task "${task.title}". End your response with VERDICT: PASS or VERDICT: FAIL.`,
-          idempotencyKey: `qa-${task.id}-${task.retries}`,
-        });
-
-        if (qaRun.kind === "started") {
-          const runStatus = await getHermesRun(qaAgent, qaRun.runId);
-          if (runStatus.output) {
-            const verdict = extractGateVerdict(runStatus.output, "PASS", "FAIL");
-            await supabase.from("mission_artifacts").insert({
-              id: crypto.randomUUID(),
-              mission_id: detail.id,
-              task_id: task.id,
-              title: `QA Report: ${task.title}`,
-              kind: "qa_report",
-              content: runStatus.output,
-            });
-
-            if (verdict.verdict === "PASS") {
-              await supabase
-                .from("mission_tasks")
-                .update({
-                  stage: "QA check",
-                  agent_id: qaAgent.id,
-                  agent_name: qaAgent.name,
-                  updated_at: new Date().toISOString(),
-                })
-                .eq("id", task.id);
-            } else {
-              // Retry or Needs you
-              if (task.retries < 2) {
-                await supabase
-                  .from("mission_tasks")
-                  .update({
-                    stage: "Queued",
-                    retries: task.retries + 1,
-                    updated_at: new Date().toISOString(),
-                  })
-                  .eq("id", task.id);
-              } else {
-                await supabase
-                  .from("mission_tasks")
-                  .update({
-                    stage: "Needs you",
-                    updated_at: new Date().toISOString(),
-                  })
-                  .eq("id", task.id);
-              }
-            }
-          }
-        }
-      } else {
-        // No QA agent -> advance directly to Final review or Done
-        await supabase
-          .from("mission_tasks")
-          .update({ stage: "Final review", updated_at: new Date().toISOString() })
-          .eq("id", task.id);
-      }
-    } else if (task.stage === "QA check") {
-      // QA Check -> Final Review
-      const reviewAgent = await pickStageAgent("reviewer");
-      if (reviewAgent) {
-        const reviewRun = await startHermesRun(reviewAgent, {
-          prompt: `Review security, accessibility, and quality for task "${task.title}". End with VERDICT: APPROVED or VERDICT: CHANGES_REQUESTED.`,
-          idempotencyKey: `review-${task.id}-${task.retries}`,
-        });
-
-        if (reviewRun.kind === "started") {
-          const runStatus = await getHermesRun(reviewAgent, reviewRun.runId);
-          if (runStatus.output) {
-            const verdict = extractGateVerdict(runStatus.output, "APPROVED", "CHANGES_REQUESTED");
-            await supabase.from("mission_artifacts").insert({
-              id: crypto.randomUUID(),
-              mission_id: detail.id,
-              task_id: task.id,
-              title: `Review Report: ${task.title}`,
-              kind: "review_report",
-              content: runStatus.output,
-            });
-
-            if (verdict.verdict === "APPROVED") {
-              await supabase
-                .from("mission_tasks")
-                .update({ stage: "Done", updated_at: new Date().toISOString() })
-                .eq("id", task.id);
-            } else {
-              if (task.retries < 2) {
-                await supabase
-                  .from("mission_tasks")
-                  .update({
-                    stage: "Queued",
-                    retries: task.retries + 1,
-                    updated_at: new Date().toISOString(),
-                  })
-                  .eq("id", task.id);
-              } else {
-                await supabase
-                  .from("mission_tasks")
-                  .update({
-                    stage: "Needs you",
-                    updated_at: new Date().toISOString(),
-                  })
-                  .eq("id", task.id);
-              }
-            }
-          }
-        }
-      } else {
-        await supabase
-          .from("mission_tasks")
-          .update({ stage: "Done", updated_at: new Date().toISOString() })
-          .eq("id", task.id);
-      }
-    } else if (task.stage === "Final review") {
-      await supabase
-        .from("mission_tasks")
-        .update({ stage: "Done", updated_at: new Date().toISOString() })
-        .eq("id", task.id);
-    }
-  }
-
-  return getMissionDetail(missionId);
+  return d.store.getMissionDetail(missionId);
 }
 
-export async function advanceActiveMissions(): Promise<AdvanceActiveMissionsResult> {
-  const supabase = getSupabaseAdmin();
-  const { data: missions, error } = await supabase
-    .from("missions")
-    .select("id")
-    .in("status", ["running", "awaiting_plan_approval"]);
-
-  if (error || !missions) {
-    return {
-      advancedCount: 0,
-      errors: error ? [error.message] : [],
-    };
+export async function advanceActiveMissions(
+  deps?: Partial<OrchestratorDeps>,
+): Promise<AdvanceActiveMissionsResult> {
+  const d = resolveDeps(deps);
+  let ids: string[];
+  try {
+    ids = await d.store.listActiveMissionIds();
+  } catch (err: unknown) {
+    return { advancedCount: 0, errors: [errorMessage(err)] };
   }
 
   let advancedCount = 0;
   const errors: string[] = [];
 
-  for (const m of missions) {
+  for (const id of ids) {
     try {
-      const mid = String((m as Record<string, unknown>).id);
-      await advanceMission(mid);
+      await advanceMission(id, d);
       advancedCount++;
     } catch (err: unknown) {
-      errors.push(err instanceof Error ? err.message : String(err));
+      errors.push(errorMessage(err));
+      await reportAdvanceError(id, err, undefined, d);
     }
   }
 
   return { advancedCount, errors };
+}
+
+/**
+ * Log an orchestration failure and store it on the mission so the UI and
+ * operators can see it. Never throws: a failing error path must not break the
+ * caller's response.
+ */
+export async function reportAdvanceError(
+  missionId: string,
+  err: unknown,
+  taskId?: string,
+  deps?: Partial<OrchestratorDeps>,
+): Promise<void> {
+  const message = errorMessage(err);
+  console.error("[orchestrator] advance failed", { missionId, taskId, error: message });
+  try {
+    await resolveDeps(deps).store.setMissionError(missionId, message.slice(0, MAX_ERROR_CHARS));
+  } catch (storeErr: unknown) {
+    console.error("[orchestrator] could not record mission error", {
+      missionId,
+      error: errorMessage(storeErr),
+    });
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Mission-level runs: planning and spec                               */
+/* ------------------------------------------------------------------ */
+
+const MISSION_PHASE_AGENT: Record<"planning" | "spec", AgentStage> = {
+  planning: "orchestrator",
+  spec: "spec",
+};
+
+function planPrompt(m: MissionDetailDTO): string {
+  return `Break down the following mission into sequential/parallel execution tasks in JSON format with fields: tasks: [{ taskKey: "T1", title: string, description: string, specialty: string, dependsOn: string[] }].\n\nMission Objective: ${m.prompt}`;
+}
+
+function specPrompt(m: MissionDetailDTO): string {
+  const tasks = m.tasks.map((t) => ({ taskKey: t.taskKey, title: t.title, description: t.result }));
+  return `Write a Product Requirements Document (PRD) for this mission:\n\nMission Objective: ${m.prompt}\n\nTasks:\n${JSON.stringify(tasks, null, 2)}`;
+}
+
+async function stepMissionRun(m: MissionDetailDTO, d: OrchestratorDeps, ctx: PassContext) {
+  const phase = m.phase as "planning" | "spec";
+  const guard: MissionGuard = { phase, runId: m.runId, status: "running" };
+  const clearRun = { runId: null, runAgentId: null, runStartedAt: null };
+
+  // 1. No run yet: claim, start, record.
+  if (m.runId === null) {
+    const agent = await pickStageAgent(MISSION_PHASE_AGENT[phase], undefined, d);
+    if (!agent) {
+      if (phase === "spec") {
+        await enterExecuting(m, guard, d); // spec writer is optional
+      } else {
+        ctx.problems.push("No enabled orchestrator agent to plan this mission");
+      }
+      return;
+    }
+
+    const token = CLAIM_PREFIX + d.newId();
+    const claimed = await d.store.updateMissionIf(m.id, guard, {
+      runId: token,
+      runAgentId: agent.id,
+      runStartedAt: d.now().toISOString(),
+    });
+    if (!claimed) return;
+
+    const claimGuard: MissionGuard = { phase, runId: token };
+    let started: HermesStartRunResult;
+    try {
+      started = await d.hermes.startRun(agent, {
+        prompt: phase === "planning" ? planPrompt(m) : specPrompt(m),
+        // The claim token makes each attempt distinct (a failed run is not
+        // replayed) while a retried start of the same claim stays deduped.
+        idempotencyKey: `${phase}-${m.id}-${token.slice(CLAIM_PREFIX.length)}`,
+      });
+    } catch (err: unknown) {
+      await d.store.updateMissionIf(m.id, claimGuard, clearRun);
+      ctx.problems.push(`Could not start ${phase} run: ${errorMessage(err)}`);
+      return;
+    }
+
+    if (started.kind === "deferred") {
+      await d.store.updateMissionIf(m.id, claimGuard, clearRun);
+      return;
+    }
+
+    await d.store.updateMissionIf(m.id, claimGuard, { runId: started.runId });
+    return; // read the run on a later tick
+  }
+
+  // 2. Orphaned claim: release it so the next tick can start again.
+  if (isClaim(m.runId)) {
+    if (isStale(m.runStartedAt, d.now())) {
+      await d.store.updateMissionIf(m.id, guard, clearRun);
+    }
+    return;
+  }
+
+  // 3. Poll the run; act only once it is terminal.
+  const agent = await findRunAgent(m.runAgentId, [MISSION_PHASE_AGENT[phase]], d);
+  if (!agent) {
+    ctx.problems.push(`Agent ${m.runAgentId ?? "(unknown)"} for the ${phase} run is no longer enabled`);
+    await d.store.updateMissionIf(m.id, guard, clearRun);
+    return;
+  }
+
+  const run = await d.hermes.getRun(agent, m.runId);
+  const outcome = classifyRun(run.status);
+  if (outcome === "pending") return;
+
+  const output = (run.output ?? "").trim();
+  if (outcome === "failure" || !output) {
+    ctx.problems.push(
+      outcome === "failure"
+        ? `${phase} run ${run.status}${run.error ? `: ${run.error}` : ""}`
+        : `${phase} run completed with empty output`,
+    );
+    await d.store.updateMissionIf(m.id, guard, clearRun);
+    return;
+  }
+
+  if (phase === "planning") {
+    const plan = extractPlanFromOrchestratorOutput(output, m.prompt);
+    const keys = new Set(plan.tasks.map((t) => t.taskKey));
+
+    // Concurrent ticks may both get here: both inserts are conflict-ignoring.
+    await d.store.insertTasks(
+      plan.tasks.map((t) => ({
+        id: d.newId(),
+        missionId: m.id,
+        taskKey: t.taskKey,
+        title: t.title,
+        agentName: t.specialty,
+        model: agent.model,
+        depends: t.dependsOn.filter((dep) => keys.has(dep)),
+        result: t.description,
+      })),
+    );
+    await d.store.insertArtifactOnce({
+      missionId: m.id,
+      title: "Task Breakdown Plan",
+      kind: "task_plan",
+      content: output,
+      dedupeKey: `plan:${m.id}`,
+    });
+    await d.store.updateMissionIf(m.id, guard, { phase: "spec", ...clearRun });
+    return;
+  }
+
+  await d.store.insertArtifactOnce({
+    missionId: m.id,
+    title: "Product Requirements Document (PRD)",
+    kind: "prd",
+    content: output,
+    dedupeKey: `prd:${m.id}`,
+  });
+  await enterExecuting(m, guard, d);
+}
+
+/** spec → executing; pauses for operator approval when requested. */
+async function enterExecuting(m: MissionDetailDTO, guard: MissionGuard, d: OrchestratorDeps) {
+  await d.store.updateMissionIf(m.id, guard, {
+    phase: "executing",
+    runId: null,
+    runAgentId: null,
+    runStartedAt: null,
+    ...(m.pauseAfterPlanning ? { status: "awaiting_plan_approval" as const } : {}),
+  });
+}
+
+/* ------------------------------------------------------------------ */
+/* Summary                                                             */
+/* ------------------------------------------------------------------ */
+
+async function stepSummarize(m: MissionDetailDTO, d: OrchestratorDeps) {
+  await d.store.insertArtifactOnce({
+    missionId: m.id,
+    title: "Mission Summary",
+    kind: "mission_summary",
+    content: `Mission completed successfully. All ${m.tasks.length} tasks passed QA and final review.`,
+    dedupeKey: `summary:${m.id}`,
+  });
+  await d.store.updateMissionIf(
+    m.id,
+    { phase: "summarizing", runId: null, status: "running" },
+    { phase: "done" satisfies MissionPhase, status: "completed" },
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Task-level runs                                                     */
+/* ------------------------------------------------------------------ */
+
+async function stepTasks(m: MissionDetailDTO, d: OrchestratorDeps, ctx: PassContext) {
+  if (m.tasks.length > 0 && m.tasks.every((t) => t.stage === "Done")) {
+    await d.store.updateMissionIf(
+      m.id,
+      { phase: "executing", runId: null, status: "running" },
+      { phase: "summarizing" },
+    );
+    return;
+  }
+
+  const stageByKey = new Map<string, TaskStage>();
+  for (const t of m.tasks) {
+    if (t.taskKey) stageByKey.set(t.taskKey, t.stage);
+  }
+
+  for (const task of m.tasks) {
+    if (task.stage === "Done" || task.stage === "Needs you") continue;
+    try {
+      await stepTask(m, task, stageByKey, d, ctx);
+    } catch (err: unknown) {
+      ctx.problems.push(`Task ${task.taskKey ?? task.id}: ${errorMessage(err)}`);
+      console.error("[orchestrator] task step failed", {
+        missionId: m.id,
+        taskId: task.id,
+        error: errorMessage(err),
+      });
+    }
+  }
+}
+
+async function stepTask(
+  m: MissionDetailDTO,
+  task: MissionTask,
+  stageByKey: Map<string, TaskStage>,
+  d: OrchestratorDeps,
+  ctx: PassContext,
+) {
+  const guard: TaskGuard = { stage: task.stage, runId: task.runId };
+  const clearRun = { runId: null, runAgentId: null, runStartedAt: null };
+
+  // Orphaned claim: release; the stage is kept, so the next tick restarts it.
+  if (isClaim(task.runId)) {
+    if (isStale(task.runStartedAt, d.now())) {
+      await d.store.updateTaskIf(task.id, guard, clearRun);
+    }
+    return;
+  }
+
+  // Queued: wait for dependencies, then claim a worker slot.
+  if (task.stage === "Queued") {
+    if (task.depends.length > 0 && task.taskKey === null) {
+      ctx.problems.push(
+        `Legacy task "${task.title}" has dependencies but no task_key; resolve it manually`,
+      );
+      return;
+    }
+    const depsDone = task.depends.every((key) => stageByKey.get(key) === "Done");
+    if (!depsDone) return;
+
+    const token = CLAIM_PREFIX + d.newId();
+    if (!(await d.store.claimTask(task.id, token))) return; // capacity or lost race
+    await startTaskRun(m, { ...task, stage: "Coding", runId: token }, d, ctx);
+    return;
+  }
+
+  // Active stage without a run: start that stage's run (or skip a missing gate).
+  if (task.runId === null) {
+    const agent = await pickTaskAgent(task.stage, task, d);
+    if (!agent) {
+      if (task.stage === "QA check") {
+        await d.store.updateTaskIf(task.id, guard, { stage: "Final review" });
+      } else if (task.stage === "Final review") {
+        await d.store.updateTaskIf(task.id, guard, { stage: "Done" });
+      } else {
+        ctx.problems.push(`No enabled worker agent for task "${task.title}"`);
+      }
+      return;
+    }
+
+    const token = CLAIM_PREFIX + d.newId();
+    const claimed = await d.store.updateTaskIf(task.id, guard, {
+      runId: token,
+      runStartedAt: d.now().toISOString(),
+    });
+    if (!claimed) return;
+    await startTaskRun(m, { ...task, runId: token }, d, ctx, agent);
+    return;
+  }
+
+  // Poll the run; act only once it is terminal.
+  const agentStage = TASK_STAGE_AGENT[task.stage];
+  const ownerStages: AgentStage[] = agentStage
+    ? task.stage === "Coding"
+      ? [agentStage, "orchestrator"]
+      : [agentStage]
+    : [];
+  const agent = await findRunAgent(task.runAgentId, ownerStages, d);
+  if (!agent) {
+    ctx.problems.push(`Agent ${task.runAgentId ?? "(unknown)"} for task "${task.title}" is no longer enabled`);
+    await d.store.updateTaskIf(task.id, guard, clearRun);
+    return;
+  }
+
+  const run = await d.hermes.getRun(agent, task.runId);
+  const outcome = classifyRun(run.status);
+  if (outcome === "pending") return;
+
+  const output = (run.output ?? "").trim();
+  const tokens = task.tokens + (run.tokens ?? 0);
+
+  if (outcome === "failure" || !output) {
+    await failAttempt(m, task, guard, tokens, d);
+    return;
+  }
+
+  if (task.stage === "Coding") {
+    await d.store.updateTaskIf(task.id, guard, {
+      stage: "QA check",
+      resultOutput: output,
+      tokens,
+      ...clearRun,
+    });
+    return;
+  }
+
+  const isQa = task.stage === "QA check";
+  await d.store.insertArtifactOnce({
+    missionId: m.id,
+    taskId: task.id,
+    title: `${isQa ? "QA Report" : "Review Report"}: ${task.title}`,
+    kind: isQa ? "qa_report" : "review_report",
+    content: output,
+    dedupeKey: `${isQa ? "qa" : "review"}:${task.id}:${task.retries}`,
+  });
+
+  const verdict = isQa
+    ? extractGateVerdict(output, "PASS", "FAIL")
+    : extractGateVerdict(output, "APPROVED", "CHANGES_REQUESTED");
+  const passed = verdict.verdict === (isQa ? "PASS" : "APPROVED");
+
+  if (!passed) {
+    await failAttempt(m, task, guard, tokens, d);
+    return;
+  }
+
+  await d.store.updateTaskIf(task.id, guard, {
+    stage: isQa ? "Final review" : "Done",
+    tokens,
+    ...clearRun,
+  });
+}
+
+/** Failed gate or run: retry while under the mission's cap, else escalate. */
+async function failAttempt(
+  m: MissionDetailDTO,
+  task: MissionTask,
+  guard: TaskGuard,
+  tokens: number,
+  d: OrchestratorDeps,
+) {
+  const clearRun = { runId: null, runAgentId: null, runStartedAt: null };
+  if (task.retries < m.maxRetries) {
+    await d.store.updateTaskIf(task.id, guard, {
+      stage: "Queued",
+      retries: task.retries + 1,
+      tokens,
+      ...clearRun,
+    });
+  } else {
+    await d.store.updateTaskIf(task.id, guard, { stage: "Needs you", tokens, ...clearRun });
+  }
+}
+
+function taskPrompt(m: MissionDetailDTO, task: MissionTask): string {
+  const deliverable = truncateMiddle(task.resultOutput ?? "", MAX_PROMPT_CONTEXT_CHARS);
+  switch (task.stage) {
+    case "Coding":
+      return [
+        "Execute the following task:",
+        `Title: ${task.title}`,
+        `Requirements: ${task.result || task.title}`,
+        m.workspacePath ? `Workspace: ${m.workspacePath}` : "",
+      ]
+        .filter(Boolean)
+        .join("\n");
+    case "QA check":
+      return `Verify the deliverables for task "${task.title}".\n\nRequirements: ${task.result || task.title}\n\nDeliverable:\n${deliverable}\n\nEnd your response with VERDICT: PASS or VERDICT: FAIL.`;
+    default:
+      return `Review security, accessibility, and quality for task "${task.title}".\n\nDeliverable:\n${deliverable}\n\nEnd with VERDICT: APPROVED or VERDICT: CHANGES_REQUESTED.`;
+  }
+}
+
+/**
+ * Start the Hermes run for a task that this tick has already claimed
+ * (`task.runId` is our claim token), then swap the token for the run id.
+ */
+async function startTaskRun(
+  m: MissionDetailDTO,
+  task: MissionTask,
+  d: OrchestratorDeps,
+  ctx: PassContext,
+  knownAgent?: Agent,
+) {
+  const claimGuard: TaskGuard = { stage: task.stage, runId: task.runId };
+  const release = () =>
+    d.store.updateTaskIf(task.id, claimGuard, { runId: null, runStartedAt: null });
+
+  const agent = knownAgent ?? (await pickTaskAgent(task.stage, task, d));
+  if (!agent) {
+    await release();
+    ctx.problems.push(`No enabled agent for ${task.stage} on task "${task.title}"`);
+    return;
+  }
+
+  let sessionId: string | undefined;
+  if (task.stage === "Coding") {
+    try {
+      sessionId = await d.hermes.createSession(agent, `Task: ${task.title}`);
+    } catch {
+      sessionId = undefined; // runs work without a session
+    }
+  }
+
+  let started: HermesStartRunResult;
+  try {
+    started = await d.hermes.startRun(agent, {
+      prompt: taskPrompt(m, task),
+      sessionId,
+      idempotencyKey: `${TASK_STAGE_KEY[task.stage]}-${task.id}-${task.retries}`,
+    });
+  } catch (err: unknown) {
+    await release();
+    throw err;
+  }
+
+  if (started.kind === "deferred") {
+    await release();
+    return;
+  }
+
+  await d.store.updateTaskIf(task.id, claimGuard, {
+    runId: started.runId,
+    runAgentId: agent.id,
+    agentId: agent.id,
+    agentName: agent.name,
+    model: agent.model,
+  });
 }

@@ -1,0 +1,343 @@
+import type { SupabaseClient } from "@supabase/supabase-js";
+import { getSupabaseAdmin } from "@/lib/supabase";
+import type {
+  Agent,
+  AgentStage,
+  Mission,
+  MissionArtifact,
+  MissionDetailDTO,
+  MissionPhase,
+  MissionStatus,
+  MissionTask,
+  TaskStage,
+} from "@/lib/types";
+
+/* ------------------------------------------------------------------ */
+/* Store contract                                                      */
+/* ------------------------------------------------------------------ */
+
+/** Observed state a guarded task update must still match. */
+export type TaskGuard = { stage: TaskStage; runId: string | null };
+
+/** Observed state a guarded mission update must still match. */
+export type MissionGuard = {
+  phase: MissionPhase;
+  runId: string | null;
+  status?: MissionStatus;
+};
+
+export type MissionPatch = Partial<{
+  status: MissionStatus;
+  phase: MissionPhase;
+  runId: string | null;
+  runAgentId: string | null;
+  runStartedAt: string | null;
+}>;
+
+export type TaskPatch = Partial<{
+  stage: TaskStage;
+  runId: string | null;
+  runAgentId: string | null;
+  runStartedAt: string | null;
+  agentId: string | null;
+  agentName: string;
+  model: string;
+  tokens: number;
+  retries: number;
+  resultOutput: string | null;
+}>;
+
+export type NewTaskRow = {
+  id: string;
+  missionId: string;
+  taskKey: string;
+  title: string;
+  agentName: string;
+  model: string;
+  depends: string[];
+  result: string | null;
+};
+
+export type NewArtifactRow = {
+  missionId: string;
+  taskId?: string | null;
+  title: string;
+  kind: string;
+  content: string;
+  dedupeKey: string;
+};
+
+export interface OrchestratorStore {
+  getMissionDetail(missionId: string): Promise<MissionDetailDTO>;
+  /** Missions the tick should advance: status 'running' only. */
+  listActiveMissionIds(): Promise<string[]>;
+  listEnabledAgents(stage: AgentStage): Promise<Agent[]>;
+  /** Guarded update; resolves true only if exactly one row matched the guard. */
+  updateMissionIf(id: string, guard: MissionGuard, patch: MissionPatch): Promise<boolean>;
+  /** Guarded update; resolves true only if exactly one row matched the guard. */
+  updateTaskIf(id: string, guard: TaskGuard, patch: TaskPatch): Promise<boolean>;
+  /**
+   * Atomically move a Queued, unclaimed task to Coding with `token` as its
+   * run id, but only while the mission is under max_parallel_workers.
+   */
+  claimTask(taskId: string, token: string): Promise<boolean>;
+  /** Insert planned tasks; rows whose (mission_id, task_key) exists are ignored. */
+  insertTasks(rows: NewTaskRow[]): Promise<void>;
+  /** Insert an artifact unless one with the same dedupe key exists. */
+  insertArtifactOnce(row: NewArtifactRow): Promise<void>;
+  /** Record (message) or clear (null) the mission's last orchestration error. */
+  setMissionError(id: string, message: string | null): Promise<void>;
+}
+
+/* ------------------------------------------------------------------ */
+/* Row mappers                                                         */
+/* ------------------------------------------------------------------ */
+
+type Row = Record<string, unknown>;
+
+const str = (v: unknown): string | null => (typeof v === "string" ? v : null);
+
+export function mapAgentRow(row: Row): Agent {
+  return {
+    id: String(row.id ?? ""),
+    name: String(row.name ?? ""),
+    role: String(row.role ?? ""),
+    stage: (row.stage as AgentStage) || "workers",
+    specialty: String(row.specialty ?? ""),
+    model: String(row.model ?? "Claude Sonnet 4.6"),
+    profile: String(row.profile ?? "default"),
+    prompt: String(row.prompt ?? ""),
+    url: String(row.url ?? ""),
+    key_enc: str(row.key_enc),
+    enabled: Boolean(row.enabled ?? true),
+    activeRun: Boolean(row.active_run ?? false),
+    createdAt: str(row.created_at) ?? undefined,
+    updatedAt: str(row.updated_at) ?? undefined,
+  };
+}
+
+export function mapMissionRow(row: Row): Mission {
+  return {
+    id: String(row.id ?? ""),
+    title: String(row.title ?? ""),
+    prompt: String(row.prompt ?? ""),
+    status: (row.status as MissionStatus) || "running",
+    phase: (row.phase as MissionPhase) || "planning",
+    pauseAfterPlanning: Boolean(row.pause_after_planning ?? false),
+    maxParallelWorkers: Number(row.max_parallel_workers ?? 3),
+    maxRetries: Number(row.max_retries ?? 2),
+    workspacePath: str(row.workspace_path),
+    runId: str(row.run_id),
+    runAgentId: str(row.run_agent_id),
+    runStartedAt: str(row.run_started_at),
+    lastError: str(row.last_error),
+    lastErrorAt: str(row.last_error_at),
+    createdAt: str(row.created_at) ?? undefined,
+    updatedAt: str(row.updated_at) ?? undefined,
+  };
+}
+
+export function mapTaskRow(row: Row): MissionTask {
+  const rawDepends = row.depends;
+  return {
+    id: String(row.id ?? ""),
+    missionId: String(row.mission_id ?? ""),
+    title: String(row.title ?? ""),
+    stage: (row.stage as TaskStage) || "Queued",
+    agentId: str(row.agent_id),
+    agentName: String(row.agent_name ?? ""),
+    model: String(row.model ?? ""),
+    tokens: Number(row.tokens ?? 0),
+    depends: Array.isArray(rawDepends) ? rawDepends.map((d) => String(d)) : [],
+    approval: Boolean(row.approval ?? false),
+    retries: Number(row.retries ?? 0),
+    result: str(row.result),
+    taskKey: str(row.task_key),
+    runId: str(row.run_id),
+    runAgentId: str(row.run_agent_id),
+    runStartedAt: str(row.run_started_at),
+    resultOutput: str(row.result_output),
+    createdAt: str(row.created_at) ?? undefined,
+    updatedAt: str(row.updated_at) ?? undefined,
+  };
+}
+
+export function mapArtifactRow(row: Row): MissionArtifact {
+  return {
+    id: String(row.id ?? ""),
+    missionId: String(row.mission_id ?? ""),
+    taskId: str(row.task_id),
+    title: String(row.title ?? ""),
+    kind: String(row.kind ?? "document"),
+    content: String(row.content ?? ""),
+    dedupeKey: str(row.dedupe_key),
+    createdAt: str(row.created_at) ?? undefined,
+  };
+}
+
+function missionPatchToRow(patch: MissionPatch): Row {
+  const row: Row = {};
+  if (patch.status !== undefined) row.status = patch.status;
+  if (patch.phase !== undefined) row.phase = patch.phase;
+  if (patch.runId !== undefined) row.run_id = patch.runId;
+  if (patch.runAgentId !== undefined) row.run_agent_id = patch.runAgentId;
+  if (patch.runStartedAt !== undefined) row.run_started_at = patch.runStartedAt;
+  return row;
+}
+
+function taskPatchToRow(patch: TaskPatch): Row {
+  const row: Row = {};
+  if (patch.stage !== undefined) row.stage = patch.stage;
+  if (patch.runId !== undefined) row.run_id = patch.runId;
+  if (patch.runAgentId !== undefined) row.run_agent_id = patch.runAgentId;
+  if (patch.runStartedAt !== undefined) row.run_started_at = patch.runStartedAt;
+  if (patch.agentId !== undefined) row.agent_id = patch.agentId;
+  if (patch.agentName !== undefined) row.agent_name = patch.agentName;
+  if (patch.model !== undefined) row.model = patch.model;
+  if (patch.tokens !== undefined) row.tokens = patch.tokens;
+  if (patch.retries !== undefined) row.retries = patch.retries;
+  if (patch.resultOutput !== undefined) row.result_output = patch.resultOutput;
+  return row;
+}
+
+/* ------------------------------------------------------------------ */
+/* Supabase implementation                                             */
+/* ------------------------------------------------------------------ */
+
+export function createSupabaseStore(client?: SupabaseClient): OrchestratorStore {
+  const db = () => client ?? getSupabaseAdmin();
+
+  return {
+    async getMissionDetail(missionId) {
+      const supabase = db();
+      const [mRes, tRes, aRes] = await Promise.all([
+        supabase.from("missions").select("*").eq("id", missionId).single(),
+        supabase
+          .from("mission_tasks")
+          .select("*")
+          .eq("mission_id", missionId)
+          .order("created_at", { ascending: true }),
+        supabase
+          .from("mission_artifacts")
+          .select("*")
+          .eq("mission_id", missionId)
+          .order("created_at", { ascending: true }),
+      ]);
+
+      if (mRes.error || !mRes.data) {
+        throw new Error(`Mission ${missionId} not found`);
+      }
+      if (tRes.error) throw new Error(tRes.error.message);
+      if (aRes.error) throw new Error(aRes.error.message);
+
+      return {
+        ...mapMissionRow(mRes.data as Row),
+        tasks: (tRes.data ?? []).map((r) => mapTaskRow(r as Row)),
+        artifacts: (aRes.data ?? []).map((r) => mapArtifactRow(r as Row)),
+      };
+    },
+
+    async listActiveMissionIds() {
+      const { data, error } = await db().from("missions").select("id").eq("status", "running");
+      if (error) throw new Error(error.message);
+      return (data ?? []).map((r) => String((r as Row).id));
+    },
+
+    async listEnabledAgents(stage) {
+      const { data, error } = await db()
+        .from("agents")
+        .select("*")
+        .eq("enabled", true)
+        .eq("stage", stage);
+      if (error) throw new Error(error.message);
+      return (data ?? []).map((r) => mapAgentRow(r as Row));
+    },
+
+    async updateMissionIf(id, guard, patch) {
+      let query = db()
+        .from("missions")
+        .update({ ...missionPatchToRow(patch), updated_at: new Date().toISOString() })
+        .eq("id", id)
+        .eq("phase", guard.phase);
+      query = guard.runId === null ? query.is("run_id", null) : query.eq("run_id", guard.runId);
+      if (guard.status) query = query.eq("status", guard.status);
+      const { data, error } = await query.select("id");
+      if (error) throw new Error(error.message);
+      return (data ?? []).length === 1;
+    },
+
+    async updateTaskIf(id, guard, patch) {
+      let query = db()
+        .from("mission_tasks")
+        .update({ ...taskPatchToRow(patch), updated_at: new Date().toISOString() })
+        .eq("id", id)
+        .eq("stage", guard.stage);
+      query = guard.runId === null ? query.is("run_id", null) : query.eq("run_id", guard.runId);
+      const { data, error } = await query.select("id");
+      if (error) throw new Error(error.message);
+      return (data ?? []).length === 1;
+    },
+
+    async claimTask(taskId, token) {
+      const { data, error } = await db().rpc("neiro_claim_task", {
+        p_task_id: taskId,
+        p_token: token,
+      });
+      if (error) throw new Error(error.message);
+      return data === true;
+    },
+
+    async insertTasks(rows) {
+      if (rows.length === 0) return;
+      const { error } = await db()
+        .from("mission_tasks")
+        .upsert(
+          rows.map((t) => ({
+            id: t.id,
+            mission_id: t.missionId,
+            task_key: t.taskKey,
+            title: t.title,
+            stage: "Queued",
+            agent_name: t.agentName,
+            model: t.model,
+            tokens: 0,
+            depends: t.depends,
+            approval: false,
+            retries: 0,
+            result: t.result,
+          })),
+          { onConflict: "mission_id,task_key", ignoreDuplicates: true },
+        );
+      if (error) throw new Error(error.message);
+    },
+
+    async insertArtifactOnce(row) {
+      const { error } = await db()
+        .from("mission_artifacts")
+        .upsert(
+          {
+            id: crypto.randomUUID(),
+            mission_id: row.missionId,
+            task_id: row.taskId ?? null,
+            title: row.title,
+            kind: row.kind,
+            content: row.content,
+            dedupe_key: row.dedupeKey,
+          },
+          { onConflict: "dedupe_key", ignoreDuplicates: true },
+        );
+      if (error) throw new Error(error.message);
+    },
+
+    async setMissionError(id, message) {
+      const { error } = await db()
+        .from("missions")
+        .update({
+          last_error: message,
+          last_error_at: message === null ? null : new Date().toISOString(),
+        })
+        .eq("id", id);
+      if (error) throw new Error(error.message);
+    },
+  };
+}

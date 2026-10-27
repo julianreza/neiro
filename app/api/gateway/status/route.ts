@@ -4,17 +4,23 @@ import { getSupabaseAdmin } from "@/lib/supabase";
 import { getNineRouterStatus } from "@/lib/ninerouter";
 import { probeHermesAgent } from "@/lib/hermes";
 import { AppConfigError } from "@/lib/types";
-import type { Agent, GatewayStatusDTO } from "@/lib/types";
+import type {
+  Agent,
+  AgentHealth,
+  GatewayConfiguredFlags,
+  GatewayCronStatus,
+  GatewayProbeResult,
+  GatewayStatusDTO,
+} from "@/lib/types";
 
 export async function GET() {
   await connection();
 
-  const configured = {
+  const configured: GatewayConfiguredFlags = {
+    // Mirrors getSupabaseAdmin(): only the server-only service-role key counts.
     supabase: Boolean(
       (process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL) &&
-        (process.env.SUPABASE_SERVICE_ROLE_KEY ||
-          process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY ||
-          process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY),
+        process.env.SUPABASE_SERVICE_ROLE_KEY,
     ),
     hermes: Boolean(process.env.HERMES_DEFAULT_URL),
     ninerouter: Boolean(process.env.NINEROUTER_URL),
@@ -24,22 +30,16 @@ export async function GET() {
     name: "Supabase",
     status: "disconnected",
   };
-  let cronStatus: { lastTickAt: string | null; healthy: boolean } = {
+  let cronStatus: GatewayCronStatus = {
     lastTickAt: null,
     healthy: false,
   };
-  let defaultHermesStatus: { ok: boolean; latencyMs: number; error?: string } = {
+  let defaultHermesStatus: GatewayProbeResult = {
     ok: false,
     latencyMs: 0,
     error: "HERMES_DEFAULT_URL not set",
   };
-  let agentsHealth: Array<{
-    agentId: string;
-    name: string;
-    ok: boolean;
-    latencyMs: number;
-    error?: string;
-  }> = [];
+  let agentsHealth: AgentHealth[] = [];
 
   // Check Supabase & Cron Tick
   if (configured.supabase) {
@@ -192,7 +192,7 @@ export async function GET() {
     error: nineRouterRes.error,
   };
 
-  return NextResponse.json({
+  const body = {
     configured,
     cron: cronStatus,
     supabase: supabaseStatus,
@@ -201,5 +201,7 @@ export async function GET() {
     defaultHermes: defaultHermesStatus,
     agentsHealth,
     checkedAt: new Date().toISOString(),
-  });
+  } satisfies GatewayStatusDTO;
+
+  return NextResponse.json(body);
 }
