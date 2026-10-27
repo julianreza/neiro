@@ -2,15 +2,38 @@ import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 import { isAuthorizedRequest } from "./lib/auth";
 
+/**
+ * Static SVGs served from `public/` that must load on the login page.
+ * Listed explicitly: a blanket `*.svg` exemption would let any future route
+ * reachable through a `.svg`-suffixed path skip the auth gate.
+ */
+export const PUBLIC_SVGS: ReadonlySet<string> = new Set([
+  "/file.svg",
+  "/globe.svg",
+  "/next.svg",
+  "/vercel.svg",
+  "/window.svg",
+]);
+
+/** Paths reachable without a session. */
+export function isExemptPath(pathname: string): boolean {
+  return (
+    pathname === "/login" ||
+    pathname === "/api/auth" ||
+    pathname.startsWith("/api/auth/") ||
+    PUBLIC_SVGS.has(pathname)
+  );
+}
+
 export const config = {
-  matcher: ["/((?!_next/static|_next/image|favicon.ico|.*\\.svg$).*)"],
+  matcher: ["/((?!_next/static|_next/image|favicon.ico).*)"],
 };
 
 export async function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
-  // Allow login page and auth API endpoints without session
-  if (pathname === "/login" || pathname.startsWith("/api/auth")) {
+  // Allow login page, auth API endpoints and public static SVGs without session
+  if (isExemptPath(pathname)) {
     return NextResponse.next();
   }
 

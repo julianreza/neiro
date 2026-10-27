@@ -49,3 +49,59 @@ test("getSupabaseAdmin throws AppConfigError when env is missing", () => {
 
   if (origUrl) process.env.SUPABASE_URL = origUrl;
 });
+
+const SUPABASE_ENV_KEYS = [
+  "SUPABASE_URL",
+  "NEXT_PUBLIC_SUPABASE_URL",
+  "SUPABASE_SERVICE_ROLE_KEY",
+  "NEXT_PUBLIC_SUPABASE_SERVICE_ROLE_KEY",
+  "NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY",
+  "NEXT_PUBLIC_SUPABASE_ANON_KEY",
+] as const;
+
+function withSupabaseEnv(env: Partial<Record<(typeof SUPABASE_ENV_KEYS)[number], string>>, fn: () => void) {
+  const saved = new Map<string, string | undefined>();
+  for (const key of SUPABASE_ENV_KEYS) {
+    saved.set(key, process.env[key]);
+    delete process.env[key];
+  }
+  Object.assign(process.env, env);
+  try {
+    fn();
+  } finally {
+    for (const [key, value] of saved) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+}
+
+function assertConfigError(code: string) {
+  return (err: unknown) => {
+    assert.ok(err instanceof AppConfigError);
+    assert.strictEqual(err.code, code);
+    return true;
+  };
+}
+
+test("getSupabaseAdmin refuses public anon/publishable keys as the admin key", () => {
+  withSupabaseEnv(
+    {
+      SUPABASE_URL: "https://example.supabase.co",
+      NEXT_PUBLIC_SUPABASE_ANON_KEY: "anon-key",
+      NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: "publishable-key",
+    },
+    () => assert.throws(() => getSupabaseAdmin(), assertConfigError("missing_supabase_env")),
+  );
+});
+
+test("getSupabaseAdmin refuses a NEXT_PUBLIC_ service-role key", () => {
+  withSupabaseEnv(
+    {
+      SUPABASE_URL: "https://example.supabase.co",
+      SUPABASE_SERVICE_ROLE_KEY: "server-key",
+      NEXT_PUBLIC_SUPABASE_SERVICE_ROLE_KEY: "leaked-key",
+    },
+    () => assert.throws(() => getSupabaseAdmin(), assertConfigError("public_service_role_key")),
+  );
+});
