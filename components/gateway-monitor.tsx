@@ -157,12 +157,20 @@ export function GatewayMonitor() {
   const modelsAreSample = modelList.source !== "live";
   const statusLoading = status.source === "loading";
   const anyDemo = status.source === "demo" || modelList.source === "demo";
+  // Plain-language summary for the badge; raw reasons stay in the banner's
+  // technical-detail line so operators can still debug.
   const demoReason =
     status.source === "demo"
-      ? `status: ${status.reason}`
+      ? "health checks unavailable"
       : modelList.source === "demo"
-        ? `models: ${modelList.reason}`
+        ? "showing sample models"
         : undefined;
+  const technicalDetail = [
+    status.source === "demo" ? `status: ${status.reason}` : null,
+    modelList.source === "demo" ? `models: ${modelList.reason}` : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
 
   function refreshStatus() {
     status.reload();
@@ -192,7 +200,7 @@ export function GatewayMonitor() {
     <div className="min-w-0 space-y-8 p-4 md:p-8">
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div className="space-y-2">
-          <p className="text-xs font-medium uppercase tracking-widest text-muted-foreground">
+          <p className="eyebrow">
             Infrastructure{anyDemo ? " / demo" : ""}
           </p>
           <h1 className="text-3xl font-semibold tracking-tight">Gateway</h1>
@@ -221,15 +229,25 @@ export function GatewayMonitor() {
             className="mt-0.5 size-4 shrink-0 text-muted-foreground"
             aria-hidden="true"
           />
-          <p>
-            <span className="font-medium">Partly sample data.</span>{" "}
-            {status.source === "demo"
-              ? `Health checks could not run (${status.reason}). `
-              : ""}
-            {modelList.source === "demo"
-              ? `The model catalog below is a sample (${modelList.reason}).`
-              : ""}
-          </p>
+          <div className="space-y-1">
+            <p>
+              <span className="font-medium">Showing sample data.</span>{" "}
+              {status.source === "demo"
+                ? "Couldn't check live connections. "
+                : ""}
+              {modelList.source === "demo"
+                ? "Couldn't load live models, so the catalog below is a sample."
+                : ""}{" "}
+              <a href="#setup-heading" className="font-medium underline underline-offset-4">
+                See what to configure
+              </a>
+            </p>
+            {technicalDetail && (
+              <p className="font-mono text-xs text-muted-foreground">
+                Technical detail: {technicalDetail}
+              </p>
+            )}
+          </div>
         </div>
       )}
 
@@ -249,6 +267,8 @@ export function GatewayMonitor() {
                     ? "Checking…"
                     : liveStatus?.supabase?.error || "Database disconnected",
               note: "Missions, tasks DAG, and agent registry state.",
+              envKeys: "SUPABASE_URL",
+              accent: "emerald",
             },
             {
               name: "9Router Gateway",
@@ -260,6 +280,8 @@ export function GatewayMonitor() {
                     ? "Checking…"
                     : liveStatus?.nineRouter?.error || "LLM Gateway unreachable",
               note: "LLM inference router and model discovery.",
+              envKeys: "NINEROUTER_URL",
+              accent: "sky",
             },
             {
               name: "Hermes Agent VPS",
@@ -271,11 +293,18 @@ export function GatewayMonitor() {
                     ? "Checking…"
                     : liveStatus?.hermes?.error || "Hermes VPS unreachable",
               note: "Autonomous coding agent runtime.",
+              envKeys: "HERMES_DEFAULT_URL",
+              accent: "violet",
             },
-          ].map((vital) => (
-            <div key={vital.name} className="card-trendy space-y-4 p-5">
+          ].map((vital, index) => (
+            <div
+              key={vital.name}
+              className="card-trendy space-y-4 p-5"
+              data-accent={vital.accent}
+              style={{ "--i": index } as React.CSSProperties}
+            >
               <div className="flex flex-wrap items-center justify-between gap-2">
-                <h3 className="font-semibold tracking-tight text-base text-amber-500">
+                <h3 className="font-semibold tracking-tight text-base">
                   {vital.name}
                 </h3>
                 <Badge
@@ -288,10 +317,7 @@ export function GatewayMonitor() {
                 >
                   {vital.connected ? (
                     <>
-                      <Check
-                        className="size-3 mr-1 text-emerald-400"
-                        aria-hidden="true"
-                      />{" "}
+                      <span className="pulse-dot mr-1.5" aria-hidden="true" />
                       Connected
                     </>
                   ) : (
@@ -307,6 +333,16 @@ export function GatewayMonitor() {
               </div>
               <p className="text-sm font-medium">{vital.detail}</p>
               <p className="text-xs text-muted-foreground">{vital.note}</p>
+              {!vital.connected && !statusLoading && (
+                <a
+                  href="#setup-heading"
+                  className="inline-flex min-h-10 items-center gap-1.5 text-sm font-medium underline-offset-4 hover:underline"
+                >
+                  <Cable className="size-3.5" aria-hidden="true" />
+                  Set <code className="code-chip">{vital.envKeys}</code>{" "}
+                  to connect
+                </a>
+              )}
             </div>
           ))}
         </div>
@@ -314,7 +350,7 @@ export function GatewayMonitor() {
 
       <section className="space-y-4" aria-labelledby="setup-heading">
         <div>
-          <h2 id="setup-heading" className="text-lg font-semibold">
+          <h2 id="setup-heading" className="scroll-mt-24 text-lg font-semibold">
             Connection setup
           </h2>
           <p className="text-sm text-muted-foreground">
@@ -325,7 +361,7 @@ export function GatewayMonitor() {
         <div className="divide-y rounded-lg border">
           {setup.map(([key, description]) => (
             <div key={key} className="grid gap-2 p-4 lg:grid-cols-[19rem_1fr]">
-              <code className="break-all text-xs font-medium">{key}</code>
+              <code className="code-chip self-start break-all font-medium">{key}</code>
               <p className="text-sm text-muted-foreground">{description}</p>
             </div>
           ))}
@@ -409,8 +445,8 @@ export function GatewayMonitor() {
                   <TableCell>
                     <Badge variant="outline">{model.type}</Badge>
                   </TableCell>
-                  <TableCell className="font-mono text-xs">
-                    {model.id}
+                  <TableCell>
+                    <code className="code-chip">{model.id}</code>
                   </TableCell>
                   <TableCell className="text-muted-foreground">
                     {model.provider}

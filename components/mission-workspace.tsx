@@ -168,6 +168,13 @@ export function MissionWorkspace() {
   const tokens = tasks.reduce((sum, task) => sum + task.tokens, 0);
   const activeStep = isLive && mission?.phase ? PHASE_STEP[mission.phase] : 2;
   const maxRetriesShown = parseIntOr(retries, 2);
+  // Shown next to the locked Launch button, so the lock icon is explained
+  // where it appears (not only in a hover tooltip).
+  const launchBlockedReason = !isLive
+    ? "Connect Supabase on the Gateway page to launch"
+    : !prompt.trim()
+      ? "Write an objective to launch"
+      : null;
   const assignedAgents = new Set(tasks.map((t) => t.agent).filter((a) => a && a !== "Unassigned")).size;
 
   useEffect(() => {
@@ -311,7 +318,7 @@ export function MissionWorkspace() {
       >
         {[
           {
-            label: "MISSION STATUS",
+            label: "Mission status",
             value:
               mission?.status === "running"
                 ? "In progress"
@@ -322,37 +329,44 @@ export function MissionWorkspace() {
                     : "Awaiting plan",
             detail: isLive ? `Phase: ${mission?.phase ?? "—"}` : "Sample data",
             icon: ActivityIcon,
-            color: "text-amber-500 bg-amber-500/10 border-amber-500/20",
+            accent: "violet",
           },
           {
-            label: "TASKS COMPLETED",
+            label: "Tasks completed",
             value: `${done} / ${tasks.length}`,
             detail: "Across execution pipeline",
             icon: Check,
-            color: "text-emerald-500 bg-emerald-500/10 border-emerald-500/20",
+            accent: "emerald",
           },
           {
-            label: "TEAM CAPACITY",
+            label: "Team capacity",
             value: isLive ? `${assignedAgents} assigned` : "6 agents",
             detail: isLive ? "Agents on this mission" : "Sample team",
             icon: Layers3,
-            color: "text-sky-400 bg-sky-500/10 border-sky-500/20",
+            accent: "sky",
           },
           {
-            label: "TOKEN USAGE",
+            label: "Token usage",
             value: formatCompactTokens(tokens),
             detail: isLive ? "Reported by Hermes" : "Sample usage",
             icon: Zap,
-            color: "text-amber-400 bg-amber-500/10 border-amber-500/20",
+            accent: "pink",
           },
-        ].map(({ label, value, detail, icon: Icon, color }) => (
-          <div className="card-trendy p-5" key={label}>
+        ].map(({ label, value, detail, icon: Icon, accent }, index) => (
+          <div
+            className="card-trendy p-5"
+            key={label}
+            style={{ "--i": index } as React.CSSProperties}
+          >
             <div className="flex items-center justify-between">
-              <span className="text-[10px] font-medium tracking-widest text-muted-foreground uppercase">
+              <span className="eyebrow">
                 {label}
               </span>
+              {/* Same neutral card for all four; color lives only in the
+                  icon chip, so no single card shouts louder than the rest. */}
               <span
-                className={`flex size-7 items-center justify-center rounded-lg border ${color}`}
+                data-accent={accent}
+                className="accent-icon flex size-7 items-center justify-center rounded-lg border"
               >
                 <Icon className="size-3.5" />
               </span>
@@ -373,8 +387,8 @@ export function MissionWorkspace() {
           <h2 id="composer-title" className="text-xs font-medium">
             What should your team build?
           </h2>
-          <span className="ml-auto font-mono text-[10px] text-muted-foreground">
-            PROMPT → PLAN → EXECUTE
+          <span className="eyebrow ml-auto">
+            Prompt → plan → execute
           </span>
         </div>
         <form
@@ -419,25 +433,29 @@ export function MissionWorkspace() {
                   Advanced options
                 </Button>
               </CollapsibleTrigger>
-              <div className="flex items-center gap-4">
-                <span className="hidden text-[10px] text-muted-foreground sm:block">
-                  ⌘ / Ctrl + Enter
-                </span>
+              <div className="flex flex-wrap items-center justify-end gap-x-4 gap-y-2">
+                {launchBlockedReason ? (
+                  <span
+                    id="launch-disabled-reason"
+                    className="text-xs text-muted-foreground"
+                  >
+                    {launchBlockedReason}
+                  </span>
+                ) : (
+                  <span className="hidden text-xs text-muted-foreground sm:block">
+                    ⌘ / Ctrl + Enter
+                  </span>
+                )}
                 <Button
                   type="submit"
                   className="console-launch"
-                  disabled={!isLive || launching}
-                  aria-describedby={!isLive ? "launch-disabled-reason" : undefined}
-                  title={!isLive ? "Demo mode: connect Supabase to launch missions" : undefined}
+                  disabled={!isLive || launching || !prompt.trim()}
+                  aria-describedby={launchBlockedReason ? "launch-disabled-reason" : undefined}
+                  title={launchBlockedReason ?? undefined}
                 >
                   <Play className="size-3.5" />
                   {launching ? "Launching…" : "Launch mission"}
                 </Button>
-                {!isLive && (
-                  <span id="launch-disabled-reason" className="sr-only">
-                    Launching is disabled in demo mode. Connect Supabase to launch missions.
-                  </span>
-                )}
               </div>
             </div>
             <CollapsibleContent>
@@ -500,9 +518,9 @@ export function MissionWorkspace() {
             <div className="min-w-0">
               <label
                 htmlFor="mission-picker"
-                className="mb-1 block text-[10px] tracking-widest text-muted-foreground"
+                className="eyebrow mb-1 block"
               >
-                CURRENT MISSION
+                Current mission
               </label>
               <select
                 id="mission-picker"
@@ -571,10 +589,17 @@ export function MissionWorkspace() {
                 (step, index) => (
                   <div
                     key={step}
-                    className={`flex items-center gap-3 text-xs ${index === activeStep ? "text-foreground" : "text-muted-foreground"}`}
+                    aria-current={index === activeStep ? "step" : undefined}
+                    className={`flex items-center gap-3 text-sm ${index === activeStep ? "font-semibold text-foreground" : index < activeStep ? "text-foreground/90" : "text-muted-foreground"}`}
                   >
                     <span
-                      className={`flex size-6 shrink-0 items-center justify-center rounded-full border font-mono text-[10px] ${index < activeStep ? "border-primary/20 bg-primary/10 text-primary" : ""}`}
+                      className={`flex size-7 shrink-0 items-center justify-center rounded-full border font-mono text-xs font-semibold ${
+                        index < activeStep
+                          ? "border-status-success/30 bg-status-success/10 text-status-success"
+                          : index === activeStep
+                            ? "border-status-running bg-status-running/15 text-status-running ring-2 ring-status-running/25"
+                            : "border-foreground/30 text-foreground/85"
+                      }`}
                     >
                       {index < activeStep ? (
                         <Check className="size-3" />
@@ -584,8 +609,8 @@ export function MissionWorkspace() {
                     </span>
                     {step}
                     {isDemo && index === 2 && (
-                      <span className="ml-auto rounded bg-primary/10 px-1.5 py-0.5 text-[9px] text-primary">
-                        DEMO
+                      <span className="ml-auto rounded bg-secondary px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
+                        Demo
                       </span>
                     )}
                   </div>
@@ -635,12 +660,30 @@ export function MissionWorkspace() {
                   </TabsTrigger>
                 </TabsList>
                 {isDemo && (
-                  <span className="hidden text-[10px] text-muted-foreground sm:block">
-                    SAMPLE WORKFLOW · NO LIVE EXECUTION
+                  <span className="hidden text-xs text-muted-foreground sm:block">
+                    Sample workflow · no live execution
                   </span>
                 )}
               </div>
               <TabsContent value="board" className="mt-5">
+                {tasks.length === 0 && (
+                  <div
+                    role="status"
+                    className="mb-4 flex items-start gap-3 rounded-2xl border border-dashed p-4 text-sm"
+                  >
+                    <Play
+                      className="mt-0.5 size-4 shrink-0 text-primary"
+                      aria-hidden="true"
+                    />
+                    <p>
+                      <span className="font-medium">No tasks yet.</span>{" "}
+                      <span className="text-muted-foreground">
+                        Launch a mission above. Your team splits it into tasks,
+                        and they move through these columns from Queued to Done.
+                      </span>
+                    </p>
+                  </div>
+                )}
                 <div className="overflow-x-auto pb-4">
                   <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-6">
                     {stages.map((stage) => (
@@ -661,7 +704,7 @@ export function MissionWorkspace() {
                             }
                           </span>
                         </h3>
-                        <div className="console-tray min-h-60 space-y-3 rounded-lg p-2">
+                        <div className={`console-tray space-y-3 rounded-lg p-2 ${tasks.length === 0 ? "min-h-24 border-dashed" : "min-h-60"}`}>
                           {tasks
                             .filter((task) => task.stage === stage)
                             .map((task) => (
@@ -736,9 +779,9 @@ export function MissionWorkspace() {
                                 </button>
                               </article>
                             ))}
-                          {!tasks.some((task) => task.stage === stage) && (
-                            <div className="py-8 text-center text-[10px] text-muted-foreground">
-                              No tasks
+                          {tasks.length > 0 && !tasks.some((task) => task.stage === stage) && (
+                            <div className="py-8 text-center text-xs text-muted-foreground">
+                              No tasks here yet
                             </div>
                           )}
                         </div>
