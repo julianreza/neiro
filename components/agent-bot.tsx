@@ -102,7 +102,6 @@ export function AgentBot({
   working: boolean;
 }) {
   const [hop, setHop] = useState(false);
-  const accessory = (looks[role] ?? fallback).accessory;
   const state = asleep ? "asleep" : working ? "working" : "idle";
 
   return (
@@ -117,26 +116,34 @@ export function AgentBot({
         if (event.animationName === "bot-hop") setHop(false);
       }}
     >
-      <span className="bot-rig" aria-hidden="true">
-        {accessory === "halo" && <i className="bot-halo" />}
-        {accessory !== "hat" && <i className="bot-ant" />}
-        <i className="bot-head">
-          <i className="bot-visor">
-            <i className="bot-eyes">
-              <i className="bot-eye" />
-              <i className="bot-eye" />
-            </i>
+      <BotRig role={role} asleep={asleep} />
+    </button>
+  );
+}
+
+/** The bot's drawn parts only. Needs an `.agent-bot` parent for its styles. */
+export function BotRig({ role, asleep = false }: { role: string; asleep?: boolean }) {
+  const accessory = (looks[role] ?? fallback).accessory;
+  return (
+    <span className="bot-rig" aria-hidden="true">
+      {accessory === "halo" && <i className="bot-halo" />}
+      {accessory !== "hat" && <i className="bot-ant" />}
+      <i className="bot-head">
+        <i className="bot-visor">
+          <i className="bot-eyes">
+            <i className="bot-eye" />
+            <i className="bot-eye" />
           </i>
         </i>
-        {accessory === "hat" && <i className="bot-hat" />}
-        <i className="bot-body">
-          <i className="bot-core" />
-        </i>
-        {accessory !== "halo" && accessory !== "hat" && (
-          <i className={`bot-${accessory}`} />
-        )}
-        {asleep && <i className="bot-zz">z</i>}
-      </span>
-    </button>
+      </i>
+      {accessory === "hat" && <i className="bot-hat" />}
+      <i className="bot-body">
+        <i className="bot-core" />
+      </i>
+      {accessory !== "halo" && accessory !== "hat" && (
+        <i className={`bot-${accessory}`} />
+      )}
+      {asleep && <i className="bot-zz">z</i>}
+    </span>
   );
 }

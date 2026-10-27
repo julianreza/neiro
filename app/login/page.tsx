@@ -3,7 +3,8 @@
 import * as React from "react";
 import { useSearchParams } from "next/navigation";
 import { Suspense, useState, useTransition } from "react";
-import { KeyRound, ShieldAlert, Sparkles, Loader2 } from "lucide-react";
+import { KeyRound, ShieldAlert, ShieldCheck, Sparkles, Loader2 } from "lucide-react";
+import { BotRig, agentLook, followPointer, resetPointer } from "@/components/agent-bot";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -20,6 +21,14 @@ const TEAM_LANES = [
   "Workers",
   "QA",
   "Reviewer",
+] as const;
+
+/** Bots that peek out from behind the card. Decoration only. */
+const PEEKERS = [
+  { role: "PM", side: "top", pos: "8%", delay: "0s" },
+  { role: "Backend", side: "top", pos: "42%", delay: "-1.7s" },
+  { role: "Frontend", side: "top", pos: "68%", delay: "-3.4s" },
+  { role: "QA", side: "side", pos: "52%", delay: "-2.5s" },
 ] as const;
 
 function LoginForm({
@@ -137,11 +146,38 @@ export default function LoginPage() {
   const [status, setStatus] = useState<LoginStatus>("idle");
 
   return (
-    <div className="login-shell">
+    <div
+      className="login-shell"
+      onPointerMove={followPointer}
+      onPointerLeave={resetPointer}
+    >
       <div className="absolute top-4 right-4 z-10">
         <ThemeToggle />
       </div>
 
+      <div className="login-stage">
+        {PEEKERS.map((bot) => (
+          <span
+            key={bot.role}
+            className={`agent-bot login-peek login-peek-${bot.side}`}
+            style={
+              {
+                ...agentLook(bot.role),
+                [bot.side === "top" ? "left" : "top"]: bot.pos,
+                "--d": bot.delay,
+              } as React.CSSProperties
+            }
+            aria-hidden="true"
+          >
+            <BotRig role={bot.role} />
+          </span>
+        ))}
+
+        <span className="login-badge" aria-hidden="true">
+          <ShieldCheck className="size-6" />
+        </span>
+
+        <div className="login-card-shadow">
       <main className="login-card">
         {/* Teal rail: the same shape as the dashboard nav rail. The team
             lanes are decoration; the heading on the right carries meaning. */}
@@ -197,6 +233,8 @@ export default function LoginPage() {
           </p>
         </section>
       </main>
+        </div>
+      </div>
     </div>
   );
 }

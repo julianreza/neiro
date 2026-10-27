@@ -1040,27 +1040,102 @@ section.console-lane[data-stage] > :first-child h2 {
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 4rem 1rem;
-  background: var(--canvas);
+  --you-ink: #0f766e;
+  --bite: 2.5rem;
+  padding: 6rem 1rem 4rem;
+  overflow-x: clip;
+  background-color: var(--canvas);
+  background-image: radial-gradient(
+    color-mix(in srgb, var(--rail) 22%, transparent) 1.2px,
+    transparent 1.3px
+  );
+  background-size: 18px 18px;
   color: var(--foreground);
 }
 
 .dark .login-shell {
   --rail: #0f766e;
   --rail-deep: #164e63;
+  --you-ink: #5eead4;
+}
+
+/* Card + peeking bots + badge share one box. */
+.login-stage {
+  position: relative;
+  width: 100%;
+  max-width: 48rem;
+}
+
+/* The shadow lives on a wrapper: the card's mask would cut it off.
+   drop-shadow follows the bitten shape, so the hairline does too. */
+.login-card-shadow {
+  position: relative;
+  z-index: 1;
+  filter: drop-shadow(0 0 0.5px var(--border))
+    drop-shadow(0 30px 40px var(--surface-shadow));
 }
 
 .login-card {
   width: 100%;
-  max-width: 48rem;
   display: grid;
   grid-template-columns: 15rem 1fr;
   overflow: hidden;
   border-radius: 1.75rem;
-  border: 1px solid var(--border);
   background: var(--card);
   color: var(--card-foreground);
-  box-shadow: 0 30px 80px -30px var(--surface-shadow);
+  /* Bite out of the top-right corner; the badge sits in it. */
+  -webkit-mask: radial-gradient(circle var(--bite) at 100% 0, transparent 98%, #000);
+  mask: radial-gradient(circle var(--bite) at 100% 0, transparent 98%, #000);
+}
+
+.login-badge {
+  position: absolute;
+  z-index: 2;
+  top: -1.625rem;
+  right: -1.625rem;
+  width: 3.25rem;
+  height: 3.25rem;
+  display: grid;
+  place-items: center;
+  border-radius: 9999px;
+  background: linear-gradient(135deg, var(--rail), var(--rail-deep));
+  color: #fff;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.35),
+    0 10px 20px -10px var(--rail-deep);
+}
+
+/* Bots behind the card: they rise, look at the cursor, then hide. */
+.login-peek {
+  position: absolute;
+  z-index: 0;
+  font-size: 11px;
+  margin: 0;
+  pointer-events: none;
+  cursor: default;
+}
+
+.login-peek-top {
+  top: -5.4em;
+  animation: login-peek 6s cubic-bezier(0.3, 1.4, 0.5, 1) infinite;
+  animation-delay: var(--d, 0s);
+}
+
+.login-peek-side {
+  right: -6em;
+  margin-top: -4.1em;
+  animation: login-peek-side 6s cubic-bezier(0.3, 1.4, 0.5, 1) infinite;
+  animation-delay: var(--d, 0s);
+}
+
+@keyframes login-peek {
+  0%, 15%, 88%, 100% { transform: translateY(5.8em); }
+  32%, 72% { transform: translateY(0); }
+}
+
+@keyframes login-peek-side {
+  0%, 15%, 88%, 100% { transform: translateX(-5.8em) rotate(90deg); }
+  32%, 72% { transform: translateX(0) rotate(90deg); }
 }
 
 .login-rail {
@@ -1127,14 +1202,38 @@ section.console-lane[data-stage] > :first-child h2 {
   transition: box-shadow 200ms ease, background-color 200ms ease;
 }
 
+/* "You" breaks out of the rail and joins the form, like the nav notch. */
 .login-lane[data-you] {
   font-weight: 600;
-  color: var(--rail-ink);
+  color: var(--you-ink);
+  margin: 0 -1.75rem 0 -0.75rem;
+  padding: 0.625rem 1.75rem 0.625rem 0.75rem;
+  border-radius: 9999px 0 0 9999px;
+  background: var(--card);
+}
+
+.login-lane[data-you]::before,
+.login-lane[data-you]::after {
+  content: "";
+  position: absolute;
+  right: 0;
+  width: 1rem;
+  height: 1rem;
+}
+
+.login-lane[data-you]::before {
+  top: -1rem;
+  background: radial-gradient(circle at 0 0, transparent 1rem, var(--card) calc(1rem + 0.5px));
+}
+
+.login-lane[data-you]::after {
+  bottom: -1rem;
+  background: radial-gradient(circle at 0 100%, transparent 1rem, var(--card) calc(1rem + 0.5px));
 }
 
 .login-lane[data-you] .login-lane-dot {
-  background: var(--you);
-  box-shadow: 0 0 0 4px rgba(94, 234, 212, 0.3);
+  background: var(--rail);
+  box-shadow: 0 0 0 4px rgba(20, 184, 166, 0.25);
 }
 
 .login-lane[data-you][data-status="typing"] .login-lane-dot {
@@ -1214,6 +1313,31 @@ section.console-lane[data-stage] > :first-child h2 {
     font-size: 0.8125rem;
   }
 
+  /* Rail sits on top here, so the notch has no form to join. */
+  .login-lane[data-you] {
+    margin: 0;
+    padding: 0;
+    background: none;
+    color: var(--rail-ink);
+  }
+
+  .login-lane[data-you]::before,
+  .login-lane[data-you]::after,
+  .login-peek-side {
+    display: none;
+  }
+
+  .login-shell {
+    --bite: 2rem;
+  }
+
+  .login-badge {
+    top: -1.25rem;
+    right: -1.25rem;
+    width: 2.5rem;
+    height: 2.5rem;
+  }
+
   .login-rail-note {
     display: none;
   }
@@ -1227,6 +1351,17 @@ section.console-lane[data-stage] > :first-child h2 {
   .login-lane,
   .login-lane[data-you][data-status="pending"] .login-lane-dot {
     animation: none;
+  }
+
+  /* Bots stay peeking, still. */
+  .login-peek-top,
+  .login-peek-side,
+  .login-peek .bot-rig {
+    animation: none;
+  }
+
+  .login-peek-side {
+    transform: rotate(90deg);
   }
 }
 
