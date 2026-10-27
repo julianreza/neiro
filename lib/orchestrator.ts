@@ -34,6 +34,12 @@ import {
   type OrchestratorStore,
   type TaskGuard,
 } from "@/lib/orchestrator-store";
+import {
+  createLayaRouter,
+  isRouterEnabled,
+  routeOutcome,
+  type TaskRouter,
+} from "@/lib/task-router";
 import type {
   Agent,
   AgentStage,
@@ -58,6 +64,12 @@ export type OrchestratorDeps = {
   hermes: HermesClient;
   now: () => Date;
   newId: () => string;
+  /**
+   * Task router (Laya). `null` = off: Queued tasks are claimed directly, as
+   * before the router existed. Omit to follow NEIRO_ROUTER /
+   * NEIRO_LAYA_MODEL_PATH.
+   */
+  router?: TaskRouter | null;
 };
 
 const realHermes: HermesClient = {
@@ -72,6 +84,8 @@ function resolveDeps(deps?: Partial<OrchestratorDeps>): OrchestratorDeps {
     hermes: deps?.hermes ?? realHermes,
     now: deps?.now ?? (() => new Date()),
     newId: deps?.newId ?? (() => crypto.randomUUID()),
+    router:
+      deps?.router !== undefined ? deps.router : isRouterEnabled() ? createLayaRouter() : null,
   };
 }
 
@@ -165,11 +179,26 @@ async function pickTaskAgent(
   task: MissionTask,
   d: OrchestratorDeps,
 ): Promise<Agent | null> {
+  // A routed task is coded by the agent the router (or a human) chose, any
+  // stage, while that agent is still enabled.
+  if (stage === "Coding" && task.routingStatus && task.agentId) {
+    const routed = await findAnyEnabledAgent(task.agentId, d);
+    if (routed) return routed;
+  }
   const agentStage = TASK_STAGE_AGENT[stage];
   if (!agentStage) return null;
   const agent = await pickStageAgent(agentStage, stage === "Coding" ? task.agentName : undefined, d);
   if (agent || stage !== "Coding") return agent;
   return pickStageAgent("orchestrator", undefined, d);
+}
+
+async function findAnyEnabledAgent(
+  agentId: string | null,
+  d: OrchestratorDeps,
+): Promise<Agent | null> {
+  if (!agentId) return null;
+  const agents = await d.store.listAllEnabledAgents();
+  return agents.find((a) => a.id === agentId) ?? null;
 }
 
 /** The agent that owns a run (needed to reach its Hermes server). */
@@ -476,7 +505,9 @@ async function stepTasks(m: MissionDetailDTO, d: OrchestratorDeps, ctx: PassCont
   }
 
   for (const task of m.tasks) {
-    if (task.stage === "Done" || task.stage === "Needs you") continue;
+    if (task.stage === "Done" || task.stage === "Needs you" || task.stage === "Awaiting routing") {
+      continue;
+    }
     try {
       await stepTask(m, task, stageByKey, d, ctx);
     } catch (err: unknown) {
@@ -508,8 +539,8 @@ async function stepTask(
     return;
   }
 
-  // Queued: wait for dependencies, then claim a worker slot.
-  if (task.stage === "Queued") {
+  // Queued / Routed: wait for dependencies, route if needed, then claim a worker slot.
+  if (task.stage === "Queued" || task.stage === "Routed") {
     if (task.depends.length > 0 && task.taskKey === null) {
       ctx.problems.push(
         `Legacy task "${task.title}" has dependencies but no task_key; resolve it manually`,
@@ -518,6 +549,18 @@ async function stepTask(
     }
     const depsDone = task.depends.every((key) => stageByKey.get(key) === "Done");
     if (!depsDone) return;
+
+    // With the router on, an unrouted Queued task is routed first and claimed
+    // on a later tick. A Routed task is claimable even if the router was
+    // switched off since, so nothing gets stuck.
+    if (task.stage === "Queued" && d.router && !task.routingStatus) {
+      await routeTask(task, d.router, d, ctx);
+      return;
+    }
+    if (task.routingStatus === "routing") {
+      await releaseStaleRouting(task, d);
+      return;
+    }
 
     const token = CLAIM_PREFIX + d.newId();
     if (!(await d.store.claimTask(task.id, token))) return; // capacity or lost race
@@ -549,14 +592,13 @@ async function stepTask(
     return;
   }
 
-  // Poll the run; act only once it is terminal.
+  // Poll the run; act only once it is terminal. A routed coding run may be
+  // owned by an agent of any stage, so Coding looks across all enabled agents.
   const agentStage = TASK_STAGE_AGENT[task.stage];
-  const ownerStages: AgentStage[] = agentStage
-    ? task.stage === "Coding"
-      ? [agentStage, "orchestrator"]
-      : [agentStage]
-    : [];
-  const agent = await findRunAgent(task.runAgentId, ownerStages, d);
+  const agent =
+    task.stage === "Coding"
+      ? await findAnyEnabledAgent(task.runAgentId, d)
+      : await findRunAgent(task.runAgentId, agentStage ? [agentStage] : [], d);
   if (!agent) {
     ctx.problems.push(`Agent ${task.runAgentId ?? "(unknown)"} for task "${task.title}" is no longer enabled`);
     await d.store.updateTaskIf(task.id, guard, clearRun);
@@ -622,8 +664,9 @@ async function failAttempt(
 ) {
   const clearRun = { runId: null, runAgentId: null, runStartedAt: null };
   if (task.retries < m.maxRetries) {
+    // A routed task keeps its route: back to Routed, never re-asking Laya.
     await d.store.updateTaskIf(task.id, guard, {
-      stage: "Queued",
+      stage: task.routingStatus ? "Routed" : "Queued",
       retries: task.retries + 1,
       tokens,
       ...clearRun,
@@ -631,6 +674,204 @@ async function failAttempt(
   } else {
     await d.store.updateTaskIf(task.id, guard, { stage: "Needs you", tokens, ...clearRun });
   }
+}
+
+/* ------------------------------------------------------------------ */
+/* Task routing (Laya)                                                 */
+/* ------------------------------------------------------------------ */
+
+export const ROUTING_MIGRATION_HINT =
+  "Routing columns missing: re-run supabase/schema.sql (section 9) before enabling NEIRO_LAYA_MODEL_PATH";
+
+/** Postgres 42703 / PostgREST PGRST204: a column the code writes is not in the table. */
+function isMissingColumnError(err: unknown): boolean {
+  const msg = errorMessage(err);
+  return /column .* does not exist/i.test(msg) || /could not find the '.+' column/i.test(msg);
+}
+
+/**
+ * Route one unrouted Queued task. Laya is asked at most once per task: the
+ * tick first takes the `routing` lock with a guarded update, so an
+ * overlapping tick that loses the race never calls the router.
+ */
+async function routeTask(
+  task: MissionTask,
+  router: TaskRouter,
+  d: OrchestratorDeps,
+  ctx: PassContext,
+) {
+  const now = d.now().toISOString();
+  const unrouted: TaskGuard = { stage: "Queued", runId: null, routingStatus: null };
+  let locked: boolean;
+  try {
+    locked = await d.store.updateTaskIf(task.id, unrouted, {
+      routingStatus: "routing",
+      routedAt: now,
+    });
+  } catch (err: unknown) {
+    // The router is on but schema.sql section 9 was never run: say so plainly
+    // instead of a generic per-task error on every tick.
+    if (!isMissingColumnError(err)) throw err;
+    console.error("[orchestrator] routing columns missing", { taskId: task.id, error: errorMessage(err) });
+    if (!ctx.problems.includes(ROUTING_MIGRATION_HINT)) ctx.problems.push(ROUTING_MIGRATION_HINT);
+    return;
+  }
+  if (!locked) return;
+
+  const lockGuard: TaskGuard = { stage: "Queued", runId: null, routingStatus: "routing" };
+
+  try {
+    const agents = await d.store.listAllEnabledAgents();
+    const decision = await router.decide(task, agents);
+    const agent = agents.find((a) => a.id === decision.agentId);
+    if (!agent) throw new Error(`Laya picked an unknown agent: ${decision.agentId}`);
+    const outcome = routeOutcome(decision);
+
+    await d.store.updateTaskIf(task.id, lockGuard, {
+      stage: outcome.stage,
+      routingStatus: outcome.routingStatus,
+      layaAgentId: agent.id,
+      routeUrgency: decision.urgency,
+      routeNeedsHuman: decision.needsHuman,
+      routeConfidence: decision.confidence,
+      routeReason: outcome.reason,
+      routedAt: d.now().toISOString(),
+      // Only a task that routes straight through gets its agent now; a task at
+      // the human gate is assigned when an operator approves or overrides.
+      ...(outcome.stage === "Routed"
+        ? { agentId: agent.id, agentName: agent.name, model: agent.model }
+        : {}),
+    });
+  } catch (err: unknown) {
+    const reason = errorMessage(err).slice(0, MAX_ERROR_CHARS);
+    console.warn("[orchestrator] task routing failed; using the default agent", {
+      taskId: task.id,
+      error: reason,
+    });
+
+    const fallback = await pickStageAgent("workers", task.agentName, d);
+    if (!fallback) {
+      await d.store.updateTaskIf(task.id, lockGuard, { routingStatus: null, routedAt: null });
+      ctx.problems.push(`No enabled worker agent to route task "${task.title}"`);
+      return;
+    }
+
+    await d.store.updateTaskIf(task.id, lockGuard, {
+      stage: "Routed",
+      routingStatus: "fallback",
+      agentId: fallback.id,
+      agentName: fallback.name,
+      model: fallback.model,
+      routeReason: reason,
+      routedAt: d.now().toISOString(),
+    });
+  }
+}
+
+/** A `routing` lock left by a crashed tick is released so routing can retry. */
+async function releaseStaleRouting(task: MissionTask, d: OrchestratorDeps) {
+  if (!isStale(task.routedAt ?? null, d.now())) return;
+  await d.store.updateTaskIf(
+    task.id,
+    { stage: task.stage, runId: task.runId, routingStatus: "routing" },
+    { routingStatus: null, routedAt: null },
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Human gate: approve or override a route                             */
+/* ------------------------------------------------------------------ */
+
+export type RouteGateResult =
+  | { ok: true; task: MissionTask }
+  | { ok: false; status: 400 | 404 | 409; error: string };
+
+const AWAITING_GUARD: TaskGuard = {
+  stage: "Awaiting routing",
+  runId: null,
+  routingStatus: "awaiting",
+};
+
+async function findGateTask(
+  missionId: string,
+  taskId: string,
+  d: OrchestratorDeps,
+): Promise<MissionTask | null> {
+  try {
+    const detail = await d.store.getMissionDetail(missionId);
+    return detail.tasks.find((t) => t.id === taskId) ?? null;
+  } catch {
+    return null; // mission not found
+  }
+}
+
+async function assignFromGate(
+  task: MissionTask,
+  agent: Agent,
+  patch: { routingStatus: "approved" | "overridden"; humanAgentId?: string },
+  d: OrchestratorDeps,
+): Promise<RouteGateResult> {
+  const moved = await d.store.updateTaskIf(task.id, AWAITING_GUARD, {
+    stage: "Routed",
+    agentId: agent.id,
+    agentName: agent.name,
+    model: agent.model,
+    routedAt: d.now().toISOString(),
+    ...patch,
+  });
+  if (!moved) {
+    return { ok: false, status: 409, error: "Task is no longer waiting for routing" };
+  }
+  return {
+    ok: true,
+    task: { ...task, stage: "Routed", agentId: agent.id, agentName: agent.name, model: agent.model, ...patch },
+  };
+}
+
+/** "Setujui": accept Laya's pick. Laya's original choice stays in laya_agent_id. */
+export async function approveRoute(
+  missionId: string,
+  taskId: string,
+  deps?: Partial<OrchestratorDeps>,
+): Promise<RouteGateResult> {
+  const d = resolveDeps(deps);
+  const task = await findGateTask(missionId, taskId, d);
+  if (!task) return { ok: false, status: 404, error: "Task not found" };
+  if (task.stage !== "Awaiting routing") {
+    return { ok: false, status: 409, error: "Task is not waiting for routing" };
+  }
+
+  if (task.layaAgentId === null) {
+    return { ok: false, status: 409, error: "No Laya pick to approve. Pakai Ganti agen." };
+  }
+  const agent = await findAnyEnabledAgent(task.layaAgentId, d);
+  if (!agent) {
+    return { ok: false, status: 409, error: "Laya's agent is no longer enabled. Pilih agen lain." };
+  }
+  return assignFromGate(task, agent, { routingStatus: "approved" }, d);
+}
+
+/** "Ganti agen": a human picks the agent. Both picks are kept for evaluation. */
+export async function overrideRoute(
+  missionId: string,
+  taskId: string,
+  agentId: unknown,
+  deps?: Partial<OrchestratorDeps>,
+): Promise<RouteGateResult> {
+  if (typeof agentId !== "string" || agentId.trim() === "") {
+    return { ok: false, status: 400, error: "Missing required 'agentId'" };
+  }
+
+  const d = resolveDeps(deps);
+  const task = await findGateTask(missionId, taskId, d);
+  if (!task) return { ok: false, status: 404, error: "Task not found" };
+  if (task.stage !== "Awaiting routing") {
+    return { ok: false, status: 409, error: "Task is not waiting for routing" };
+  }
+
+  const agent = await findAnyEnabledAgent(agentId, d);
+  if (!agent) return { ok: false, status: 400, error: `Agent ${agentId} is not an enabled agent` };
+  return assignFromGate(task, agent, { routingStatus: "overridden", humanAgentId: agent.id }, d);
 }
 
 function taskPrompt(m: MissionDetailDTO, task: MissionTask): string {

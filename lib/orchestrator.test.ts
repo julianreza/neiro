@@ -18,6 +18,7 @@ function setup() {
     hermes,
     now: () => new Date(),
     newId: () => `id-${++id}`,
+    router: null, // these tests cover the router-off engine
   };
   return { store, hermes, deps };
 }

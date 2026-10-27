@@ -27,6 +27,7 @@ import type {
 const yieldTick = () => Promise.resolve();
 
 const ACTIVE_STAGES = new Set(["Coding", "QA check", "Final review"]);
+const CLAIMABLE_STAGES = new Set(["Queued", "Routed"]);
 
 export class MemoryStore implements OrchestratorStore {
   missions = new Map<string, Mission>();
@@ -98,6 +99,14 @@ export class MemoryStore implements OrchestratorStore {
       runAgentId: null,
       runStartedAt: null,
       resultOutput: null,
+      routingStatus: null,
+      layaAgentId: null,
+      humanAgentId: null,
+      routeUrgency: null,
+      routeNeedsHuman: null,
+      routeConfidence: null,
+      routeReason: null,
+      routedAt: null,
       ...partial,
     };
     this.tasks.set(id, task);
@@ -135,6 +144,11 @@ export class MemoryStore implements OrchestratorStore {
     return structuredClone(this.agents.filter((a) => a.enabled && a.stage === stage));
   }
 
+  async listAllEnabledAgents(): Promise<Agent[]> {
+    await yieldTick();
+    return structuredClone(this.agents.filter((a) => a.enabled));
+  }
+
   async updateMissionIf(id: string, guard: MissionGuard, patch: MissionPatch): Promise<boolean> {
     await yieldTick();
     const m = this.missions.get(id);
@@ -148,6 +162,9 @@ export class MemoryStore implements OrchestratorStore {
     await yieldTick();
     const t = this.tasks.get(id);
     if (!t || t.stage !== guard.stage || t.runId !== guard.runId) return false;
+    if (guard.routingStatus !== undefined && (t.routingStatus ?? null) !== guard.routingStatus) {
+      return false;
+    }
     Object.assign(t, patch);
     return true;
   }
@@ -163,7 +180,8 @@ export class MemoryStore implements OrchestratorStore {
       (t) => ACTIVE_STAGES.has(t.stage) || t.runId !== null,
     ).length;
     if (active >= mission.maxParallelWorkers) return false;
-    if (task.stage !== "Queued" || task.runId !== null) return false;
+    // 'Awaiting routing' is never claimable: the human gate must approve first.
+    if (!CLAIMABLE_STAGES.has(task.stage) || task.runId !== null) return false;
     task.stage = "Coding";
     task.runId = token;
     task.runStartedAt = new Date().toISOString();

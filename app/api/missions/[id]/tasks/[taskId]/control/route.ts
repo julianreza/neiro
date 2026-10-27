@@ -1,8 +1,14 @@
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
+import { isAuthorizedRequest } from "@/lib/auth";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { stopHermesRun, submitHermesRunApproval, submitHermesRunClarify } from "@/lib/hermes";
-import { advanceMission, reportAdvanceError } from "@/lib/orchestrator";
+import {
+  advanceMission,
+  approveRoute,
+  overrideRoute,
+  reportAdvanceError,
+} from "@/lib/orchestrator";
 import { AppConfigError } from "@/lib/types";
 import type { Agent } from "@/lib/types";
 
@@ -25,6 +31,8 @@ export async function POST(request: NextRequest, context: RouteContext) {
       "deny_tool",
       "clarify",
       "mark_done",
+      "approve_route",
+      "override_route",
     ];
 
     if (!action || !validActions.includes(action)) {
@@ -32,6 +40,30 @@ export async function POST(request: NextRequest, context: RouteContext) {
         { error: `Invalid action. Must be one of: ${validActions.join(", ")}` },
         { status: 400 }
       );
+    }
+
+    // Human routing gate: pick which agent runs a task Laya held back.
+    if (action === "approve_route" || action === "override_route") {
+      if (!(await isAuthorizedRequest(request))) {
+        return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+      }
+
+      const result =
+        action === "approve_route"
+          ? await approveRoute(missionId, taskId)
+          : await overrideRoute(missionId, taskId, body?.agentId);
+
+      if (!result.ok) {
+        return NextResponse.json({ error: result.error }, { status: result.status });
+      }
+
+      try {
+        await advanceMission(missionId);
+      } catch (err: unknown) {
+        await reportAdvanceError(missionId, err, taskId);
+      }
+
+      return NextResponse.json({ ok: true, task: result.task }, { status: 200 });
     }
 
     const supabase = getSupabaseAdmin();

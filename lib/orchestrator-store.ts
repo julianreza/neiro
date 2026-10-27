@@ -9,6 +9,8 @@ import type {
   MissionPhase,
   MissionStatus,
   MissionTask,
+  RoutingStatus,
+  TaskRouting,
   TaskStage,
 } from "@/lib/types";
 
@@ -17,7 +19,12 @@ import type {
 /* ------------------------------------------------------------------ */
 
 /** Observed state a guarded task update must still match. */
-export type TaskGuard = { stage: TaskStage; runId: string | null };
+export type TaskGuard = {
+  stage: TaskStage;
+  runId: string | null;
+  /** When present, routing_status must also match (null = not routed yet). */
+  routingStatus?: RoutingStatus | null;
+};
 
 /** Observed state a guarded mission update must still match. */
 export type MissionGuard = {
@@ -34,18 +41,20 @@ export type MissionPatch = Partial<{
   runStartedAt: string | null;
 }>;
 
-export type TaskPatch = Partial<{
-  stage: TaskStage;
-  runId: string | null;
-  runAgentId: string | null;
-  runStartedAt: string | null;
-  agentId: string | null;
-  agentName: string;
-  model: string;
-  tokens: number;
-  retries: number;
-  resultOutput: string | null;
-}>;
+export type TaskPatch = Partial<
+  TaskRouting & {
+    stage: TaskStage;
+    runId: string | null;
+    runAgentId: string | null;
+    runStartedAt: string | null;
+    agentId: string | null;
+    agentName: string;
+    model: string;
+    tokens: number;
+    retries: number;
+    resultOutput: string | null;
+  }
+>;
 
 export type NewTaskRow = {
   id: string;
@@ -72,6 +81,8 @@ export interface OrchestratorStore {
   /** Missions the tick should advance: status 'running' only. */
   listActiveMissionIds(): Promise<string[]>;
   listEnabledAgents(stage: AgentStage): Promise<Agent[]>;
+  /** Every enabled agent, any stage (the router's candidate set). */
+  listAllEnabledAgents(): Promise<Agent[]>;
   /** Guarded update; resolves true only if exactly one row matched the guard. */
   updateMissionIf(id: string, guard: MissionGuard, patch: MissionPatch): Promise<boolean>;
   /** Guarded update; resolves true only if exactly one row matched the guard. */
@@ -96,6 +107,33 @@ export interface OrchestratorStore {
 type Row = Record<string, unknown>;
 
 const str = (v: unknown): string | null => (typeof v === "string" ? v : null);
+const num = (v: unknown): number | null =>
+  v === null || v === undefined || v === "" || !Number.isFinite(Number(v)) ? null : Number(v);
+const bool = (v: unknown): boolean | null => (typeof v === "boolean" ? v : null);
+
+const ROUTING_STATUSES = new Set<RoutingStatus>([
+  "routing",
+  "routed",
+  "awaiting",
+  "fallback",
+  "approved",
+  "overridden",
+]);
+
+function mapRouting(row: Row): TaskRouting {
+  const status = str(row.routing_status);
+  return {
+    routingStatus:
+      status && ROUTING_STATUSES.has(status as RoutingStatus) ? (status as RoutingStatus) : null,
+    layaAgentId: str(row.laya_agent_id),
+    humanAgentId: str(row.human_agent_id),
+    routeUrgency: num(row.route_urgency),
+    routeNeedsHuman: bool(row.route_needs_human),
+    routeConfidence: num(row.route_confidence),
+    routeReason: str(row.route_reason),
+    routedAt: str(row.routed_at),
+  };
+}
 
 export function mapAgentRow(row: Row): Agent {
   return {
@@ -157,6 +195,7 @@ export function mapTaskRow(row: Row): MissionTask {
     runAgentId: str(row.run_agent_id),
     runStartedAt: str(row.run_started_at),
     resultOutput: str(row.result_output),
+    ...mapRouting(row),
     createdAt: str(row.created_at) ?? undefined,
     updatedAt: str(row.updated_at) ?? undefined,
   };
@@ -197,6 +236,14 @@ function taskPatchToRow(patch: TaskPatch): Row {
   if (patch.tokens !== undefined) row.tokens = patch.tokens;
   if (patch.retries !== undefined) row.retries = patch.retries;
   if (patch.resultOutput !== undefined) row.result_output = patch.resultOutput;
+  if (patch.routingStatus !== undefined) row.routing_status = patch.routingStatus;
+  if (patch.layaAgentId !== undefined) row.laya_agent_id = patch.layaAgentId;
+  if (patch.humanAgentId !== undefined) row.human_agent_id = patch.humanAgentId;
+  if (patch.routeUrgency !== undefined) row.route_urgency = patch.routeUrgency;
+  if (patch.routeNeedsHuman !== undefined) row.route_needs_human = patch.routeNeedsHuman;
+  if (patch.routeConfidence !== undefined) row.route_confidence = patch.routeConfidence;
+  if (patch.routeReason !== undefined) row.route_reason = patch.routeReason;
+  if (patch.routedAt !== undefined) row.routed_at = patch.routedAt;
   return row;
 }
 
@@ -253,6 +300,12 @@ export function createSupabaseStore(client?: SupabaseClient): OrchestratorStore 
       return (data ?? []).map((r) => mapAgentRow(r as Row));
     },
 
+    async listAllEnabledAgents() {
+      const { data, error } = await db().from("agents").select("*").eq("enabled", true);
+      if (error) throw new Error(error.message);
+      return (data ?? []).map((r) => mapAgentRow(r as Row));
+    },
+
     async updateMissionIf(id, guard, patch) {
       let query = db()
         .from("missions")
@@ -273,6 +326,12 @@ export function createSupabaseStore(client?: SupabaseClient): OrchestratorStore 
         .eq("id", id)
         .eq("stage", guard.stage);
       query = guard.runId === null ? query.is("run_id", null) : query.eq("run_id", guard.runId);
+      if (guard.routingStatus !== undefined) {
+        query =
+          guard.routingStatus === null
+            ? query.is("routing_status", null)
+            : query.eq("routing_status", guard.routingStatus);
+      }
       const { data, error } = await query.select("id");
       if (error) throw new Error(error.message);
       return (data ?? []).length === 1;

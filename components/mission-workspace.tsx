@@ -17,8 +17,15 @@ import {
   Zap,
 } from "lucide-react";
 import { toast } from "sonner";
-import { initialMissions, stages, updateDemoTask } from "@/lib/demo-missions";
-import type { DemoMission, DemoTask, TaskStage } from "@/lib/demo-missions";
+import {
+  demoRouteAgents,
+  initialMissions,
+  routeDemoTask,
+  stages,
+  updateDemoTask,
+} from "@/lib/demo-missions";
+import type { DemoMission, DemoTask, RouteAgentOption, TaskStage } from "@/lib/demo-missions";
+import { RoutingGateCard, TaskRouteFlow } from "@/components/task-routing";
 import type { MissionDetailDTO, MissionPhase, MissionSummaryDTO } from "@/lib/types";
 import { formatCompactTokens } from "@/lib/utils";
 import { useLiveData } from "@/hooks/use-live-data";
@@ -44,6 +51,8 @@ import {
 
 const stageColors: Record<TaskStage, string> = {
   Queued: "text-muted-foreground",
+  "Awaiting routing": "text-status-warning",
+  Routed: "text-primary",
   Coding: "text-status-running",
   "QA check": "text-status-warning",
   "Final review": "text-primary",
@@ -104,6 +113,13 @@ function parseMissionDetail(json: unknown): MissionView | null {
       depends: t.depends,
       approval: t.approval,
       retries: t.retries,
+      routingStatus: t.routingStatus ?? null,
+      layaAgentId: t.layaAgentId ?? null,
+      humanAgentId: t.humanAgentId ?? null,
+      routeUrgency: t.routeUrgency ?? null,
+      routeNeedsHuman: t.routeNeedsHuman ?? null,
+      routeConfidence: t.routeConfidence ?? null,
+      routeReason: t.routeReason ?? null,
     })),
     artifacts: m.artifacts.map((a) => ({
       name: `${a.kind.toUpperCase()}.md`,
@@ -116,6 +132,22 @@ function parseMissionDetail(json: unknown): MissionView | null {
 function parseIntOr(value: string, fallback: number): number {
   const n = Number.parseInt(value, 10);
   return Number.isFinite(n) ? n : fallback;
+}
+
+/** Enabled agents from GET /api/agents, for the routing gate's "Ganti agen". */
+function parseRouteAgents(json: unknown): RouteAgentOption[] {
+  const rows = (json as { agents?: unknown })?.agents;
+  if (!Array.isArray(rows)) throw new Error("Malformed agents response");
+  return rows
+    .filter((r): r is Record<string, unknown> => typeof r === "object" && r !== null)
+    .filter((r) => r.enabled !== false)
+    .map((r) => ({
+      id: String(r.id ?? ""),
+      name: String(r.name ?? r.id ?? ""),
+      stage: String(r.stage ?? "workers"),
+      model: String(r.model ?? ""),
+    }))
+    .filter((a) => a.id !== "");
 }
 
 async function postJson(url: string, body: unknown): Promise<{ ok: boolean; data: Record<string, unknown> }> {
@@ -155,6 +187,14 @@ export function MissionWorkspace() {
   const [retries, setRetries] = useState("2");
   const [launching, setLaunching] = useState(false);
   const [inspected, setInspected] = useState<string | null>(null);
+  const agentList = useLiveData<RouteAgentOption[]>("/api/agents", demoRouteAgents, parseRouteAgents);
+  // Live missions only offer live agents: demo agents could not be assigned for real.
+  const routeAgents: RouteAgentOption[] = isLive
+    ? agentList.source === "live"
+      ? agentList.data
+      : []
+    : demoRouteAgents;
+  const [routingBusy, setRoutingBusy] = useState<Set<string>>(() => new Set());
   const input = useRef<HTMLTextAreaElement>(null);
   const mission: MissionView | null | undefined = isLive
     ? detail.source === "live"
@@ -252,6 +292,46 @@ export function MissionWorkspace() {
     else toast.success(`${id}: ${label}`);
     refresh();
   }
+
+  /** Routing gate: "Setujui" (agent = null) or "Ganti agen" (agent chosen). */
+  async function routeGate(id: string, agent: RouteAgentOption | null) {
+    const task = tasks.find((t) => t.id === id);
+    if (!mission || !task) return;
+
+    if (!isLive) {
+      const pick = agent ?? demoRouteAgents.find((a) => a.id === task.layaAgentId);
+      if (!pick) {
+        toast.error("Agen usulan Laya tidak ditemukan");
+        return;
+      }
+      setDemoMissions((items) =>
+        items.map((item) =>
+          item.id === effectiveId
+            ? (routeDemoTask(item as DemoMission, id, pick, agent ? "overridden" : "approved") as MissionView)
+            : item,
+        ),
+      );
+      toast.success(`Demo ${id}: dirouting ke ${pick.name}`);
+      return;
+    }
+
+    if (!task.rowId) return;
+    setRoutingBusy((s) => new Set(s).add(id));
+    const { ok, data } = await postJson(
+      `/api/missions/${encodeURIComponent(mission.id)}/tasks/${encodeURIComponent(task.rowId)}/control`,
+      agent ? { action: "override_route", agentId: agent.id } : { action: "approve_route" },
+    );
+    setRoutingBusy((s) => {
+      const next = new Set(s);
+      next.delete(id);
+      return next;
+    });
+    if (!ok) toast.error(String(data.error));
+    else toast.success(agent ? `${id}: agen diganti ke ${agent.name}` : `${id}: rute disetujui`);
+    refresh();
+  }
+
+  const gateTasks = tasks.filter((t) => t.stage === "Awaiting routing");
 
   function updateTask(id: string, stage: TaskStage) {
     if (isLive) {
@@ -684,8 +764,27 @@ export function MissionWorkspace() {
                     </p>
                   </div>
                 )}
+                {gateTasks.length > 0 && (
+                  <section aria-labelledby="routing-gate-heading" className="mb-6 space-y-3">
+                    <h3 id="routing-gate-heading" className="eyebrow">
+                      Menunggu keputusan routing · {gateTasks.length}
+                    </h3>
+                    <div className="grid gap-3 lg:grid-cols-2">
+                      {gateTasks.map((task) => (
+                        <RoutingGateCard
+                          key={task.id}
+                          task={task}
+                          agents={routeAgents}
+                          busy={routingBusy.has(task.id)}
+                          onApprove={() => void routeGate(task.id, null)}
+                          onOverride={(agent) => void routeGate(task.id, agent)}
+                        />
+                      ))}
+                    </div>
+                  </section>
+                )}
                 <div className="overflow-x-auto pb-4">
-                  <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-6">
+                  <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
                     {stages.map((stage) => (
                       <div
                         key={stage}
@@ -734,6 +833,7 @@ export function MissionWorkspace() {
                                     {task.depends.join(" · ")}
                                   </p>
                                 )}
+                                <TaskRouteFlow task={task} agents={routeAgents} />
                                 <div className="mt-4 flex items-center gap-2 border-t pt-3">
                                   <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-secondary text-[8px]">
                                     {task.agent
