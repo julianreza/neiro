@@ -1,6 +1,10 @@
 import { formatDistanceToNowStrict } from "date-fns";
+import { clsx, type ClassValue } from "clsx";
+import { twMerge } from "tailwind-merge";
 
-export { cn } from "cn";
+export function cn(...inputs: ClassValue[]): string {
+  return twMerge(clsx(inputs));
+}
 
 const compactTokens = new Intl.NumberFormat("en-US", {
   notation: "compact",
