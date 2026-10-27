@@ -272,3 +272,105 @@ BEGIN
     GRANT EXECUTE ON FUNCTION neiro_claim_task(TEXT, TEXT) TO service_role;
   END IF;
 END $$;
+
+-- =====================================================================
+-- 9. Migration: task router (Laya)
+--    Idempotent: safe to re-run on an existing database.
+--    Laya only picks the agent; the orchestrator still runs every task.
+--    Stages added by the router: 'Routed' (claimable) and
+--    'Awaiting routing' (human gate, never claimable).
+-- =====================================================================
+
+-- 9.1 mission_tasks: routing decision and its audit trail
+--     routing_status: NULL (not routed yet) | routing (a tick holds the lock)
+--                     | routed | awaiting | fallback | approved | overridden
+--     laya_agent_id:  Laya's original pick, never overwritten
+--     human_agent_id: the operator's pick on "Ganti agen"
+ALTER TABLE mission_tasks ADD COLUMN IF NOT EXISTS routing_status TEXT;
+ALTER TABLE mission_tasks ADD COLUMN IF NOT EXISTS laya_agent_id TEXT;
+ALTER TABLE mission_tasks ADD COLUMN IF NOT EXISTS human_agent_id TEXT;
+ALTER TABLE mission_tasks ADD COLUMN IF NOT EXISTS route_urgency INT;
+ALTER TABLE mission_tasks ADD COLUMN IF NOT EXISTS route_needs_human BOOLEAN;
+ALTER TABLE mission_tasks ADD COLUMN IF NOT EXISTS route_confidence REAL;
+ALTER TABLE mission_tasks ADD COLUMN IF NOT EXISTS route_reason TEXT;
+ALTER TABLE mission_tasks ADD COLUMN IF NOT EXISTS routed_at TIMESTAMPTZ;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'mission_tasks_route_urgency_chk') THEN
+    ALTER TABLE mission_tasks ADD CONSTRAINT mission_tasks_route_urgency_chk
+      CHECK (route_urgency IS NULL OR route_urgency BETWEEN 0 AND 2);
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'mission_tasks_route_confidence_chk') THEN
+    ALTER TABLE mission_tasks ADD CONSTRAINT mission_tasks_route_confidence_chk
+      CHECK (route_confidence IS NULL OR (route_confidence >= 0 AND route_confidence <= 1));
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'mission_tasks_routing_status_chk') THEN
+    ALTER TABLE mission_tasks ADD CONSTRAINT mission_tasks_routing_status_chk
+      CHECK (routing_status IS NULL OR routing_status IN
+        ('routing', 'routed', 'awaiting', 'fallback', 'approved', 'overridden'));
+  END IF;
+END $$;
+
+-- 9.2 Atomic task claim: same as 8.4, but a task may also be claimed from
+--     'Routed'. 'Awaiting routing' is never claimable, so a task held at the
+--     human gate cannot start before an operator approves it.
+CREATE OR REPLACE FUNCTION neiro_claim_task(p_task_id TEXT, p_token TEXT)
+RETURNS BOOLEAN
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  v_mission TEXT;
+  v_max INT;
+  v_active INT;
+  v_rows INT;
+BEGIN
+  SELECT t.mission_id, m.max_parallel_workers
+    INTO v_mission, v_max
+    FROM mission_tasks t
+    JOIN missions m ON m.id = t.mission_id
+   WHERE t.id = p_task_id;
+
+  IF v_mission IS NULL THEN
+    RETURN false;
+  END IF;
+
+  PERFORM pg_advisory_xact_lock(hashtext(v_mission));
+
+  SELECT count(*) INTO v_active
+    FROM mission_tasks
+   WHERE mission_id = v_mission
+     AND (stage IN ('Coding', 'QA check', 'Final review') OR run_id IS NOT NULL);
+
+  IF v_active >= v_max THEN
+    RETURN false;
+  END IF;
+
+  UPDATE mission_tasks
+     SET stage = 'Coding',
+         run_id = p_token,
+         run_started_at = NOW(),
+         updated_at = NOW()
+   WHERE id = p_task_id
+     AND stage IN ('Queued', 'Routed')
+     AND run_id IS NULL;
+
+  GET DIAGNOSTICS v_rows = ROW_COUNT;
+  RETURN v_rows = 1;
+END
+$$;
+
+-- Callable only by the service role (matches the zero-policy RLS model).
+REVOKE ALL ON FUNCTION neiro_claim_task(TEXT, TEXT) FROM PUBLIC;
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
+    REVOKE ALL ON FUNCTION neiro_claim_task(TEXT, TEXT) FROM anon;
+  END IF;
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
+    REVOKE ALL ON FUNCTION neiro_claim_task(TEXT, TEXT) FROM authenticated;
+  END IF;
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'service_role') THEN
+    GRANT EXECUTE ON FUNCTION neiro_claim_task(TEXT, TEXT) TO service_role;
+  END IF;
+END $$;

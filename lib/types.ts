@@ -77,13 +77,44 @@ export type Mission = {
 
 export type TaskStage =
   | "Queued"
+  | "Awaiting routing"
+  | "Routed"
   | "Coding"
   | "QA check"
   | "Final review"
   | "Needs you"
   | "Done";
 
-export type MissionTask = {
+/**
+ * Task router (Laya) state. `null` = not routed yet; `routing` = a tick holds
+ * the routing lock; the rest record how the agent was chosen.
+ */
+export type RoutingStatus =
+  | "routing"
+  | "routed"
+  | "awaiting"
+  | "fallback"
+  | "approved"
+  | "overridden";
+
+/** Router fields on a task; all null until the router has looked at it. */
+export type TaskRouting = {
+  routingStatus: RoutingStatus | null;
+  /** Laya's original pick; never overwritten. */
+  layaAgentId: string | null;
+  /** Operator's pick on "Ganti agen". */
+  humanAgentId: string | null;
+  /** 0 = low, 1 = medium, 2 = high. */
+  routeUrgency: number | null;
+  routeNeedsHuman: boolean | null;
+  /** Laya's confidence in its agent_id answer, 0-1. */
+  routeConfidence: number | null;
+  /** Why the task is at the human gate, or the fallback error. */
+  routeReason: string | null;
+  routedAt: string | null;
+};
+
+export type MissionTask = Partial<TaskRouting> & {
   id: string;
   missionId: string;
   title: string;
