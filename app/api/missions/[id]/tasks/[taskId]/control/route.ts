@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { stopHermesRun, submitHermesRunApproval, submitHermesRunClarify } from "@/lib/hermes";
-import { advanceMission } from "@/lib/orchestrator";
+import { advanceMission, reportAdvanceError } from "@/lib/orchestrator";
 import { AppConfigError } from "@/lib/types";
 import type { Agent } from "@/lib/types";
 
@@ -50,12 +50,17 @@ export async function POST(request: NextRequest, context: RouteContext) {
       return NextResponse.json({ error: "Task not found" }, { status: 404 });
     }
 
+    // run_id holds the live Hermes run, or a `claim:` token while one is starting.
+    const activeRunId: string | null =
+      typeof task.run_id === "string" && !task.run_id.startsWith("claim:") ? task.run_id : null;
+    const runAgentId: string | null = task.run_agent_id ?? task.agent_id ?? null;
+
     let agent: Agent | null = null;
-    if (task.agent_id) {
+    if (runAgentId) {
       const { data: agentData } = await supabase
         .from("agents")
         .select("*")
-        .eq("id", task.agent_id)
+        .eq("id", runAgentId)
         .maybeSingle();
 
       if (agentData) {
@@ -82,6 +87,9 @@ export async function POST(request: NextRequest, context: RouteContext) {
         .update({
           stage: "Done",
           approval: false,
+          run_id: null,
+          run_agent_id: null,
+          run_started_at: null,
           updated_at: new Date().toISOString(),
         })
         .eq("id", taskId)
@@ -94,8 +102,8 @@ export async function POST(request: NextRequest, context: RouteContext) {
 
       try {
         await advanceMission(missionId);
-      } catch {
-        // Triggered on next tick
+      } catch (err: unknown) {
+        await reportAdvanceError(missionId, err, taskId);
       }
 
       return NextResponse.json({ ok: true, task: data }, { status: 200 });
@@ -108,7 +116,11 @@ export async function POST(request: NextRequest, context: RouteContext) {
           stage: "Queued",
           approval: false,
           retries: (task.retries || 0) + 1,
-          result: null,
+          // `result` holds the task requirements; only the previous output is reset.
+          result_output: null,
+          run_id: null,
+          run_agent_id: null,
+          run_started_at: null,
           updated_at: new Date().toISOString(),
         })
         .eq("id", taskId)
@@ -121,19 +133,24 @@ export async function POST(request: NextRequest, context: RouteContext) {
 
       try {
         await advanceMission(missionId);
-      } catch {
-        // Triggered on next tick
+      } catch (err: unknown) {
+        await reportAdvanceError(missionId, err, taskId);
       }
 
       return NextResponse.json({ ok: true, task: data }, { status: 200 });
     }
 
     if (action === "stop") {
-      if (agent && task.active_run_id) {
+      if (agent && activeRunId) {
         try {
-          await stopHermesRun(agent, task.active_run_id);
-        } catch {
-          // Best effort stop
+          await stopHermesRun(agent, activeRunId);
+        } catch (err: unknown) {
+          // Best effort: the task is parked in "Needs you" either way.
+          console.error("[orchestrator] stop run failed", {
+            missionId,
+            taskId,
+            error: err instanceof Error ? err.message : String(err),
+          });
         }
       }
 
@@ -142,6 +159,9 @@ export async function POST(request: NextRequest, context: RouteContext) {
         .update({
           stage: "Needs you",
           approval: false,
+          run_id: null,
+          run_agent_id: null,
+          run_started_at: null,
           updated_at: new Date().toISOString(),
         })
         .eq("id", taskId)
@@ -157,9 +177,9 @@ export async function POST(request: NextRequest, context: RouteContext) {
 
     if (action === "approve_tool" || action === "deny_tool") {
       const isApproved = action === "approve_tool" || Boolean(approved);
-      if (agent && task.active_run_id) {
+      if (agent && activeRunId) {
         try {
-          await submitHermesRunApproval(agent, task.active_run_id, isApproved);
+          await submitHermesRunApproval(agent, activeRunId, isApproved);
         } catch (err: unknown) {
           const message = err instanceof Error ? err.message : String(err);
           return NextResponse.json({ error: message }, { status: 500 });
@@ -188,9 +208,9 @@ export async function POST(request: NextRequest, context: RouteContext) {
         return NextResponse.json({ error: "Missing required 'reply' text" }, { status: 400 });
       }
 
-      if (agent && task.active_run_id) {
+      if (agent && activeRunId) {
         try {
-          await submitHermesRunClarify(agent, task.active_run_id, reply);
+          await submitHermesRunClarify(agent, activeRunId, reply);
         } catch (err: unknown) {
           const message = err instanceof Error ? err.message : String(err);
           return NextResponse.json({ error: message }, { status: 500 });

@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { connection } from "next/server";
 import type { NextRequest } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
+import { mapArtifactRow, mapMissionRow, mapTaskRow } from "@/lib/orchestrator-store";
 import { AppConfigError } from "@/lib/types";
 import type { MissionDetailDTO } from "@/lib/types";
 
@@ -50,32 +51,9 @@ export async function GET(_request: NextRequest, context: RouteContext) {
     }
 
     const detail: MissionDetailDTO = {
-      ...mission,
-      tasks: (tasks || []).map((t) => ({
-        id: t.id,
-        missionId: t.mission_id,
-        title: t.title,
-        stage: t.stage,
-        agentId: t.agent_id,
-        agentName: t.agent_name,
-        model: t.model,
-        tokens: t.tokens,
-        depends: Array.isArray(t.depends) ? t.depends : [],
-        approval: t.approval,
-        retries: t.retries,
-        result: t.result,
-        createdAt: t.created_at,
-        updatedAt: t.updated_at,
-      })),
-      artifacts: (artifacts || []).map((a) => ({
-        id: a.id,
-        missionId: a.mission_id,
-        taskId: a.task_id,
-        title: a.title,
-        kind: a.kind,
-        content: a.content,
-        createdAt: a.created_at,
-      })),
+      ...mapMissionRow(mission as Record<string, unknown>),
+      tasks: (tasks || []).map((t) => mapTaskRow(t as Record<string, unknown>)),
+      artifacts: (artifacts || []).map((a) => mapArtifactRow(a as Record<string, unknown>)),
     };
 
     return NextResponse.json({ mission: detail }, { status: 200 });

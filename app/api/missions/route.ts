@@ -2,9 +2,11 @@ import { NextResponse } from "next/server";
 import { connection } from "next/server";
 import type { NextRequest } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
-import { advanceMission } from "@/lib/orchestrator";
+import { advanceMission, reportAdvanceError } from "@/lib/orchestrator";
+import { mapMissionRow } from "@/lib/orchestrator-store";
+import { parseMissionCreateBody } from "@/lib/mission-input";
 import { AppConfigError } from "@/lib/types";
-import type { Mission, MissionSummaryDTO } from "@/lib/types";
+import type { MissionSummaryDTO } from "@/lib/types";
 
 export async function GET() {
   await connection();
@@ -48,7 +50,8 @@ export async function GET() {
       statsByMission.set(task.mission_id, current);
     }
 
-    const summaries: MissionSummaryDTO[] = (missions || []).map((m: Mission) => {
+    const summaries: MissionSummaryDTO[] = (missions || []).map((row: Record<string, unknown>) => {
+      const m = mapMissionRow(row);
       const stats = statsByMission.get(m.id) || {
         totalTasks: 0,
         completedTasks: 0,
@@ -77,17 +80,12 @@ export async function GET() {
 
 export async function POST(request: NextRequest) {
   try {
-    const body = await request.json();
-    const { title, prompt } = body || {};
-
-    if (!prompt || typeof prompt !== "string" || prompt.trim().length === 0) {
-      return NextResponse.json({ error: "Missing required mission prompt" }, { status: 400 });
+    const body = await request.json().catch(() => null);
+    const parsed = parseMissionCreateBody(body);
+    if (!parsed.ok) {
+      return NextResponse.json({ error: parsed.error }, { status: 400 });
     }
-
-    const missionTitle =
-      title && typeof title === "string" && title.trim().length > 0
-        ? title.trim()
-        : prompt.slice(0, 48).trim() || "Untitled Mission";
+    const input = parsed.value;
 
     const missionId = `mission-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 
@@ -97,9 +95,16 @@ export async function POST(request: NextRequest) {
       .from("missions")
       .insert({
         id: missionId,
-        title: missionTitle,
-        prompt: prompt.trim(),
+        title: input.title,
+        prompt: input.prompt,
+        // Always starts running; pause_after_planning stops it after the
+        // spec phase (status -> awaiting_plan_approval).
         status: "running",
+        phase: "planning",
+        pause_after_planning: input.pauseAfterPlanning,
+        max_parallel_workers: input.maxParallelWorkers,
+        max_retries: input.maxRetries,
+        workspace_path: input.workspacePath,
       })
       .select()
       .single();
@@ -108,14 +113,17 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: createErr.message }, { status: 500 });
     }
 
-    // Trigger immediate progression non-blocking / eagerly
+    // Start planning eagerly; on failure the next tick retries.
     try {
       await advanceMission(missionId);
-    } catch {
-      // Background progression failure logged or picked up by tick
+    } catch (err: unknown) {
+      await reportAdvanceError(missionId, err);
     }
 
-    return NextResponse.json({ mission: newMission }, { status: 201 });
+    return NextResponse.json(
+      { mission: mapMissionRow(newMission as Record<string, unknown>) },
+      { status: 201 },
+    );
   } catch (err: unknown) {
     if (err instanceof AppConfigError) {
       return NextResponse.json(
