@@ -680,6 +680,15 @@ async function failAttempt(
 /* Task routing (Laya)                                                 */
 /* ------------------------------------------------------------------ */
 
+export const ROUTING_MIGRATION_HINT =
+  "Routing columns missing: re-run supabase/schema.sql (section 9) before enabling NEIRO_LAYA_MODEL_PATH";
+
+/** Postgres 42703 / PostgREST PGRST204: a column the code writes is not in the table. */
+function isMissingColumnError(err: unknown): boolean {
+  const msg = errorMessage(err);
+  return /column .* does not exist/i.test(msg) || /could not find the '.+' column/i.test(msg);
+}
+
 /**
  * Route one unrouted Queued task. Laya is asked at most once per task: the
  * tick first takes the `routing` lock with a guarded update, so an
@@ -693,10 +702,20 @@ async function routeTask(
 ) {
   const now = d.now().toISOString();
   const unrouted: TaskGuard = { stage: "Queued", runId: null, routingStatus: null };
-  const locked = await d.store.updateTaskIf(task.id, unrouted, {
-    routingStatus: "routing",
-    routedAt: now,
-  });
+  let locked: boolean;
+  try {
+    locked = await d.store.updateTaskIf(task.id, unrouted, {
+      routingStatus: "routing",
+      routedAt: now,
+    });
+  } catch (err: unknown) {
+    // The router is on but schema.sql section 9 was never run: say so plainly
+    // instead of a generic per-task error on every tick.
+    if (!isMissingColumnError(err)) throw err;
+    console.error("[orchestrator] routing columns missing", { taskId: task.id, error: errorMessage(err) });
+    if (!ctx.problems.includes(ROUTING_MIGRATION_HINT)) ctx.problems.push(ROUTING_MIGRATION_HINT);
+    return;
+  }
   if (!locked) return;
 
   const lockGuard: TaskGuard = { stage: "Queued", runId: null, routingStatus: "routing" };
@@ -822,7 +841,10 @@ export async function approveRoute(
     return { ok: false, status: 409, error: "Task is not waiting for routing" };
   }
 
-  const agent = await findAnyEnabledAgent(task.layaAgentId ?? null, d);
+  if (task.layaAgentId === null) {
+    return { ok: false, status: 409, error: "No Laya pick to approve. Pakai Ganti agen." };
+  }
+  const agent = await findAnyEnabledAgent(task.layaAgentId, d);
   if (!agent) {
     return { ok: false, status: 409, error: "Laya's agent is no longer enabled. Pilih agen lain." };
   }

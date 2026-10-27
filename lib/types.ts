@@ -114,7 +114,8 @@ export type TaskRouting = {
   routedAt: string | null;
 };
 
-export type MissionTask = Partial<TaskRouting> & {
+/** Store-backed task: routing fields are always present (`null` until routed). */
+export type MissionTask = TaskRouting & {
   id: string;
   missionId: string;
   title: string;

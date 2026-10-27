@@ -9,6 +9,7 @@ import {
   advanceMission,
   approveRoute,
   overrideRoute,
+  ROUTING_MIGRATION_HINT,
   type OrchestratorDeps,
 } from "./orchestrator";
 import { FakeHermes } from "./test-fakes/fake-hermes";
@@ -122,6 +123,60 @@ test("router: fallback with no worker agents leaves the task Queued and reports 
   assert.equal(after.stage, "Queued");
   assert.equal(after.routingStatus, null);
   assert.match(store.missions.get(mission.id)!.lastError ?? "", /No enabled worker agent/);
+});
+
+test("router: with no workers, each tick retries once and nothing gets wedged or started", async () => {
+  const { store, hermes, router, deps, mission, task } = setup(new Error("boom"));
+  store.agents = store.agents.filter((a) => a.stage !== "workers");
+
+  for (let i = 1; i <= 2; i++) {
+    store.setMissionError(mission.id, null);
+    await advanceMission(mission.id, deps);
+    const after = store.tasks.get(task.id)!;
+    assert.equal(after.stage, "Queued");
+    assert.equal(after.routingStatus, null);
+    assert.equal(after.runId, null);
+    assert.equal(router!.calls.length, i); // one router call per tick, no hot loop
+    assert.match(store.missions.get(mission.id)!.lastError ?? "", /No enabled worker agent/);
+  }
+  assert.equal(hermes.starts.length, 0);
+
+  // A worker comes back: the next tick routes the task normally.
+  store.seedAgent("workers", "backend-worker", "backend");
+  await advanceMission(mission.id, deps);
+  assert.equal(store.tasks.get(task.id)!.stage, "Routed");
+});
+
+test("router: missing routing columns surface one clear migration message", async () => {
+  const { store, router, deps, mission, task } = setup();
+  const original = store.updateTaskIf.bind(store);
+  store.updateTaskIf = async (id, guard, patch) => {
+    if ("routingStatus" in patch) {
+      throw new Error("column tasks.routing_status does not exist");
+    }
+    return original(id, guard, patch);
+  };
+  store.seedTask(mission.id, { taskKey: "T2", title: "Build API", agentName: "backend" });
+
+  await advanceMission(mission.id, deps);
+
+  assert.equal(store.tasks.get(task.id)!.stage, "Queued");
+  assert.equal(router!.calls.length, 0);
+  assert.equal(store.missions.get(mission.id)!.lastError, ROUTING_MIGRATION_HINT);
+});
+
+test("gate: approving with no Laya pick points to Ganti agen, not a disabled agent", async () => {
+  const { store, deps, mission } = setup();
+  const task = store.seedTask(mission.id, {
+    taskKey: "T9",
+    stage: "Awaiting routing",
+    routingStatus: "awaiting",
+    layaAgentId: null,
+  });
+
+  const result = await approveRoute(mission.id, task.id, deps);
+  assert.equal(result.ok, false);
+  assert.match(result.ok ? "" : result.error, /No Laya pick/);
 });
 
 test("gate: overriding keeps Laya's pick and the human pick; the human agent runs it", async () => {
