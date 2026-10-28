@@ -51,6 +51,7 @@ import {
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
 import { RunInspectorSheet } from "@/components/run-inspector-sheet";
+import { WorktreeBar } from "@/components/worktree-bar";
 import {
   MarkdownArtifactViewer,
   type ArtifactFile,
@@ -85,6 +86,9 @@ type MissionView = Omit<DemoMission, "tasks"> & {
   phase?: MissionPhase;
   lastError?: string | null;
   artifacts?: ArtifactFile[];
+  /** Mission branch when it runs in a git worktree (live missions only). */
+  workBranch?: string | null;
+  baseBranch?: string | null;
 };
 
 const PHASE_STEP: Record<MissionPhase, number> = {
@@ -119,6 +123,8 @@ function parseMissionDetail(json: unknown): MissionView | null {
     status: m.status,
     phase: m.phase,
     lastError: m.lastError,
+    workBranch: m.workBranch,
+    baseBranch: m.baseBranch,
     tasks: m.tasks.map((t) => ({
       id: t.taskKey ?? t.id.slice(0, 8),
       rowId: t.id,
@@ -749,6 +755,15 @@ export function MissionWorkspace() {
             </div>
           </div>
         </div>
+        {isLive && mission?.workBranch && (
+          <WorktreeBar
+            missionId={mission.id}
+            branch={mission.workBranch}
+            baseBranch={mission.baseBranch ?? null}
+            status={mission.status}
+            onDiscarded={refresh}
+          />
+        )}
         {mission?.lastError && (
           <Alert variant="destructive" role="alert">
             <AlertTitle>Orchestrator error</AlertTitle>
