@@ -199,8 +199,12 @@ ALTER TABLE mission_tasks ADD COLUMN IF NOT EXISTS run_agent_id TEXT;
 ALTER TABLE mission_tasks ADD COLUMN IF NOT EXISTS run_started_at TIMESTAMPTZ;
 ALTER TABLE mission_tasks ADD COLUMN IF NOT EXISTS result_output TEXT;
 
-CREATE UNIQUE INDEX IF NOT EXISTS uq_mission_tasks_key
-  ON mission_tasks(mission_id, task_key) WHERE task_key IS NOT NULL;
+-- Not partial: ON CONFLICT (mission_id, task_key) from supabase-js cannot
+-- name a WHERE predicate, so a partial index never matches. NULL task_keys
+-- stay distinct under a plain unique index anyway.
+DROP INDEX IF EXISTS uq_mission_tasks_key;
+CREATE UNIQUE INDEX uq_mission_tasks_key
+  ON mission_tasks(mission_id, task_key);
 
 -- 8.3 mission_artifacts: idempotent inserts
 --     dedupe_key: plan:<missionId> | prd:<missionId> | summary:<missionId>

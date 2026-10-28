@@ -3,6 +3,14 @@
 import { useRef, useState, type FormEvent } from "react";
 import { useLiveData } from "@/hooks/use-live-data";
 import { DataSourceBadge } from "@/components/data-source-badge";
+import {
+  AgentBot,
+  agentColor,
+  agentLook,
+  followPointer,
+  resetPointer,
+} from "@/components/agent-bot";
+import { TeamWires } from "@/components/team-wires";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   Bot,
@@ -17,7 +25,6 @@ import {
   Unplug,
 } from "lucide-react";
 import { toast } from "sonner";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -313,6 +320,11 @@ export function AgentsManager() {
     else document.getElementById("new-demo-agent")?.focus();
   }
 
+  const laneLook = (id: Stage): React.CSSProperties => {
+    const lead = visible.find((agent) => agent.stage === id);
+    return lead ? agentLook(lead.role) : {};
+  };
+
   const renderLane = (stage: (typeof stages)[number], index: number) => {
     const members = visible.filter((agent) => agent.stage === stage.id);
     return (
@@ -321,16 +333,14 @@ export function AgentsManager() {
         className="console-lane min-w-0 space-y-3"
         aria-labelledby={`stage-${stage.id}`}
         data-stage={stage.id}
+        style={laneLook(stage.id)}
       >
-        <div className="border-b pb-3">
+        <div className="lane-head border-b pb-3">
           <div>
             <h2
               id={`stage-${stage.id}`}
               className="flex items-center gap-2 font-semibold"
             >
-              <span className="font-mono text-xs text-muted-foreground">
-                0{index + 1}
-              </span>
               {stage.name}
               <span
                 className="rounded-full bg-secondary px-2 py-0.5 text-xs font-medium tabular-nums text-muted-foreground"
@@ -347,41 +357,53 @@ export function AgentsManager() {
         {members.map((agent, memberIndex) => (
           <article
             key={agent.id}
-            className="card-trendy space-y-4 p-5"
-            style={{ "--i": index + memberIndex } as React.CSSProperties}
+            className="agent-card space-y-4"
+            data-state={
+              !agent.enabled ? "asleep" : agent.activeRun ? "working" : "idle"
+            }
+            style={
+              {
+                "--i": index + memberIndex,
+                ...agentLook(agent.role),
+              } as React.CSSProperties
+            }
+            onPointerMove={followPointer}
+            onPointerLeave={resetPointer}
           >
-            <div className="flex items-start justify-between gap-3">
-              <div className="flex items-start gap-3 min-w-0">
-                <span className="lane-avatar flex size-10 shrink-0 items-center justify-center rounded-xl border text-xs font-semibold">
-                  {agent.name.slice(0, 2).toUpperCase()}
-                </span>
-                <div className="min-w-0">
-                  <h3 className="break-words font-semibold text-base tracking-tight">
-                    {agent.name}
-                  </h3>
-                  <p className="mt-0.5 break-words text-xs text-muted-foreground">
-                    {agent.specialty}
-                  </p>
+            <div className="flex items-start justify-between gap-2">
+              <div className="min-w-0 space-y-2">
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <span className="agent-status">
+                    <i aria-hidden="true" />
+                    {!agent.enabled
+                      ? "Paused"
+                      : agent.activeRun
+                        ? "Working"
+                        : "Online"}
+                  </span>
+                  {readOnly && <span className="agent-status">Demo</span>}
                 </div>
+                <h3 className="agent-name break-words">{agent.name}</h3>
+                <p className="break-words text-sm text-white/85">
+                  {agent.specialty}
+                </p>
               </div>
-              {readOnly && (
-                <Badge
-                  variant="outline"
-                  className="text-muted-foreground text-[10px]"
-                >
-                  Demo
-                </Badge>
-              )}
+              <AgentBot
+                name={agent.name}
+                role={agent.role}
+                asleep={!agent.enabled}
+                working={agent.activeRun}
+              />
             </div>
             <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-2 text-xs">
-              <dt className="text-muted-foreground">Model</dt>
+              <dt className="text-white/70">Model</dt>
               <dd className="break-words">{agent.model}</dd>
-              <dt className="text-muted-foreground">Profile</dt>
+              <dt className="text-white/70">Profile</dt>
               <dd className="min-w-0">
-                <code className="code-chip break-all">{agent.profile}</code>
+                <code className="agent-chip break-all">{agent.profile}</code>
               </dd>
             </dl>
-            <div className="flex min-h-11 items-center justify-between gap-2 border-y py-2">
+            <div className="flex min-h-11 items-center justify-between gap-2 border-y border-white/20 py-2">
               <Label
                 htmlFor={`enabled-${agent.id}`}
                 className="text-xs"
@@ -399,7 +421,7 @@ export function AgentsManager() {
               />
             </div>
             {agent.activeRun && (
-              <p className="flex items-start gap-2 text-xs text-amber-700 dark:text-amber-400">
+              <p className="flex items-start gap-2 rounded-xl bg-black/25 p-2 text-xs text-amber-100">
                 <ShieldAlert className="size-4 shrink-0" />
                 {readOnly
                   ? "Demo run M-104 assigned. Deletion blocked until released."
@@ -408,8 +430,7 @@ export function AgentsManager() {
             )}
             <div className="flex flex-wrap gap-1">
               <Button
-                className="min-h-10"
-                variant="outline"
+                className="agent-pill min-h-10"
                 onClick={(event) => {
                   actionOrigin.current = event.currentTarget;
                   setPreview(agent);
@@ -420,7 +441,7 @@ export function AgentsManager() {
                 Preview
               </Button>
               <Button
-                className="min-h-10"
+                className="agent-icon min-h-10"
                 variant="ghost"
                 aria-label={`Edit ${agent.name}`}
                 disabled={readOnly}
@@ -431,7 +452,7 @@ export function AgentsManager() {
                 <span className="sr-only">Edit</span>
               </Button>
               <Button
-                className="min-h-10"
+                className="agent-icon min-h-10"
                 variant="ghost"
                 aria-label={`Clone ${agent.name}`}
                 disabled={readOnly}
@@ -452,7 +473,7 @@ export function AgentsManager() {
                 <span className="sr-only">Clone</span>
               </Button>
               <Button
-                className="min-h-10"
+                className="agent-icon min-h-10"
                 variant="ghost"
                 aria-label={`Delete ${agent.name}`}
                 disabled={readOnly}
@@ -619,6 +640,16 @@ export function AgentsManager() {
             const middle = (branches.length - 1) / 2;
             return (
               <>
+                <TeamWires
+                  wires={branches.map((stage) => {
+                    const lead = visible.find((a) => a.stage === stage.id);
+                    return {
+                      id: stage.id,
+                      color: lead ? agentColor(lead.role) : "var(--primary)",
+                      live: isLive(stage.id),
+                    };
+                  })}
+                />
                 <div className="team-root">{renderLane(root, 0)}</div>
                 <div
                   className="team-trunk"
@@ -637,7 +668,9 @@ export function AgentsManager() {
                       className="team-branch"
                       data-live={isLive(stage.id) || undefined}
                       data-side={i < middle ? "left" : "right"}
-                      style={{ "--b": i } as React.CSSProperties}
+                      style={
+                        { "--b": i, ...laneLook(stage.id) } as React.CSSProperties
+                      }
                     >
                       <span className="team-pulse" aria-hidden="true" />
                       {renderLane(stage, i + 1)}

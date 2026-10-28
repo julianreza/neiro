@@ -1,23 +1,20 @@
 "use client";
 
 import { useState } from "react";
-import { Cable, Check, Copy, RefreshCw, Search, Unplug } from "lucide-react";
+import { Cable, Check, Copy, Lock, RefreshCw, Search, Terminal, Unplug } from "lucide-react";
 import { toast } from "sonner";
 import type { GatewayStatusDTO } from "@/lib/types";
-import { Badge } from "@/components/ui/badge";
 import { DataSourceBadge } from "@/components/data-source-badge";
+import {
+  AgentBot,
+  agentLook,
+  followPointer,
+  resetPointer,
+} from "@/components/agent-bot";
 import { useLiveData } from "@/hooks/use-live-data";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
 
 const categories = [
   "all",
@@ -78,22 +75,6 @@ const models: {
     provider: "Sample search route",
   },
 ];
-const setup = [
-  ["SUPABASE_URL", "Supabase project URL for persistent dashboard data."],
-  [
-    "SUPABASE_SERVICE_ROLE_KEY",
-    "Server-only service role credential. Never expose it in browser code.",
-  ],
-  ["HERMES_DEFAULT_URL", "Default Hermes agent endpoint on your VPS."],
-  [
-    "HERMES_DEFAULT_KEY",
-    "Server-only authentication key for the Hermes endpoint.",
-  ],
-  [
-    "NINEROUTER_URL",
-    "9Router gateway base URL for model discovery and inference routing.",
-  ],
-];
 const capabilities = [
   {
     name: "Atlas",
@@ -123,6 +104,50 @@ const capabilities = [
     search: true,
   },
 ];
+const capabilityKeys = ["chat", "web", "image", "embedding", "search"] as const;
+const MODEL_PREVIEW = 10;
+
+type ModelFamily = {
+  key: string;
+  name: string;
+  provider: string;
+  brand: "gemini" | "claude" | "gpt" | "other";
+  variants: { label: string; model: ModelRowBase }[];
+};
+type ModelRowBase = { id: string; name: string; type: string; provider: string };
+
+const VARIANT_RE = /-(high|medium|low|thinking)$/i;
+const VARIANT_ORDER = ["base", "low", "medium", "high", "thinking"];
+
+function brandOf(name: string): ModelFamily["brand"] {
+  const n = name.toLowerCase();
+  if (n.startsWith("gemini")) return "gemini";
+  if (n.startsWith("claude")) return "claude";
+  if (n.startsWith("gpt")) return "gpt";
+  return "other";
+}
+
+// Collapse "x-high / x-medium / x-low / x" into one family row with variant chips.
+function groupModels(list: ModelRowBase[]): ModelFamily[] {
+  const map = new Map<string, ModelFamily>();
+  for (const model of list) {
+    const match = model.name.match(VARIANT_RE);
+    const base = match ? model.name.slice(0, -match[0].length) : model.name;
+    const label = match ? match[1].toLowerCase() : "base";
+    const key = `${model.provider}::${base}`;
+    const family =
+      map.get(key) ??
+      { key, name: base, provider: model.provider, brand: brandOf(base), variants: [] };
+    family.variants.push({ label, model });
+    map.set(key, family);
+  }
+  for (const family of map.values()) {
+    family.variants.sort(
+      (a, b) => VARIANT_ORDER.indexOf(a.label) - VARIANT_ORDER.indexOf(b.label),
+    );
+  }
+  return [...map.values()];
+}
 const cronSample =
   '# Example only: replace both placeholders on your VPS. Not deployed.\n* * * * * curl --fail --silent --show-error -X POST \\\n  -H "Authorization: Bearer <DASHBOARD_SECRET>" \\\n  "<NEIRO_URL>/api/orchestrator/tick"';
 
@@ -147,8 +172,102 @@ function parseModels(json: unknown): ModelRow[] {
   }));
 }
 
+type Vital = {
+  name: string;
+  connected: boolean;
+  detail: string;
+  note: string;
+  envKeys: string;
+  keys: { name: string; description: string; secret?: boolean }[];
+};
+type VitalState = "alive" | "down" | "unset" | "checking";
+
+// A heartbeat line per service: alive services beat, down ones flatline,
+// unconfigured ones show a dashed "no signal" line.
+const BEAT_PATH =
+  "M0 20 H70 L80 20 L88 6 L98 34 L106 20 H190 L200 20 L208 6 L218 34 L226 20 H320 L330 20 L338 6 L348 34 L356 20 H480";
+
+function vitalState(vital: Vital, loading: boolean): VitalState {
+  if (loading) return "checking";
+  if (vital.connected) return "alive";
+  return /missing|configur|not set/i.test(vital.detail) ? "unset" : "down";
+}
+
+const stateLabel: Record<VitalState, string> = {
+  alive: "Connected",
+  down: "No response",
+  unset: "Not configured",
+  checking: "Checking…",
+};
+
+function VitalsPanel({ vitals, loading }: { vitals: Vital[]; loading: boolean }) {
+  const aliveCount = vitals.filter((v) => !loading && v.connected).length;
+  return (
+    <section aria-labelledby="gateway-vitals" className="vitals-panel">
+      <div className="flex flex-wrap items-end justify-between gap-4 border-b p-5">
+        <div className="space-y-1">
+          <h2 id="gateway-vitals" className="text-lg font-semibold">
+            Connection vitals
+          </h2>
+          <p className="text-sm text-muted-foreground">
+            A live line beats. A flat line means the service is not answering.
+          </p>
+        </div>
+        <p className="vitals-count" aria-live="polite">
+          <span className="vitals-count-num">{loading ? "–" : aliveCount}</span>
+          <span className="text-muted-foreground">/{vitals.length} connected</span>
+        </p>
+      </div>
+      <ul className="divide-y">
+        {vitals.map((vital) => {
+          const state = vitalState(vital, loading);
+          return (
+            <li
+              key={vital.name}
+              className="vital-row grid gap-x-6 gap-y-2 p-5 md:grid-cols-[15rem_minmax(0,1fr)_12rem] md:items-center"
+              data-state={state}
+            >
+              <div className="min-w-0 space-y-1">
+                <h3 className="flex items-center gap-2 text-base font-semibold tracking-tight">
+                  <span className="vital-dot" aria-hidden="true" />
+                  {vital.name}
+                </h3>
+                <p className="text-xs text-muted-foreground">{vital.note}</p>
+              </div>
+              <svg
+                className="vital-line"
+                viewBox="0 0 480 40"
+                preserveAspectRatio="none"
+                role="img"
+                aria-label={`${vital.name}: ${stateLabel[state]}`}
+              >
+                <path className="vital-line-base" d="M0 20 H480" />
+                {state === "alive" && <path className="vital-line-beat" d={BEAT_PATH} />}
+              </svg>
+              <div className="min-w-0 space-y-1 md:text-right">
+                <p className="vital-state text-sm font-semibold">{stateLabel[state]}</p>
+                <p className="text-xs break-words text-muted-foreground">{vital.detail}</p>
+                {(state === "down" || state === "unset") && (
+                  <a
+                    href="#setup-heading"
+                    className="inline-flex min-h-10 items-center gap-1.5 text-sm font-medium underline-offset-4 hover:underline"
+                  >
+                    <Cable className="size-3.5" aria-hidden="true" />
+                    Set <code className="code-chip">{vital.envKeys}</code>
+                  </a>
+                )}
+              </div>
+            </li>
+          );
+        })}
+      </ul>
+    </section>
+  );
+}
+
 export function GatewayMonitor() {
   const [category, setCategory] = useState<Category>("all");
+  const [showAllModels, setShowAllModels] = useState(false);
   const [query, setQuery] = useState("");
   const status = useLiveData<GatewayStatusDTO | null>("/api/gateway/status", null, parseStatus);
   const modelList = useLiveData<ModelRow[]>("/api/gateway/models", models, parseModels);
@@ -185,6 +304,10 @@ export function GatewayMonitor() {
         .toLowerCase()
         .includes(query.trim().toLowerCase()),
   );
+  const families = groupModels(filtered);
+  const presentCategories = categories.filter(
+    (item) => item === "all" || displayModels.some((model) => model.type === item),
+  );
   async function copy(value: string, label: string) {
     try {
       await navigator.clipboard.writeText(value);
@@ -195,6 +318,67 @@ export function GatewayMonitor() {
       );
     }
   }
+
+  const vitals: Vital[] = [
+    {
+      name: "Supabase Postgres",
+      connected: liveStatus?.supabase?.status === "connected",
+      detail:
+        liveStatus?.supabase?.status === "connected"
+          ? `Connected (${liveStatus?.supabase?.latencyMs ?? 0}ms)`
+          : statusLoading
+            ? "Checking…"
+            : liveStatus?.supabase?.error || "Database disconnected",
+      note: "Missions, tasks DAG, and agent registry state.",
+      envKeys: "SUPABASE_URL",
+      keys: [
+        { name: "SUPABASE_URL", description: "Project URL for persistent dashboard data." },
+        {
+          name: "SUPABASE_SERVICE_ROLE_KEY",
+          secret: true,
+          description: "Service role credential. Never expose it in browser code.",
+        },
+      ],
+    },
+    {
+      name: "9Router Gateway",
+      connected: liveStatus?.nineRouter?.status === "connected",
+      detail:
+        liveStatus?.nineRouter?.status === "connected"
+          ? `Online (${displayModels.length} models, ${liveStatus?.nineRouter?.latencyMs ?? 0}ms)`
+          : statusLoading
+            ? "Checking…"
+            : liveStatus?.nineRouter?.error || "LLM Gateway unreachable",
+      note: "LLM inference router and model discovery.",
+      envKeys: "NINEROUTER_URL",
+      keys: [
+        {
+          name: "NINEROUTER_URL",
+          description: "Gateway base URL for model discovery and inference routing.",
+        },
+      ],
+    },
+    {
+      name: "Hermes Agent VPS",
+      connected: liveStatus?.hermes?.status === "connected",
+      detail:
+        liveStatus?.hermes?.status === "connected"
+          ? `Agent runtime ready (${liveStatus?.hermes?.latencyMs ?? 0}ms)`
+          : statusLoading
+            ? "Checking…"
+            : liveStatus?.hermes?.error || "Hermes VPS unreachable",
+      note: "Autonomous coding agent runtime.",
+      envKeys: "HERMES_DEFAULT_URL",
+      keys: [
+        { name: "HERMES_DEFAULT_URL", description: "Default Hermes agent endpoint on your VPS." },
+        {
+          name: "HERMES_DEFAULT_KEY",
+          secret: true,
+          description: "Authentication key for the Hermes endpoint.",
+        },
+      ],
+    },
+  ];
 
   return (
     <div className="min-w-0 space-y-8 p-4 md:p-8">
@@ -250,103 +434,7 @@ export function GatewayMonitor() {
           </div>
         </div>
       )}
-
-      <section aria-labelledby="gateway-vitals" className="space-y-4">
-        <h2 id="gateway-vitals" className="text-lg font-semibold">
-          Connection vitals
-        </h2>
-        <div className="grid gap-4 lg:grid-cols-3">
-          {[
-            {
-              name: "Supabase Postgres",
-              connected: liveStatus?.supabase?.status === "connected",
-              detail:
-                liveStatus?.supabase?.status === "connected"
-                  ? `Connected (${liveStatus?.supabase?.latencyMs ?? 0}ms)`
-                  : statusLoading
-                    ? "Checking…"
-                    : liveStatus?.supabase?.error || "Database disconnected",
-              note: "Missions, tasks DAG, and agent registry state.",
-              envKeys: "SUPABASE_URL",
-              accent: "emerald",
-            },
-            {
-              name: "9Router Gateway",
-              connected: liveStatus?.nineRouter?.status === "connected",
-              detail:
-                liveStatus?.nineRouter?.status === "connected"
-                  ? `Online (${displayModels.length} models, ${liveStatus?.nineRouter?.latencyMs ?? 0}ms)`
-                  : statusLoading
-                    ? "Checking…"
-                    : liveStatus?.nineRouter?.error || "LLM Gateway unreachable",
-              note: "LLM inference router and model discovery.",
-              envKeys: "NINEROUTER_URL",
-              accent: "sky",
-            },
-            {
-              name: "Hermes Agent VPS",
-              connected: liveStatus?.hermes?.status === "connected",
-              detail:
-                liveStatus?.hermes?.status === "connected"
-                  ? `Agent runtime ready (${liveStatus?.hermes?.latencyMs ?? 0}ms)`
-                  : statusLoading
-                    ? "Checking…"
-                    : liveStatus?.hermes?.error || "Hermes VPS unreachable",
-              note: "Autonomous coding agent runtime.",
-              envKeys: "HERMES_DEFAULT_URL",
-              accent: "violet",
-            },
-          ].map((vital, index) => (
-            <div
-              key={vital.name}
-              className="card-trendy space-y-4 p-5"
-              data-accent={vital.accent}
-              style={{ "--i": index } as React.CSSProperties}
-            >
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <h3 className="font-semibold tracking-tight text-base">
-                  {vital.name}
-                </h3>
-                <Badge
-                  variant="outline"
-                  className={
-                    vital.connected
-                      ? "border-emerald-500/30 text-emerald-400 bg-emerald-500/10 text-[10px]"
-                      : "border-border text-muted-foreground bg-secondary/50 text-[10px]"
-                  }
-                >
-                  {vital.connected ? (
-                    <>
-                      <span className="pulse-dot mr-1.5" aria-hidden="true" />
-                      Connected
-                    </>
-                  ) : (
-                    <>
-                      <Unplug
-                        className="size-3 mr-1 text-muted-foreground"
-                        aria-hidden="true"
-                      />{" "}
-                      Disconnected
-                    </>
-                  )}
-                </Badge>
-              </div>
-              <p className="text-sm font-medium">{vital.detail}</p>
-              <p className="text-xs text-muted-foreground">{vital.note}</p>
-              {!vital.connected && !statusLoading && (
-                <a
-                  href="#setup-heading"
-                  className="inline-flex min-h-10 items-center gap-1.5 text-sm font-medium underline-offset-4 hover:underline"
-                >
-                  <Cable className="size-3.5" aria-hidden="true" />
-                  Set <code className="code-chip">{vital.envKeys}</code>{" "}
-                  to connect
-                </a>
-              )}
-            </div>
-          ))}
-        </div>
-      </section>
+      <VitalsPanel loading={statusLoading} vitals={vitals} />
 
       <section className="space-y-4" aria-labelledby="setup-heading">
         <div>
@@ -354,22 +442,53 @@ export function GatewayMonitor() {
             Connection setup
           </h2>
           <p className="text-sm text-muted-foreground">
-            Configuration reference only. These keys have not been read or
-            validated.
+            Keys each service needs. Set them on the server, then refresh.
           </p>
         </div>
-        <div className="divide-y rounded-lg border">
-          {setup.map(([key, description]) => (
-            <div key={key} className="grid gap-2 p-4 lg:grid-cols-[19rem_1fr]">
-              <code className="code-chip self-start break-all font-medium">{key}</code>
-              <p className="text-sm text-muted-foreground">{description}</p>
-            </div>
-          ))}
+        <div className="grid gap-4 lg:grid-cols-3">
+          {vitals.map((vital) => {
+            const state = vitalState(vital, statusLoading);
+            return (
+              <div key={vital.name} className="setup-group vital-row" data-state={state}>
+                <div className="flex items-center justify-between gap-2 border-b px-4 py-3">
+                  <h3 className="flex items-center gap-2 text-sm font-semibold">
+                    <span className="vital-dot" aria-hidden="true" />
+                    {vital.name}
+                  </h3>
+                  <span className="vital-state text-xs font-medium">{stateLabel[state]}</span>
+                </div>
+                <ul className="divide-y">
+                  {vital.keys.map((key) => (
+                    <li key={key.name} className="space-y-2 px-4 py-3">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <code className="code-chip break-all font-medium">{key.name}</code>
+                        {key.secret && (
+                          <span className="secret-pill">
+                            <Lock className="size-3" aria-hidden="true" />
+                            Secret
+                          </span>
+                        )}
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="ml-auto min-h-10"
+                          aria-label={`Copy key name ${key.name}`}
+                          onClick={() => void copy(key.name, "Key name")}
+                        >
+                          <Copy aria-hidden="true" />
+                        </Button>
+                      </div>
+                      <p className="text-xs text-muted-foreground">{key.description}</p>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            );
+          })}
         </div>
         <p className="text-xs text-muted-foreground">
           Configure credentials in the server deployment environment, never in
           this UI. This demo does not collect, store, or display secrets.
-          Connecting these services requires a backend implementation.
         </p>
       </section>
 
@@ -379,101 +498,101 @@ export function GatewayMonitor() {
             {modelsAreSample ? "Sample model catalog" : "Model catalog"}
           </h2>
           <p className="text-sm text-muted-foreground">
-            Illustrative IDs only. Availability, permissions, and pricing are
-            not verified.
+            Click a model to copy its ID.
+            {modelsAreSample ? " Sample IDs only; availability is not verified." : ""}
           </p>
         </div>
-        <div className="grid items-end gap-4 sm:grid-cols-[minmax(0,1fr)_12rem]">
-          <div className="space-y-2">
-            <Label htmlFor="model-search">
+        <div className="space-y-3">
+          <div className="relative max-w-xl">
+            <Label htmlFor="model-search" className="sr-only">
               {modelsAreSample ? "Search sample models" : "Search models"}
             </Label>
-            <div className="relative">
-              <Search
-                className="pointer-events-none absolute top-3 left-3 size-4 text-muted-foreground"
-                aria-hidden="true"
-              />
-              <Input
-                id="model-search"
-                className="h-10 pl-9"
-                placeholder="Search name, ID, or provider"
-                value={query}
-                onChange={(event) => setQuery(event.target.value)}
-              />
-            </div>
+            <Search
+              className="pointer-events-none absolute top-3 left-3 size-4 text-muted-foreground"
+              aria-hidden="true"
+            />
+            <Input
+              id="model-search"
+              className="h-10 pl-9"
+              placeholder="Search name, ID, or provider"
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+            />
           </div>
-          <div className="space-y-2">
-            <Label htmlFor="model-category">Model category</Label>
-            <select
-              id="model-category"
-              className="h-10 w-full rounded-md border border-input bg-background px-3 text-base focus-visible:outline-2 focus-visible:outline-ring sm:text-sm"
-              value={category}
-              onChange={(event) => setCategory(event.target.value as Category)}
-            >
-              {categories.map((value) => (
-                <option key={value} value={value}>
-                  {value === "all"
-                    ? "All categories"
-                    : value[0].toUpperCase() + value.slice(1)}
-                </option>
-              ))}
-            </select>
+          {presentCategories.length > 2 && (
+          <div role="group" aria-label="Model category" className="flex flex-wrap gap-2">
+            {presentCategories.map((item) => (
+              <button
+                key={item}
+                type="button"
+                className="filter-pill"
+                aria-pressed={category === item}
+                onClick={() => setCategory(item)}
+              >
+                {item === "all" ? "All" : item}
+              </button>
+            ))}
           </div>
+          )}
         </div>
         <p className="text-xs text-muted-foreground" aria-live="polite">
           {modelList.source === "loading"
             ? "Loading models…"
-            : `${filtered.length} ${modelsAreSample ? "sample " : ""}${filtered.length === 1 ? "model" : "models"}`}
+            : `${filtered.length} ${modelsAreSample ? "sample " : ""}${filtered.length === 1 ? "model" : "models"} in ${families.length} ${families.length === 1 ? "family" : "families"}`}
         </p>
-        <div className="console-table min-w-0 overflow-hidden rounded-lg border">
-          <Table className="min-w-[680px]">
-            <TableHeader>
-              <TableRow>
-                <TableHead className="pl-4">Model</TableHead>
-                <TableHead>Category</TableHead>
-                <TableHead>{modelsAreSample ? "Sample ID" : "Model ID"}</TableHead>
-                <TableHead>Provider / route</TableHead>
-                <TableHead className="pr-4 text-right">Action</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {filtered.map((model) => (
-                <TableRow key={model.id}>
-                  <TableCell className="pl-4 font-medium">
-                    {model.name}
-                  </TableCell>
-                  <TableCell>
-                    <Badge variant="outline">{model.type}</Badge>
-                  </TableCell>
-                  <TableCell>
-                    <code className="code-chip">{model.id}</code>
-                  </TableCell>
-                  <TableCell className="text-muted-foreground">
-                    {model.provider}
-                  </TableCell>
-                  <TableCell className="pr-4 text-right">
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      className="min-h-10"
-                      aria-label={`Copy model ID ${model.id}`}
-                      onClick={() =>
-                        void copy(model.id, modelsAreSample ? "Sample model ID" : "Model ID")
-                      }
-                    >
-                      <Copy aria-hidden="true" /> Copy ID
-                    </Button>
-                  </TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-          {filtered.length === 0 && (
-            <div className="space-y-3 p-8 text-center">
-              <Search
-                className="mx-auto size-6 text-muted-foreground"
-                aria-hidden="true"
-              />
+        {filtered.length > 0 ? (
+          <>
+          <ul className="family-list">
+            {(showAllModels ? families : families.slice(0, MODEL_PREVIEW)).map((family) => (
+              <li key={family.key} className="family-row" data-brand={family.brand}>
+                <div className="flex min-w-0 items-center gap-3">
+                  <span className="family-bar" aria-hidden="true" />
+                  <div className="min-w-0">
+                    <h3 className="truncate font-semibold">{family.name}</h3>
+                    <p className="text-xs text-muted-foreground">
+                      {family.provider} · {family.variants.length}{" "}
+                      {family.variants.length === 1 ? "variant" : "variants"}
+                    </p>
+                  </div>
+                </div>
+                <ul className="flex flex-wrap gap-1.5" aria-label={`${family.name} variants`}>
+                  {family.variants.map(({ label, model }) => (
+                    <li key={model.id}>
+                      <button
+                        type="button"
+                        className="variant-chip"
+                        title={model.id}
+                        aria-label={`Copy model ID ${model.id}`}
+                        onClick={() =>
+                          void copy(model.id, modelsAreSample ? "Sample model ID" : "Model ID")
+                        }
+                      >
+                        {label}
+                        <Copy className="size-3" aria-hidden="true" />
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              </li>
+            ))}
+          </ul>
+          {families.length > MODEL_PREVIEW && (
+            <div className="flex justify-center">
+              <Button
+                variant="outline"
+                className="min-h-10"
+                aria-expanded={showAllModels}
+                onClick={() => setShowAllModels((value) => !value)}
+              >
+                {showAllModels ? "Show fewer" : `Show all ${families.length} families`}
+              </Button>
+            </div>
+          )}
+          </>
+        ) : (
+          modelList.source !== "loading" && (
+            <div className="space-y-3 rounded-xl border p-8 text-center">
+              <Search className="mx-auto size-6 text-muted-foreground" aria-hidden="true" />
               <h3 className="font-medium">No models match</h3>
               <p className="text-sm text-muted-foreground">
                 {modelsAreSample
@@ -490,113 +609,105 @@ export function GatewayMonitor() {
                 Clear filters
               </Button>
             </div>
-          )}
-        </div>
+          )
+        )}
       </section>
 
-      <section
-        className="min-w-0 space-y-4"
-        aria-labelledby="capabilities-heading"
-      >
+      <section className="min-w-0 space-y-4" aria-labelledby="capabilities-heading">
         <div>
           <h2 id="capabilities-heading" className="text-lg font-semibold">
             Sample agent capabilities
           </h2>
           <p className="text-sm text-muted-foreground">
-            Example assignments, not discovered runtime permissions. Check means
-            included in this sample; a dash means not assigned.
+            Example assignments, not discovered runtime permissions.
           </p>
         </div>
-        <div className="console-table min-w-0 overflow-hidden rounded-lg border">
-          <Table className="min-w-[600px]">
-            <TableHeader>
-              <TableRow>
-                <TableHead className="pl-4">Agent · demo</TableHead>
-                {["Chat", "Web", "Image", "Embedding", "Search"].map(
-                  (heading) => (
-                    <TableHead key={heading} className="text-center">
-                      {heading}
-                    </TableHead>
-                  ),
-                )}
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {capabilities.map((agent) => (
-                <TableRow key={agent.name}>
-                  <TableCell className="pl-4">
-                    <p className="font-medium">{agent.name}</p>
-                    <p className="text-xs text-muted-foreground">
-                      {agent.role}
-                    </p>
-                  </TableCell>
-                  {(
-                    ["chat", "web", "image", "embedding", "search"] as const
-                  ).map((capability) => (
-                    <TableCell key={capability} className="text-center">
-                      {agent[capability] ? (
-                        <Check
-                          className="mx-auto size-4 text-primary"
-                          aria-hidden="true"
-                        />
-                      ) : (
-                        <span
-                          aria-hidden="true"
-                          className="text-muted-foreground"
-                        >
-                          —
-                        </span>
-                      )}
-                      <span className="sr-only">
-                        {agent[capability]
-                          ? "Included in sample"
-                          : "Not assigned in sample"}
-                      </span>
-                    </TableCell>
-                  ))}
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-        </div>
+        <ul className="grid gap-3 md:grid-cols-3">
+          {capabilities.map((agent) => (
+            <li
+              key={agent.name}
+              className="agent-card space-y-4"
+              data-state="idle"
+              style={agentLook(agent.role)}
+              onPointerMove={followPointer}
+              onPointerLeave={resetPointer}
+            >
+              <div className="flex items-start justify-between gap-2">
+                <div className="min-w-0 space-y-2">
+                  <span className="agent-status">
+                    <i aria-hidden="true" />
+                    Sample
+                  </span>
+                  <p className="agent-name break-words">{agent.name}</p>
+                  <p className="text-sm text-white/85">{agent.role}</p>
+                </div>
+                <AgentBot
+                  name={agent.name}
+                  role={agent.role}
+                  asleep={false}
+                  working={false}
+                />
+              </div>
+              <ul className="flex flex-wrap gap-1.5" aria-label={`${agent.name} capabilities`}>
+                {capabilityKeys.map((capability) => (
+                  <li key={capability} className="cap-pill" data-on={agent[capability]}>
+                    {agent[capability] && <Check className="size-3" aria-hidden="true" />}
+                    {capability}
+                    <span className="sr-only">
+                      {agent[capability] ? ": included in sample" : ": not assigned"}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </li>
+          ))}
+        </ul>
       </section>
 
       <section className="space-y-4" aria-labelledby="cron-heading">
-        <div className="flex flex-wrap items-center justify-between gap-4">
-          <div>
-            <h2 id="cron-heading" className="text-lg font-semibold">
-              Cron setup example
-            </h2>
-            <p className="text-sm text-muted-foreground">
-              Documentation sample only. Nothing has been installed or deployed.
-            </p>
-          </div>
-          <Button
-            variant="outline"
-            className="min-h-10"
-            onClick={() =>
-              void copy(cronSample, "Cron example with placeholders")
-            }
-          >
-            <Copy aria-hidden="true" /> Copy example
-          </Button>
+        <div>
+          <h2 id="cron-heading" className="text-lg font-semibold">
+            Cron setup example
+          </h2>
+          <p className="text-sm text-muted-foreground">
+            Documentation sample only. Nothing has been installed or deployed.
+          </p>
         </div>
-        <pre
-          tabIndex={0}
-          aria-label="Cron example with NEIRO_URL and DASHBOARD_SECRET placeholders"
-          className="max-w-full overflow-x-auto rounded-lg border bg-muted/30 p-4 text-xs leading-6"
-        >
-          <code>{cronSample}</code>
-        </pre>
+        <div className="term">
+          <div className="term-bar">
+            <span className="term-lights" aria-hidden="true">
+              <i />
+              <i />
+              <i />
+            </span>
+            <span className="flex items-center gap-1.5 text-xs">
+              <Terminal className="size-3.5" aria-hidden="true" />
+              crontab · VPS
+            </span>
+            <button
+              type="button"
+              className="term-copy"
+              onClick={() => void copy(cronSample, "Cron example with placeholders")}
+            >
+              <Copy className="size-3.5" aria-hidden="true" /> Copy
+            </button>
+          </div>
+          <pre
+            tabIndex={0}
+            aria-label="Cron example with NEIRO_URL and DASHBOARD_SECRET placeholders"
+            className="max-w-full overflow-x-auto p-4 text-xs leading-6"
+          >
+            <code>{cronSample}</code>
+          </pre>
+        </div>
         <div className="flex gap-3 text-sm text-muted-foreground">
           <Cable className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
           <p>
-            Replace <code className="text-xs">&lt;NEIRO_URL&gt;</code> with your
+            Replace <code className="code-chip">&lt;NEIRO_URL&gt;</code> with your
             dashboard origin and{" "}
-            <code className="text-xs">&lt;DASHBOARD_SECRET&gt;</code> with a
-            server-side secret. The future backend must implement and
-            authenticate this tick endpoint before use. Keep the credential out
-            of source control and shared logs.
+            <code className="code-chip">&lt;DASHBOARD_SECRET&gt;</code> with a
+            server-side secret. Keep the credential out of source control and
+            shared logs.
           </p>
         </div>
       </section>
