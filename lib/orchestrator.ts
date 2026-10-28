@@ -272,7 +272,11 @@ export async function advanceMission(
 
   if (ctx.problems.length > 0) {
     await d.store.setMissionError(missionId, ctx.problems.join("; ").slice(0, MAX_ERROR_CHARS));
-  } else if (detail.lastError) {
+  } else if (
+    detail.lastError &&
+    // A quiet tick must not erase the reason a task is still parked.
+    !(/token budget/i.test(detail.lastError) && detail.tasks.some((t) => t.stage === "Needs you"))
+  ) {
     await d.store.setMissionError(missionId, null);
   }
 
@@ -1016,7 +1020,7 @@ async function startTaskRun(
       runStartedAt: null,
     });
     if (parked) {
-      await d.store.setMissionError(m.id, overBudget.message);
+      ctx.problems.push(overBudget.message);
       await safeNotify(d.notify, {
         kind: "budget_reached",
         missionId: m.id,

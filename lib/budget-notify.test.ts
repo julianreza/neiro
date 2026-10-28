@@ -6,6 +6,7 @@ import { shortHash, webhookPayload } from "./notifications";
 import type { NotificationEvent } from "./notifications";
 import { FakeHermes } from "./test-fakes/fake-hermes";
 import { MemoryStore } from "./test-fakes/memory-store";
+import { buildNeedsYou } from "./needs-you";
 
 function setup() {
   const store = new MemoryStore();
@@ -25,13 +26,14 @@ function setup() {
   return { store, hermes, deps, events };
 }
 
-test("mission budget parks a queued task at Needs you and starts no run", async () => {
+test("mission budget remains a budget item after the next tick and starts no run", async () => {
   const { store, hermes, deps, events } = setup();
   store.seedAgent("workers");
   const mission = store.seedMission({ phase: "executing", tokenBudget: 1_000 });
   store.seedTask(mission.id, { taskKey: "T1", stage: "Done", tokens: 1_200 });
   const task = store.seedTask(mission.id, { taskKey: "T2" });
 
+  await advanceMission(mission.id, deps);
   await advanceMission(mission.id, deps);
 
   assert.equal(hermes.startsWithKeyPrefix("code-").length, 0);
@@ -40,6 +42,32 @@ test("mission budget parks a queued task at Needs you and starts no run", async 
   assert.equal(after.runId, null);
   assert.match(store.missions.get(mission.id)!.lastError ?? "", /Mission token budget reached/);
   assert.deepEqual(events.map((e) => e.kind), ["budget_reached"]);
+  const detail = await store.getMissionDetail(mission.id);
+  const items = buildNeedsYou([detail], detail.tasks);
+  assert.deepEqual(items.map((item) => item.kind), ["budget"]);
+  assert.match(items[0].detail, /Mission token budget reached/);
+
+  // Once the operator raises the budget and retries, the old block clears.
+  store.missions.get(mission.id)!.tokenBudget = 10_000;
+  after.stage = "Queued";
+  await advanceMission(mission.id, deps);
+  assert.equal(store.missions.get(mission.id)!.lastError, null);
+  assert.equal(hermes.startsWithKeyPrefix("code-").length, 1);
+});
+
+test("an agent budget replaces a transient error and survives the next tick", async () => {
+  const { store, deps } = setup();
+  const agent = store.seedAgent("workers");
+  agent.tokenBudget = 500;
+  const mission = store.seedMission({ phase: "executing", lastError: "Temporary outage" });
+  store.seedTask(mission.id, { taskKey: "T1", stage: "Done", agentId: agent.id, tokens: 600 });
+  store.seedTask(mission.id, { taskKey: "T2" });
+
+  await advanceMission(mission.id, deps);
+  const detail = await advanceMission(mission.id, deps);
+
+  assert.match(detail.lastError ?? "", /reached its token budget/);
+  assert.deepEqual(buildNeedsYou([detail], detail.tasks).map((item) => item.kind), ["budget"]);
 });
 
 test("agent budget only counts that agent's tokens in this mission", () => {

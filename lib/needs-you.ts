@@ -96,7 +96,9 @@ export function buildNeedsYou(missions: NeedsYouMission[], tasks: NeedsYouTask[]
   }
 
   for (const m of missions) {
-    if (m.status !== "running" || !m.lastError || budgetMissions.has(m.id)) continue;
+    // Needs-you covers active missions, including plans awaiting approval.
+    // Completed/cancelled missions belong in history, not the action queue.
+    if ((m.status !== "running" && m.status !== "awaiting_plan_approval") || !m.lastError || budgetMissions.has(m.id)) continue;
     items.push({
       kind: "mission_error",
       missionId: m.id,
