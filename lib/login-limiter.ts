@@ -1,5 +1,7 @@
+import { isIP } from "node:net";
+
 /**
- * Counts failed sign-ins per key (client IP, and username) and locks a key
+ * Counts failed sign-ins per key (IP, IP/account pair, shared passcode) and locks a key
  * out for a while once it fails too often. Kept in memory: one Neiro server
  * process is the supported setup, and a restart only clears the counters.
  */
@@ -7,6 +9,7 @@
 export const MAX_FAILURES = 5;
 export const WINDOW_MS = 15 * 60 * 1000;
 const MAX_KEYS = 10_000;
+const PASSCODE_KEY = "passcode";
 
 type Entry = { failures: number; windowStart: number; lockedUntil: number };
 
@@ -54,8 +57,9 @@ export class LoginLimiter {
   private prune(now: number): void {
     for (const [key, entry] of this.entries) {
       const stale = entry.lockedUntil <= now && now - entry.windowStart >= this.windowMs;
-      if (stale || this.entries.size > MAX_KEYS) this.entries.delete(key);
-      else break;
+      // Key churn must not erase the IP-independent passcode defense.
+      if (stale || (this.entries.size > MAX_KEYS && key !== PASSCODE_KEY)) this.entries.delete(key);
+      else if (this.entries.size <= MAX_KEYS) break;
     }
   }
 }
@@ -68,14 +72,20 @@ export function loginLimiter(): LoginLimiter {
   return globalForLimiter.__neiroLoginLimiter;
 }
 
-/** Best-effort client address for rate-limit keys. */
-export function clientAddress(headers: Headers): string {
-  const forwarded = headers.get("x-forwarded-for")?.split(",")[0]?.trim();
-  return forwarded || headers.get("x-real-ip")?.trim() || "local";
+/** Trust XFF only behind a configured, fixed chain of proxies that append it. */
+export function clientAddress(
+  headers: Headers,
+  trustedProxyHops = Number(process.env.NEIRO_TRUSTED_PROXY_HOPS ?? 0)
+): string {
+  if (!Number.isSafeInteger(trustedProxyHops) || trustedProxyHops < 1) return "local";
+  const hops = headers.get("x-forwarded-for")?.split(",");
+  const address = hops?.[hops.length - trustedProxyHops]?.trim();
+  return address && isIP(address) ? address : "local";
 }
 
 export function limiterKeys(ip: string, username: string | null): string[] {
-  const keys = [`ip:${ip}`];
-  if (username) keys.push(`user:${username.toLowerCase()}`);
-  return keys;
+  return [
+    `ip:${ip}`,
+    username ? `user:${JSON.stringify([ip, username.toLowerCase()])}` : PASSCODE_KEY,
+  ];
 }

@@ -14,7 +14,8 @@ const HISTORY_STATUSES = new Set(["running", "awaiting_plan_approval", "complete
 /**
  * Missions, newest first. Optional history filters:
  * `?status=completed,cancelled` `&q=text` (title search) `&limit=1-200`
- * `&before=<created_at ISO>` (next page). No params = every mission, as before.
+ * `&before=<created_at ISO>|<id>` (next page; treat nextBefore as opaque).
+ * Timestamp-only boundaries remain supported. No params = every mission, as before.
  */
 export async function GET(request: NextRequest) {
   await connection();
@@ -23,7 +24,9 @@ export async function GET(request: NextRequest) {
     const supabase = getSupabaseAdmin();
     const params = request.nextUrl.searchParams;
 
-    let query = supabase.from("missions").select("*").order("created_at", { ascending: false });
+    let query = supabase.from("missions").select("*")
+      .order("created_at", { ascending: false })
+      .order("id", { ascending: false });
 
     const statuses = (params.get("status") ?? "").split(",").map((s) => s.trim()).filter(Boolean);
     if (statuses.some((s) => !HISTORY_STATUSES.has(s))) {
@@ -36,10 +39,16 @@ export async function GET(request: NextRequest) {
 
     const before = params.get("before");
     if (before) {
-      if (Number.isNaN(Date.parse(before))) {
-        return NextResponse.json({ error: "before must be an ISO timestamp" }, { status: 400 });
+      const separator = before.indexOf("|");
+      const timestamp = separator < 0 ? before : before.slice(0, separator);
+      const id = separator < 0 ? null : before.slice(separator + 1);
+      if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})$/.test(timestamp)
+        || Number.isNaN(Date.parse(timestamp)) || id === "") {
+        return NextResponse.json({ error: "before must be a history cursor or ISO timestamp" }, { status: 400 });
       }
-      query = query.lt("created_at", before);
+      query = id === null
+        ? query.lt("created_at", timestamp)
+        : query.or(`created_at.lt.${timestamp},and(created_at.eq.${timestamp},id.lt.${JSON.stringify(id)})`);
     }
 
     const rawLimit = Number(params.get("limit"));
@@ -99,12 +108,15 @@ export async function GET(request: NextRequest) {
       };
     });
 
+    const last = summaries[summaries.length - 1];
     return NextResponse.json(
       {
         missions: summaries,
         // Cursor for the next history page, when a page limit was asked for.
         nextBefore:
-          limit !== null && summaries.length === limit ? summaries[summaries.length - 1].createdAt ?? null : null,
+          limit !== null && summaries.length === limit && last?.createdAt
+            ? `${last.createdAt}|${last.id}`
+            : null,
       },
       { status: 200 }
     );

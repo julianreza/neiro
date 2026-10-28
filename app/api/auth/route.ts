@@ -24,7 +24,8 @@ function dummyHash(): Promise<string> {
 /**
  * Sign in. `{ passcode }` checks DASHBOARD_SECRET and signs in as the owner
  * (admin). `{ username, password }` checks an app_users account. Both share
- * one failure counter per client IP, plus one per username.
+ * one failure counter per client IP. Accounts also use an IP/username pair;
+ * passcode attempts share a global counter regardless of source IP.
  */
 export async function POST(request: NextRequest) {
   const secret = process.env.DASHBOARD_SECRET;

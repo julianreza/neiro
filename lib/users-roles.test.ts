@@ -74,8 +74,8 @@ test("limiter locks a key after 5 failures and reports the wait", () => {
   assert.deepEqual(limiter.check(keys), { ok: true });
   limiter.recordFailure(keys);
   assert.deepEqual(limiter.check(keys), { ok: false, retryAfterSec: 60 });
-  // The username is locked from another IP too.
-  assert.equal(limiter.check(limiterKeys("9.9.9.9", "reza")).ok, false);
+  // Another source can still sign in to the same account.
+  assert.equal(limiter.check(limiterKeys("9.9.9.9", "reza")).ok, true);
   now += 60_000;
   assert.deepEqual(limiter.check(keys), { ok: true });
 });
@@ -95,10 +95,46 @@ test("limiter forgets failures after a success and after the window", () => {
   assert.equal(limiter.check(keys).ok, true);
 });
 
-test("clientAddress prefers the first forwarded hop", () => {
-  assert.equal(clientAddress(new Headers({ "x-forwarded-for": "5.6.7.8, 10.0.0.1" })), "5.6.7.8");
-  assert.equal(clientAddress(new Headers({ "x-real-ip": "1.1.1.1" })), "1.1.1.1");
-  assert.equal(clientAddress(new Headers()), "local");
+test("forwarded addresses require a trusted proxy and count hops from the right", () => {
+  const headers = new Headers({
+    "x-forwarded-for": "203.0.113.99, 198.51.100.7, 10.0.0.1",
+    "x-real-ip": "203.0.113.88",
+  });
+  assert.equal(clientAddress(headers, 0), "local");
+  assert.equal(clientAddress(headers, 1), "10.0.0.1");
+  assert.equal(clientAddress(headers, 2), "198.51.100.7");
+  assert.equal(clientAddress(headers, 4), "local");
+  assert.equal(clientAddress(headers, -1), "local");
+  assert.equal(clientAddress(headers, 1.5), "local");
+  assert.equal(clientAddress(headers, NaN), "local");
+  assert.equal(clientAddress(new Headers({ "x-real-ip": "1.1.1.1" }), 1), "local");
+  assert.equal(clientAddress(new Headers({ "x-forwarded-for": "junk" }), 1), "local");
+  assert.equal(clientAddress(new Headers({ "x-forwarded-for": "2001:db8::1" }), 1), "2001:db8::1");
+});
+
+test("spoofing the leftmost hop cannot rotate a client's limiter key", () => {
+  const limiter = new LoginLimiter();
+  for (let i = 0; i < 5; i++) {
+    const headers = new Headers({ "x-forwarded-for": `203.0.113.${i}, 198.51.100.7` });
+    limiter.recordFailure(limiterKeys(clientAddress(headers, 1), "reza"));
+  }
+  const headers = new Headers({ "x-forwarded-for": "203.0.113.100, 198.51.100.7" });
+  assert.equal(limiter.check(limiterKeys(clientAddress(headers, 1), "reza")).ok, false);
+});
+
+test("passcode failures lock across IPs, without blocking account logins", () => {
+  let now = 0;
+  const limiter = new LoginLimiter(() => now);
+  for (let i = 0; i < 5; i++) limiter.recordFailure(limiterKeys(`192.0.2.${i}`, null));
+  assert.equal(limiter.check(limiterKeys("198.51.100.1", null)).ok, false);
+  assert.equal(limiter.check(limiterKeys("198.51.100.1", "reza")).ok, true);
+  limiter.recordSuccess(limiterKeys("198.51.100.1", "reza"));
+  assert.equal(limiter.check(limiterKeys("198.51.100.1", null)).ok, false);
+  // Username-key churn must not evict the shared passcode lock.
+  for (let i = 0; i < 10_001; i++) limiter.recordFailure(limiterKeys("192.0.2.99", `user${i}`));
+  assert.equal(limiter.check(limiterKeys("198.51.100.1", null)).ok, false);
+  now += 15 * 60 * 1000;
+  assert.equal(limiter.check(limiterKeys("198.51.100.1", null)).ok, true);
 });
 
 test("role cache uses the current role, drops deleted users, fails closed", async () => {
