@@ -4,7 +4,7 @@ import { getSupabaseAdmin } from "@/lib/supabase";
 import { advanceMission, reportAdvanceError } from "@/lib/orchestrator";
 import { mapMissionRow } from "@/lib/orchestrator-store";
 import { AppConfigError } from "@/lib/types";
-import { discardMissionWorktree } from "@/lib/worktree";
+import { discardMissionWorktree, planWorktreeDiscard } from "@/lib/worktree";
 
 type RouteContext = {
   params: Promise<{ id: string }>;
@@ -110,20 +110,20 @@ export async function POST(request: NextRequest, context: RouteContext) {
       if (!row) {
         return NextResponse.json({ error: "Mission not found" }, { status: 404 });
       }
-      if (!row.work_branch || !row.worktree_path || !row.repo_root) {
-        return NextResponse.json({ error: "Mission has no worktree to discard" }, { status: 409 });
-      }
-      if (!["cancelled", "completed"].includes(String(row.status))) {
-        return NextResponse.json(
-          { error: "Cancel the mission before discarding its worktree" },
-          { status: 409 },
-        );
+      const plan = planWorktreeDiscard({
+        status: row.status as string | null,
+        work_branch: row.work_branch as string | null,
+        worktree_path: row.worktree_path as string | null,
+        repo_root: row.repo_root as string | null,
+      });
+      if (!plan.ok) {
+        return NextResponse.json({ error: plan.error }, { status: plan.status });
       }
 
       await discardMissionWorktree({
-        repoRoot: String(row.repo_root),
-        worktreePath: String(row.worktree_path),
-        branch: String(row.work_branch),
+        repoRoot: plan.repoRoot,
+        worktreePath: plan.worktreePath,
+        branch: plan.branch,
       });
 
       const { data, error: updateErr } = await supabase

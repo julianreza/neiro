@@ -121,6 +121,19 @@ export async function prepareMissionWorkspace(input: {
 }
 
 /**
+ * List the worktrees git itself has registered for a repo, by absolute path.
+ * This is git's own record, so it does not depend on NEIRO_WORKTREE_ROOT — a
+ * worktree created under one root is still found after the env var changes.
+ */
+async function registeredWorktrees(repoRoot: string): Promise<string[]> {
+  const out = await git(repoRoot, ["worktree", "list", "--porcelain"]);
+  return out
+    .split("\n")
+    .filter((line) => line.startsWith("worktree "))
+    .map((line) => path.resolve(line.slice("worktree ".length).trim()));
+}
+
+/**
  * Rollback: delete the mission worktree and its branch. The user's own
  * checkout is untouched. Uncommitted and committed work on the mission
  * branch is lost, so callers only allow it once the mission has stopped.
@@ -133,14 +146,55 @@ export async function discardMissionWorktree(input: {
   if (!input.branch.startsWith("neiro/")) {
     throw new Error(`Refusing to delete non-mission branch ${input.branch}`);
   }
-  const root = path.resolve(worktreeRoot());
   const target = path.resolve(input.worktreePath);
-  if (!target.startsWith(root + path.sep)) {
-    throw new Error(`Refusing to remove a worktree outside ${root}: ${target}`);
+  const repoRoot = path.resolve(input.repoRoot);
+  // Containment is checked against git's own registry for this repo, not a
+  // volatile NEIRO_WORKTREE_ROOT, so a stale env value cannot block a discard
+  // nor let one escape the repo. The main checkout is never a worktree we drop.
+  const worktrees = await registeredWorktrees(repoRoot);
+  if (path.resolve(target) === repoRoot) {
+    throw new Error(`Refusing to remove the main checkout: ${target}`);
+  }
+  if (!worktrees.includes(target)) {
+    throw new Error(
+      `Refusing to remove ${target}: not a registered worktree of ${repoRoot}`,
+    );
   }
   if (await isDirectory(target)) {
-    await git(input.repoRoot, ["worktree", "remove", "--force", target]);
+    await git(repoRoot, ["worktree", "remove", "--force", target]);
   }
-  await git(input.repoRoot, ["worktree", "prune"]);
-  await gitOrNull(input.repoRoot, ["branch", "-D", input.branch]);
+  await git(repoRoot, ["worktree", "prune"]);
+  await gitOrNull(repoRoot, ["branch", "-D", input.branch]);
+}
+
+/** A mission row as the control route reads it for a worktree discard. */
+export type MissionDiscardRow = {
+  status: string | null;
+  work_branch: string | null;
+  worktree_path: string | null;
+  repo_root: string | null;
+};
+
+/**
+ * Decide whether a mission's worktree may be discarded, without touching the
+ * database or git. Pure so the route handler's destructive branch is testable:
+ * the route maps `ok:false` straight to `{ status, error }`.
+ */
+export function planWorktreeDiscard(
+  row: MissionDiscardRow,
+):
+  | { ok: true; repoRoot: string; worktreePath: string; branch: string }
+  | { ok: false; status: number; error: string } {
+  if (!row.work_branch || !row.worktree_path || !row.repo_root) {
+    return { ok: false, status: 409, error: "Mission has no worktree to discard" };
+  }
+  if (!["cancelled", "completed"].includes(String(row.status))) {
+    return { ok: false, status: 409, error: "Cancel the mission before discarding its worktree" };
+  }
+  return {
+    ok: true,
+    repoRoot: row.repo_root,
+    worktreePath: row.worktree_path,
+    branch: row.work_branch,
+  };
 }

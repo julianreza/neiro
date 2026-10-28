@@ -7,6 +7,7 @@ import { afterEach, test } from "node:test";
 import {
   discardMissionWorktree,
   missionBranchName,
+  planWorktreeDiscard,
   prepareMissionWorkspace,
 } from "./worktree";
 
@@ -100,14 +101,76 @@ test("unknown base branch is rejected", async () => {
   );
 });
 
-test("discard refuses branches and paths it did not create", async () => {
-  process.env.NEIRO_WORKTREE_ROOT = tmp("neiro-wt-");
+test("discard refuses a non-mission branch", async () => {
+  const repo = makeRepo();
   await assert.rejects(
-    discardMissionWorktree({ repoRoot: "/", worktreePath: "/x", branch: "main" }),
+    discardMissionWorktree({ repoRoot: repo, worktreePath: path.join(repo, "x"), branch: "main" }),
     /non-mission branch/,
   );
+});
+
+test("discard refuses a path git has not registered as a worktree", async () => {
+  const repo = makeRepo();
   await assert.rejects(
-    discardMissionWorktree({ repoRoot: "/", worktreePath: "/etc", branch: "neiro/x" }),
-    /outside/,
+    discardMissionWorktree({
+      repoRoot: repo,
+      worktreePath: path.join(os.tmpdir(), "neiro-not-a-worktree"),
+      branch: "neiro/x",
+    }),
+    /not a registered worktree/,
   );
+});
+
+test("discard refuses the main checkout even on a mission-named branch", async () => {
+  const repo = makeRepo();
+  await assert.rejects(
+    discardMissionWorktree({ repoRoot: repo, worktreePath: repo, branch: "neiro/x" }),
+    /main checkout/,
+  );
+});
+
+test("discard works after NEIRO_WORKTREE_ROOT changes under it", async () => {
+  const repo = makeRepo();
+  // Create the worktree under one root...
+  process.env.NEIRO_WORKTREE_ROOT = tmp("neiro-wt-a-");
+  const ws = await prepareMissionWorkspace({
+    workspacePath: path.join(repo, "app"),
+    missionId: "mission-roam-99",
+    baseBranch: "main",
+    isolate: true,
+  });
+  assert.equal(ws.kind, "worktree");
+  if (ws.kind !== "worktree") return;
+  // ...then point the env var somewhere else entirely before discarding.
+  process.env.NEIRO_WORKTREE_ROOT = tmp("neiro-wt-b-");
+  await discardMissionWorktree({ repoRoot: ws.repoRoot, worktreePath: ws.worktreePath, branch: ws.branch });
+  assert.ok(!existsSync(ws.worktreePath));
+  assert.equal(git(repo, "branch", "--list", ws.branch), "");
+});
+
+test("planWorktreeDiscard: a mission with no worktree is rejected", () => {
+  const plan = planWorktreeDiscard({ status: "cancelled", work_branch: null, worktree_path: null, repo_root: null });
+  assert.deepEqual(plan, { ok: false, status: 409, error: "Mission has no worktree to discard" });
+});
+
+test("planWorktreeDiscard: a still-running mission is rejected", () => {
+  const plan = planWorktreeDiscard({
+    status: "running",
+    work_branch: "neiro/1",
+    worktree_path: "/w",
+    repo_root: "/r",
+  });
+  assert.deepEqual(plan, { ok: false, status: 409, error: "Cancel the mission before discarding its worktree" });
+});
+
+test("planWorktreeDiscard: a stopped mission with a worktree is allowed", () => {
+  for (const status of ["cancelled", "completed"]) {
+    const plan = planWorktreeDiscard({
+      status,
+      work_branch: "neiro/1",
+      worktree_path: "/w",
+      repo_root: "/r",
+    });
+    assert.deepEqual(plan, { ok: true, repoRoot: "/r", worktreePath: "/w", branch: "neiro/1" });
+  }
 });
