@@ -37,6 +37,22 @@ test("tasks of missions that are not in the list are ignored", () => {
   assert.equal(items.length, 0);
 });
 
+test("awaiting approval exposes its error alongside the approval; terminal errors stay out", () => {
+  const items = buildNeedsYou(
+    [
+      { id: "waiting", title: "Plan", status: "awaiting_plan_approval", lastError: "Artifact save failed", lastErrorAt: null },
+      { id: "done", title: "Done", status: "completed", lastError: "Old error", lastErrorAt: null },
+      { id: "cancelled", title: "Cancelled", status: "cancelled", lastError: "Old error", lastErrorAt: null },
+    ],
+    []
+  );
+  assert.deepEqual(items.map((item) => [item.missionId, item.kind]), [
+    ["waiting", "plan_approval"],
+    ["waiting", "mission_error"],
+  ]);
+  assert.equal(items[1].detail, "Artifact save failed");
+});
+
 test("mission input accepts an optional token_budget", () => {
   const ok = parseMissionCreateBody({ prompt: "Do it", token_budget: 50_000 });
   assert.ok(ok.ok && ok.value.tokenBudget === 50_000);

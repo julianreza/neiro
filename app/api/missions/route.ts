@@ -14,7 +14,8 @@ const HISTORY_STATUSES = new Set(["running", "awaiting_plan_approval", "complete
 /**
  * Missions, newest first. Optional history filters:
  * `?status=completed,cancelled` `&q=text` (title search) `&limit=1-200`
- * `&before=<created_at ISO>` (next page). No params = every mission, as before.
+ * Next page: `&before=<nextBefore>&beforeId=<nextBeforeId>` (both required).
+ * No params = every mission, as before.
  */
 export async function GET(request: NextRequest) {
   await connection();
@@ -23,7 +24,8 @@ export async function GET(request: NextRequest) {
     const supabase = getSupabaseAdmin();
     const params = request.nextUrl.searchParams;
 
-    let query = supabase.from("missions").select("*").order("created_at", { ascending: false });
+    let query = supabase.from("missions").select("*")
+      .order("created_at", { ascending: false }).order("id", { ascending: false });
 
     const statuses = (params.get("status") ?? "").split(",").map((s) => s.trim()).filter(Boolean);
     if (statuses.some((s) => !HISTORY_STATUSES.has(s))) {
@@ -35,11 +37,15 @@ export async function GET(request: NextRequest) {
     if (q) query = query.ilike("title", `%${q.replace(/[\\%_]/g, (c) => `\\${c}`)}%`);
 
     const before = params.get("before");
-    if (before) {
-      if (Number.isNaN(Date.parse(before))) {
-        return NextResponse.json({ error: "before must be an ISO timestamp" }, { status: 400 });
+    const beforeId = params.get("beforeId");
+    if (before !== null || beforeId !== null) {
+      if (!before || !beforeId || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})$/.test(before) || Number.isNaN(Date.parse(before))) {
+        return NextResponse.json({ error: "before must be an ISO timestamp and beforeId must be the last mission id" }, { status: 400 });
       }
-      query = query.lt("created_at", before);
+      // Quote cursor values for PostgREST's filter grammar. Keep the original
+      // timestamp precision: Date.toISOString() would drop microseconds.
+      const timestamp = JSON.stringify(before);
+      query = query.or(`created_at.lt.${timestamp},and(created_at.eq.${timestamp},id.lt.${JSON.stringify(beforeId)})`);
     }
 
     const rawLimit = Number(params.get("limit"));
@@ -99,12 +105,13 @@ export async function GET(request: NextRequest) {
       };
     });
 
+    const nextMission = limit !== null && summaries.length === limit ? summaries[summaries.length - 1] : null;
     return NextResponse.json(
       {
         missions: summaries,
-        // Cursor for the next history page, when a page limit was asked for.
-        nextBefore:
-          limit !== null && summaries.length === limit ? summaries[summaries.length - 1].createdAt ?? null : null,
+        // Both values form the cursor for the next history page.
+        nextBefore: nextMission?.createdAt ?? null,
+        nextBeforeId: nextMission?.id ?? null,
       },
       { status: 200 }
     );
