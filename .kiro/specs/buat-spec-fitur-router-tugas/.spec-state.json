@@ -1,0 +1,35 @@
+{
+  "phase": "done",
+  "decisions": [
+    {
+      "id": "laya-install",
+      "title": "laya-ts tidak ada di npm. Cara memasangnya?",
+      "options": ["Vendor ke vendor/laya-ts, pin commit, dependensi file:", "Dependensi git langsung ke repo laya"],
+      "recommended": "Vendor ke vendor/laya-ts, pin commit, dependensi file:",
+      "answer": "Vendor ke vendor/laya-ts, pin commit, dependensi file:"
+    },
+    {
+      "id": "agent-pool",
+      "title": "Agen mana yang boleh dipilih Laya?",
+      "options": ["Hanya agen enabled dengan stage workers", "Semua agen enabled"],
+      "recommended": "Hanya agen enabled dengan stage workers",
+      "answer": "Semua agen enabled"
+    },
+    {
+      "id": "retry-target",
+      "title": "Retry setelah gagal QA/review kembali ke stage apa?",
+      "options": ["Routed, pakai routing yang sama", "Queued, routing ulang oleh Laya"],
+      "recommended": "Routed, pakai routing yang sama",
+      "answer": "Routed, pakai routing yang sama"
+    },
+    {
+      "id": "confidence-source",
+      "title": "Laya menolak field confidence bebas di skema. Confidence diambil dari mana?",
+      "options": ["Dari returnDetails: confidence field agent_id", "Field skor integer 0-10 di skema, dibagi 10"],
+      "recommended": "Dari returnDetails: confidence field agent_id",
+      "answer": "Dari returnDetails: confidence field agent_id"
+    }
+  ],
+  "blocking": null,
+  "context": { "template": "lib/orchestrator.ts stepTasks + neiro_claim_task (guarded poll state machine)" }
+}
