@@ -130,14 +130,19 @@ const presets = [
   },
 ] as const;
 
-const models = [
-  "Claude Sonnet 4.6",
-  "Claude Opus 4.6",
-  "GPT-5.4",
-  "Gemini 3.1 Pro",
-  "DeepSeek V3.2",
-  "Qwen3 Coder",
-];
+type HermesModel = { id: string; providerName: string };
+const noHermesModels: HermesModel[] = [];
+
+function parseHermesModels(json: unknown): HermesModel[] {
+  const rows = (json as { models?: unknown } | null)?.models;
+  if (!Array.isArray(rows)) throw new Error("Malformed /api/agents/models response");
+  return rows.flatMap((row) => {
+    const r = row as { id?: unknown; providerName?: unknown };
+    return typeof r.id === "string"
+      ? [{ id: r.id, providerName: typeof r.providerName === "string" ? r.providerName : "" }]
+      : [];
+  });
+}
 const starters: Agent[] = [
   ["neiro", "Neiro", "PM", "Claude Opus 4.6", "coordinator", true],
   ["scribe", "Scribe", "PRD", "Claude Sonnet 4.6", "product", false],
@@ -226,6 +231,13 @@ export function AgentsManager() {
   const agents: Agent[] = live.source === "loading" ? [] : live.data;
   const [search, setSearch] = useState("");
   const [draft, setDraft] = useState<Agent | null>(null);
+  // Model suggestions come from Hermes only; Hermes forwards to 9Router.
+  const hermesModels = useLiveData<HermesModel[]>(
+    draft ? "/api/agents/models" : null,
+    noHermesModels,
+    parseHermesModels,
+  );
+  const modelOptions = hermesModels.source === "live" ? hermesModels.data : [];
   const [deleting, setDeleting] = useState<Agent | null>(null);
   const [preview, setPreview] = useState<Agent | null>(null);
   const [probeShown, setProbeShown] = useState(false);
@@ -800,16 +812,20 @@ export function AgentsManager() {
                   aria-describedby="agent-model-help"
                 />
                 <datalist id="agent-model-options">
-                  {models.map((model) => (
-                    <option key={model} value={model} />
+                  {modelOptions.map((model) => (
+                    <option key={model.id} value={model.id} label={model.providerName} />
                   ))}
                 </datalist>
                 <p
                   id="agent-model-help"
                   className="text-xs text-muted-foreground"
                 >
-                  Leave empty to use the model of the Hermes profile. Suggestions
-                  are a sample catalog, availability unverified.
+                  Leave empty to use the model of the Hermes profile.{" "}
+                  {hermesModels.source === "loading"
+                    ? "Loading models from Hermes…"
+                    : hermesModels.source === "live"
+                      ? `${modelOptions.length} models available in Hermes.`
+                      : `Hermes models unavailable: ${hermesModels.reason}.`}
                 </p>
               </div>
               <div className="space-y-2">

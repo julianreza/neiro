@@ -49,7 +49,7 @@ const navigation: NavItem[] = [
   { href: "/history", label: "History", icon: History },
   { href: "/agents", label: "AI team", icon: Bot },
   { href: "/schedules", label: "Time AI", icon: Clock3 },
-  { href: "/gateway", label: "9Router & VPS", icon: Network },
+  { href: "/gateway", label: "Gateway", icon: Network },
   { href: "/users", label: "Users", icon: Users },
 ];
 

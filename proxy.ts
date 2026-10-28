@@ -25,7 +25,6 @@ export const PUBLIC_SVGS: ReadonlySet<string> = new Set([
  * user's session cookie) can read them.
  */
 export const PUBLIC_IMAGES: ReadonlySet<string> = new Set([
-  "/gateway/9router-hex.png",
   "/gateway/hermes-girl.png",
   "/gateway/hermes-moon.png",
   "/gateway/supabase-bolt.png",

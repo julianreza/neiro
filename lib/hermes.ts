@@ -551,3 +551,63 @@ export async function triggerHermesScheduledJob(
   }
   return (await res.json().catch(() => ({}))) as Record<string, unknown>;
 }
+
+export type HermesModelOption = {
+  id: string;
+  provider: string;
+  providerName: string;
+};
+
+export type HermesModelOptions = {
+  currentModel: string;
+  currentProvider: string;
+  models: HermesModelOption[];
+};
+
+/**
+ * Models the connected Hermes can run, read from Hermes' own
+ * `/api/model/options`. Neiro never asks 9Router directly: Hermes owns the
+ * provider config and forwards to 9Router itself.
+ *
+ * Runs send only `model` (the provider is global), so only models Hermes can
+ * reach without a per-run provider are listed: the current provider and the
+ * user-defined `custom:*` providers (e.g. `custom:9router`).
+ */
+export async function listHermesModelOptions(): Promise<HermesModelOptions> {
+  const res = await hermesFetch(undefined, "/api/model/options");
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`Failed to read Hermes model options (${res.status}): ${text}`);
+  }
+
+  const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+  const currentModel = typeof data.model === "string" ? data.model : "";
+  const currentProvider = typeof data.provider === "string" ? data.provider : "";
+  const providers = Array.isArray(data.providers) ? data.providers : [];
+
+  const seen = new Set<string>();
+  const models: HermesModelOption[] = [];
+  const add = (id: string, provider: string, providerName: string) => {
+    if (!id || seen.has(id)) return;
+    seen.add(id);
+    models.push({ id, provider, providerName });
+  };
+
+  for (const raw of providers) {
+    if (!raw || typeof raw !== "object") continue;
+    const p = raw as Record<string, unknown>;
+    const slug = typeof p.slug === "string" ? p.slug : "";
+    const name = typeof p.name === "string" ? p.name : slug;
+    const usable =
+      p.is_current === true ||
+      (slug.startsWith("custom") && p.authenticated === true);
+    if (!usable || !Array.isArray(p.models)) continue;
+    for (const m of p.models) {
+      if (typeof m === "string") add(m, slug, name);
+    }
+  }
+
+  if (currentModel) add(currentModel, currentProvider, currentProvider);
+
+  return { currentModel, currentProvider, models };
+}

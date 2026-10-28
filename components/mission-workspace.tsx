@@ -1087,7 +1087,7 @@ export function MissionWorkspace() {
           <Square className="size-2.5" />
           {isLive ? "Neiro / live" : "Neiro / local preview"}
         </span>
-        <span>Hermes agents · 9Router inference · Supabase state</span>
+        <span>Hermes agents · Supabase state</span>
       </footer>
       <RunInspectorSheet
         task={tasks.find((task) => task.id === inspected) ?? null}

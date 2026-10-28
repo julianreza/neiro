@@ -18,7 +18,6 @@ export async function describeFailure(res: Response): Promise<string> {
     if (body?.code === "missing_supabase_env") return "Supabase not configured";
     if (body?.code === "public_service_role_key") return "Supabase misconfigured";
     if (body?.code === "missing_hermes_env") return "Hermes not connected yet";
-    if (body?.code === "missing_ninerouter_env") return "9Router not connected yet";
     if (body?.code) return "Service not configured yet";
   }
   if (res.status === 401) return "Not signed in";

@@ -1,8 +1,7 @@
 export type AppConfigErrorCode =
   | "missing_supabase_env"
   | "public_service_role_key"
-  | "missing_hermes_env"
-  | "missing_ninerouter_env";
+  | "missing_hermes_env";
 
 export class AppConfigError extends Error {
   readonly code: AppConfigErrorCode;
@@ -185,7 +184,6 @@ export type GatewayServiceStatus = {
 export type GatewayConfiguredFlags = {
   supabase: boolean;
   hermes: boolean;
-  ninerouter: boolean;
 };
 
 export type GatewayCronStatus = {
@@ -209,7 +207,6 @@ export type GatewayStatusDTO = {
   cron: GatewayCronStatus;
   supabase: GatewayServiceStatus;
   hermes: GatewayServiceStatus;
-  nineRouter: GatewayServiceStatus;
   defaultHermes: GatewayProbeResult;
   agentsHealth: AgentHealth[];
   checkedAt: string;

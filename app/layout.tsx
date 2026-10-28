@@ -17,7 +17,7 @@ const geistMono = Geist_Mono({
 
 export const metadata: Metadata = {
   title: "Neiro — AI Team Orchestrator",
-  description: "Hermes VPS & 9Router Multi-Agent Control Room",
+  description: "Hermes VPS Multi-Agent Control Room",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
