@@ -15,6 +15,8 @@ export type NeedsYouItem = {
   taskTitle: string | null;
   detail: string;
   since: string | null;
+  /** For pick_agent: Laya's choice, used as the default in the picker. */
+  suggestedAgentId?: string | null;
 };
 
 export type NeedsYouMission = {
@@ -33,6 +35,7 @@ export type NeedsYouTask = {
   stage: TaskStage;
   retries: number;
   routeReason: string | null;
+  layaAgentId?: string | null;
   updatedAt?: string;
 };
 
@@ -75,6 +78,7 @@ export function buildNeedsYou(missions: NeedsYouMission[], tasks: NeedsYouTask[]
         taskTitle: t.title,
         detail: t.routeReason ?? "Laya wants a human to choose the agent.",
         since: t.updatedAt ?? null,
+        suggestedAgentId: t.layaAgentId ?? null,
       });
     } else if (t.stage === "Needs you") {
       const budget = /token budget/i.test(m.lastError ?? "");

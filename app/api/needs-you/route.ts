@@ -17,7 +17,7 @@ export async function GET() {
         .in("status", ["running", "awaiting_plan_approval"]),
       db
         .from("mission_tasks")
-        .select("id, mission_id, title, stage, retries, route_reason, updated_at")
+        .select("id, mission_id, title, stage, retries, route_reason, laya_agent_id, updated_at")
         .in("stage", ["Needs you", "Awaiting routing"]),
     ]);
     if (missionsRes.error) return NextResponse.json({ error: missionsRes.error.message }, { status: 500 });
@@ -39,6 +39,7 @@ export async function GET() {
         stage: r.stage as TaskStage,
         retries: Number(r.retries ?? 0),
         routeReason: typeof r.route_reason === "string" ? r.route_reason : null,
+        layaAgentId: typeof r.laya_agent_id === "string" ? r.laya_agent_id : null,
         updatedAt: typeof r.updated_at === "string" ? r.updated_at : undefined,
       }))
     );

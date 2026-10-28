@@ -194,7 +194,10 @@ export function MissionWorkspace() {
   const isDemo = list.source === "demo";
   const [demoMissions, setDemoMissions] = useState<MissionView[]>(initialMissions);
   const missions: MissionView[] = isLive ? list.data : isDemo ? demoMissions : [];
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  // `?mission=<id>` (links from Needs you, History, notifications) opens that mission.
+  const [selectedId, setSelectedId] = useState<string | null>(() =>
+    typeof window === "undefined" ? null : new URLSearchParams(window.location.search).get("mission"),
+  );
   const effectiveId = missions.some((m) => m.id === selectedId)
     ? selectedId
     : (missions[0]?.id ?? null);
@@ -210,6 +213,7 @@ export function MissionWorkspace() {
   const [isolate, setIsolate] = useState(true);
   const [workers, setWorkers] = useState("3");
   const [retries, setRetries] = useState("2");
+  const [tokenBudget, setTokenBudget] = useState("");
   const [launching, setLaunching] = useState(false);
   const [inspected, setInspected] = useState<string | null>(null);
   const agentList = useLiveData<RouteAgentOption[]>("/api/agents", demoRouteAgents, parseRouteAgents);
@@ -272,6 +276,7 @@ export function MissionWorkspace() {
       isolate_workspace: isolate,
       max_parallel_workers: parseIntOr(workers, 3),
       max_retries: parseIntOr(retries, 2),
+      token_budget: parseIntOr(tokenBudget, 0) || undefined,
     });
     setLaunching(false);
     if (!ok) {
@@ -654,6 +659,23 @@ export function MissionWorkspace() {
                     value={retries}
                     onChange={(event) => setRetries(event.target.value)}
                   />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="token-budget">Token budget</Label>
+                  <Input
+                    id="token-budget"
+                    type="number"
+                    min="0"
+                    step="1000"
+                    inputMode="numeric"
+                    placeholder="No limit"
+                    value={tokenBudget}
+                    onChange={(event) => setTokenBudget(event.target.value)}
+                    aria-describedby="token-budget-help"
+                  />
+                  <p id="token-budget-help" className="text-xs text-muted-foreground">
+                    Tasks stop at Needs you when the mission uses this many tokens. Empty or 0 means no limit.
+                  </p>
                 </div>
                 <div className="flex items-center gap-3">
                   <Switch

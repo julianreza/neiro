@@ -2529,3 +2529,15 @@ section.console-lane[data-stage] > :first-child h2 {
 /* Empty board lane: a sleeping bot instead of a blank box. */
 .lane-empty { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 18px 8px; font-size: 0.75rem; color: var(--muted-foreground); }
 .lane-empty .agent-bot { font-size: 7px; margin: 0; cursor: default; }
+
+/* Live log: pulsing dot while a run's event stream is open. Motion = "live". */
+.live-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 9999px;
+  background: var(--primary);
+  animation: live-dot-pulse 1.4s ease-in-out infinite;
+}
+@keyframes live-dot-pulse { 50% { opacity: 0.25; } }
+@media (prefers-reduced-motion: reduce) { .live-dot { animation: none; } }
