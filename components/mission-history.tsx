@@ -1,27 +1,41 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState } from "react";
-import { Loader2, Search } from "lucide-react";
+import { useEffect, useState, type CSSProperties } from "react";
+import { History as HistoryIcon, Loader2, MessageCircleQuestionMark, Rocket, Search } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { formatTokens, timeAgo } from "@/lib/client-api";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { AgentBot, agentLook } from "@/components/agent-bot";
+import { QuestionHistory } from "@/components/question-history";
+import {
+  STORY_ROLE,
+  StoryDay,
+  StoryEmpty,
+  StoryPill,
+  StoryToolbar,
+  compactTokens,
+  groupByDay,
+} from "@/components/history-story";
+import type { StoryTone } from "@/components/history-story";
+import { timeAgo } from "@/lib/client-api";
+import { STATIONS, railStops } from "@/lib/mission-rail";
 import type { MissionStatus, MissionSummaryDTO } from "@/lib/types";
 
 const PAGE = 25;
 
-const FILTERS: { id: string; label: string; status: MissionStatus[] | null }[] = [
-  { id: "all", label: "All", status: null },
-  { id: "completed", label: "Completed", status: ["completed"] },
-  { id: "cancelled", label: "Cancelled", status: ["cancelled"] },
-  { id: "active", label: "Running", status: ["running", "awaiting_plan_approval"] },
+const FILTERS: { id: string; label: string; tone: StoryTone | null; status: MissionStatus[] | null }[] = [
+  { id: "all", label: "All", tone: null, status: null },
+  { id: "active", label: "Running", tone: "live", status: ["running", "awaiting_plan_approval"] },
+  { id: "completed", label: "Completed", tone: "done", status: ["completed"] },
+  { id: "cancelled", label: "Cancelled", tone: "off", status: ["cancelled"] },
 ];
 
-const STATUS_TEXT: Record<MissionStatus, { label: string; className: string }> = {
-  completed: { label: "Completed", className: "text-emerald-600 dark:text-emerald-400" },
-  cancelled: { label: "Cancelled", className: "text-muted-foreground" },
-  running: { label: "Running", className: "text-primary" },
-  awaiting_plan_approval: { label: "Waiting for plan approval", className: "text-amber-600 dark:text-amber-400" },
+const STATUS_PILL: Record<MissionStatus, { tone: StoryTone; label: string }> = {
+  completed: { tone: "done", label: "Completed" },
+  running: { tone: "live", label: "Running" },
+  awaiting_plan_approval: { tone: "wait", label: "Needs you" },
+  cancelled: { tone: "off", label: "Cancelled" },
 };
 
 type Page = { missions: MissionSummaryDTO[]; nextBefore: string | null };
@@ -43,6 +57,44 @@ async function fetchPage(url: string): Promise<Page> {
 }
 
 export function MissionHistory() {
+  const [tab, setTab] = useState("missions");
+
+  return (
+    <div className="w-full p-4 md:p-8">
+      <Tabs value={tab} onValueChange={setTab}>
+        <div className="history-head">
+          <span className="history-mark" aria-hidden="true">
+            <HistoryIcon className="size-5" />
+          </span>
+          <div className="min-w-0 flex-1">
+            <h1 className="text-2xl font-semibold tracking-tight">History</h1>
+            <p className="text-sm text-muted-foreground">
+              {tab === "missions" ? "What the team did, newest first." : "Every question you asked, newest first."}
+            </p>
+          </div>
+          <TabsList aria-label="What to show" className="history-seg">
+            <TabsTrigger value="missions">
+              <Rocket aria-hidden="true" />
+              Missions
+            </TabsTrigger>
+            <TabsTrigger value="questions">
+              <MessageCircleQuestionMark aria-hidden="true" />
+              Questions
+            </TabsTrigger>
+          </TabsList>
+        </div>
+        <TabsContent value="missions">
+          <MissionsPanel />
+        </TabsContent>
+        <TabsContent value="questions">
+          <QuestionHistory />
+        </TabsContent>
+      </Tabs>
+    </div>
+  );
+}
+
+function MissionsPanel() {
   const [filter, setFilter] = useState("all");
   const [query, setQuery] = useState("");
   const [debounced, setDebounced] = useState("");
@@ -50,7 +102,6 @@ export function MissionHistory() {
   const [nextBefore, setNextBefore] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
-
   useEffect(() => {
     const t = setTimeout(() => setDebounced(query), 300);
     return () => clearTimeout(t);
@@ -88,13 +139,10 @@ export function MissionHistory() {
   }
 
   return (
-    <div className="mx-auto w-full max-w-5xl px-4 py-6 md:px-8">
-      <h1 className="text-2xl font-semibold">History</h1>
-      <p className="text-sm text-muted-foreground">Every mission, newest first.</p>
-
-      <div className="mt-4 flex flex-wrap items-center gap-2">
-        <div className="relative min-w-[200px] flex-1">
-          <Search aria-hidden="true" className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+    <div>
+      <StoryToolbar>
+        <div className="story-search-wrap">
+          <Search aria-hidden="true" className="story-search-icon" />
           <label htmlFor="history-search" className="sr-only">
             Search missions by title
           </label>
@@ -102,25 +150,27 @@ export function MissionHistory() {
             id="history-search"
             type="search"
             placeholder="Search missions"
-            className="pl-8"
+            className="story-search"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
           />
         </div>
-        <div role="group" aria-label="Filter by status" className="flex flex-wrap gap-1.5">
+        <div role="group" aria-label="Filter by status" className="story-chips">
           {FILTERS.map((f) => (
             <button
               key={f.id}
               type="button"
               aria-pressed={filter === f.id}
               onClick={() => setFilter(f.id)}
-              className="h-8 rounded-full border px-3 text-sm aria-pressed:border-primary aria-pressed:text-primary"
+              className="story-chip"
+              data-tone={f.tone ?? undefined}
             >
+              {f.tone && <i aria-hidden="true" />}
               {f.label}
             </button>
           ))}
         </div>
-      </div>
+      </StoryToolbar>
 
       {error && (
         <p role="alert" className="mt-4 rounded-xl border border-destructive/40 p-3 text-sm text-destructive">
@@ -133,56 +183,30 @@ export function MissionHistory() {
         </p>
       )}
       {rows && rows.length === 0 && (
-        <div className="mt-6 rounded-2xl border bg-card p-8 text-center text-card-foreground">
-          <p className="font-medium">No missions match</p>
-          <p className="text-sm text-muted-foreground">Try another filter, or start a mission on Mission control.</p>
+        <StoryEmpty
+          title="No missions match"
+          body={<>Try another filter, or start a mission on <Link href="/" className="text-primary hover:underline">Mission control</Link>.</>}
+        />
+      )}
+
+      {rows && rows.length > 0 && (
+        <div className="story-feed">
+          {groupByDay(rows, (m) => m.createdAt ?? "").map((group) => (
+            <section key={group.day} className="story-group" aria-label={group.day}>
+              <StoryDay day={group.day} count={group.rows.length} noun={["mission", "missions"]} />
+              <RailLegend />
+              <ol className="rail-list">
+                {group.rows.map((m) => (
+                  <MissionRail key={m.id} mission={m} />
+                ))}
+              </ol>
+            </section>
+          ))}
         </div>
       )}
 
       {rows && rows.length > 0 && (
-        <div className="mt-4 overflow-x-auto rounded-2xl border bg-card text-card-foreground">
-          <table className="w-full min-w-[640px] text-sm">
-            <thead>
-              <tr className="border-b text-left text-xs text-muted-foreground">
-                <th className="px-4 py-2.5 font-medium">Mission</th>
-                <th className="px-4 py-2.5 font-medium">Status</th>
-                <th className="px-4 py-2.5 text-right font-medium">Tasks</th>
-                <th className="px-4 py-2.5 text-right font-medium">Tokens</th>
-                <th className="px-4 py-2.5 font-medium">Started</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((m) => {
-                const status = STATUS_TEXT[m.status] ?? STATUS_TEXT.running;
-                const over = m.tokenBudget ? m.totalTokens >= m.tokenBudget : false;
-                return (
-                  <tr key={m.id} className="border-b last:border-0 hover:bg-secondary/40">
-                    <td className="max-w-[320px] px-4 py-2.5">
-                      <Link href={`/?mission=${encodeURIComponent(m.id)}`} className="block truncate font-medium hover:underline">
-                        {m.title}
-                      </Link>
-                    </td>
-                    <td className={`px-4 py-2.5 ${status.className}`}>{status.label}</td>
-                    <td className="px-4 py-2.5 text-right tabular-nums">
-                      {m.completedTasks}/{m.totalTasks}
-                    </td>
-                    <td className={`px-4 py-2.5 text-right tabular-nums ${over ? "text-orange-600 dark:text-orange-400" : ""}`}>
-                      {formatTokens(m.totalTokens)}
-                      {m.tokenBudget ? <span className="text-muted-foreground"> / {formatTokens(m.tokenBudget)}</span> : null}
-                    </td>
-                    <td className="px-4 py-2.5 text-muted-foreground" title={m.createdAt}>
-                      {timeAgo(m.createdAt)}
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-      )}
-
-      {rows && rows.length > 0 && (
-        <div className="mt-3 flex items-center justify-between text-sm text-muted-foreground">
+        <div className="mt-4 flex items-center justify-between text-sm text-muted-foreground">
           <span>Showing {rows.length}</span>
           {nextBefore && (
             <Button variant="outline" size="sm" disabled={loadingMore} onClick={() => void loadMore()}>
@@ -192,5 +216,64 @@ export function MissionHistory() {
         </div>
       )}
     </div>
+  );
+}
+
+/** Station names, lined up above the rails on wide screens. */
+function RailLegend() {
+  return (
+    <div className="rail-legend" aria-hidden="true">
+      <span />
+      <span className="rail-legend-stops">
+        {STATIONS.map((s) => (
+          <span key={s.phase}>{s.label}</span>
+        ))}
+      </span>
+      <span />
+    </div>
+  );
+}
+
+function MissionRail({ mission: m }: { mission: MissionSummaryDTO }) {
+  const { at, states, note } = railStops(m);
+  const pill = STATUS_PILL[m.status] ?? { tone: "live" as StoryTone, label: m.status };
+  const over = m.tokenBudget ? m.totalTokens >= m.tokenBudget : false;
+  const meta = [
+    `${m.completedTasks}/${m.totalTasks} tasks`,
+    m.totalTokens ? `${compactTokens(m.totalTokens)} tokens` : null,
+    timeAgo(m.createdAt),
+  ]
+    .filter(Boolean)
+    .join(" · ");
+
+  return (
+    <li className="rail-card" data-status={m.status} style={agentLook(STORY_ROLE)}>
+      <div className="rail-title">
+        <Link href={`/?mission=${encodeURIComponent(m.id)}`} className="rail-link">
+          {m.title}
+        </Link>
+        <span className="story-meta" title={m.createdAt}>
+          {meta}
+        </span>
+        {over && <span className="story-warn">Used its whole token budget.</span>}
+      </div>
+
+      <div className="rail-track" style={{ "--at": at / (STATIONS.length - 1) } as CSSProperties}>
+        <span className="rail-line" />
+        <span className="rail-fill" />
+        {STATIONS.map((s, i) => (
+          <span key={s.phase} className="rail-stop" data-state={states[i]}>
+            <i />
+            <small>{s.label}</small>
+          </span>
+        ))}
+        <span className="rail-bot">
+          <AgentBot name="PM" role={STORY_ROLE} asleep={m.status === "cancelled"} working={m.status === "running"} />
+        </span>
+        <span className="sr-only">{note}.</span>
+      </div>
+
+      <StoryPill tone={pill.tone}>{pill.label}</StoryPill>
+    </li>
   );
 }
