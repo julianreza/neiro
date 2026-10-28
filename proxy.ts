@@ -19,13 +19,26 @@ export const PUBLIC_SVGS: ReadonlySet<string> = new Set([
   "/window.svg",
 ]);
 
+/**
+ * Decorative Gateway card art in `public/gateway/`. Listed explicitly, like
+ * PUBLIC_SVGS, so the `next/image` optimizer (which fetches them without the
+ * user's session cookie) can read them.
+ */
+export const PUBLIC_IMAGES: ReadonlySet<string> = new Set([
+  "/gateway/9router-hex.png",
+  "/gateway/hermes-girl.png",
+  "/gateway/hermes-moon.png",
+  "/gateway/supabase-bolt.png",
+]);
+
 /** Paths reachable without a session. */
 export function isExemptPath(pathname: string): boolean {
   return (
     pathname === "/login" ||
     pathname === "/api/auth" ||
     pathname.startsWith("/api/auth/") ||
-    PUBLIC_SVGS.has(pathname)
+    PUBLIC_SVGS.has(pathname) ||
+    PUBLIC_IMAGES.has(pathname)
   );
 }
 
