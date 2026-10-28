@@ -115,6 +115,21 @@ function DashboardSession({
   const router = useRouter();
   const { setTheme } = useTheme();
   const role = useRole();
+  // Waiting count for the phone bar's Needs you badge. The session remounts
+  // on every page change, so this refreshes on each navigation.
+  const [needsYou, setNeedsYou] = useState(0);
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/needs-you", { cache: "no-store" })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data: { count?: unknown } | null) => {
+        if (!cancelled) setNeedsYou(Number(data?.count) || 0);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
   useEffect(() => {
     function onKey(event: KeyboardEvent) {
       if ((event.metaKey || event.ctrlKey) && event.key === "k") {
@@ -231,6 +246,7 @@ function DashboardSession({
           pathname={pathname}
           memory={railMemory}
           onSignOut={() => void signOut()}
+          badges={{ "/needs-you": needsYou }}
         />
 
         <CommandDialog
