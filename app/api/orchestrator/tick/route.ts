@@ -1,45 +1,42 @@
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
-import { isAuthorizedRequest } from "@/lib/auth";
-import { getSupabaseAdmin } from "@/lib/supabase";
-import { advanceActiveMissions, advanceMission } from "@/lib/orchestrator";
+import { dashboardSecretProblem, isAuthorizedRequest } from "@/lib/auth";
+import { advanceMission } from "@/lib/orchestrator";
+import { recordTickHeartbeat, runTick } from "@/lib/tick";
 import { AppConfigError } from "@/lib/types";
 
 export async function POST(request: NextRequest) {
+  const secretProblem = dashboardSecretProblem();
+  if (secretProblem) {
+    return NextResponse.json(
+      { error: secretProblem, code: "weak_dashboard_secret" },
+      { status: 503 }
+    );
+  }
+
   const authorized = await isAuthorizedRequest(request);
   if (!authorized) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
   try {
-    const supabase = getSupabaseAdmin();
-
-    // Record heartbeat in app_state
-    const now = new Date().toISOString();
-    await supabase
-      .from("app_state")
-      .upsert({
-        key: "last_cron_tick_at",
-        value: { at: now },
-        updated_at: now,
-      });
-
     const body = await request.json().catch(() => ({}));
     const { missionId } = body || {};
 
     if (missionId && typeof missionId === "string") {
+      await recordTickHeartbeat();
       const result = await advanceMission(missionId);
       return NextResponse.json({ ok: true, mission: result }, { status: 200 });
     }
 
-    const { advancedCount, errors } = await advanceActiveMissions();
+    const { advancedCount, errors, tickedAt } = await runTick();
 
     return NextResponse.json(
       {
         ok: true,
         advancedCount,
         errors,
-        tickedAt: now,
+        tickedAt,
       },
       { status: 200 }
     );

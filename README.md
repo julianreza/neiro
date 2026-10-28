@@ -32,11 +32,12 @@ Card surfaces feature modern 3D floating depth: specular top rim lights, ambient
 
 ## Backend
 
-- **Database & schema**: `supabase/schema.sql` creates `agents`, `missions`, `mission_tasks`, `mission_artifacts` and `app_state`, with RLS enabled and no public policies, so only the server-side service-role client can read or write them. The file is idempotent: re-run it to apply the latest migration block on an existing database.
+- **Database & schema**: `supabase/migrations/` creates `agents`, `missions`, `mission_tasks`, `mission_artifacts` and `app_state`, with RLS enabled and no public policies, so only the server-side service-role client can read or write them. Every migration is idempotent: re-run it to apply the latest migration block on an existing database.
 - **Authentication**: `proxy.ts` gates every route except `/login`, `/api/auth` and the static SVGs listed in `PUBLIC_SVGS`. Sessions are HMAC-SHA256 tokens (`lib/auth.ts`).
 - **Orchestrator**: `lib/orchestrator.ts` is a poll-driven state machine (mission phases `planning → spec → executing → summarizing → done`; task stages `Queued → Coding → QA check → Final review → Done`). Each tick does at most one guarded step per mission and task, starts Hermes runs and reads them on a later tick, resolves dependencies by `task_key`, and honours `pause_after_planning`, `max_retries` and `max_parallel_workers`. Overlapping ticks are safe. Errors are logged and stored in `missions.last_error`.
 - **Integrations**: `lib/hermes.ts` (Hermes VPS client), `lib/ninerouter.ts` (9Router gateway client).
-- **Ticks**: `POST /api/orchestrator/tick`, driven by the VPS cron in `deploy/neiro-tick.cron`. The dashboard does not tick missions itself.
+- **Ticks**: `POST /api/orchestrator/tick`, driven by the VPS cron in `deploy/neiro-tick.cron` in production. Under `bun run dev` the server ticks itself every 15s (`instrumentation.ts` → `lib/local-ticker.ts`); set `NEIRO_LOCAL_TICK=off` to stop that, or `on` to keep it under `next start`.
+- **Workspaces**: a mission's workspace folder must exist on the machine running Neiro and Hermes. When it is a git repo, Neiro creates a worktree on a new branch `neiro/<mission>` under `~/.neiro/worktrees/` (override with `NEIRO_WORKTREE_ROOT`), and Coding, QA and Review all work there. Your own checkout and branches are never edited. To roll back, cancel the mission and `POST /api/missions/:id/control` with `{"action":"discard_worktree"}`; that deletes the worktree and its branch.
 
 ### Live vs demo data
 
@@ -50,6 +51,18 @@ Every surface loads from its API first. If the API is unavailable, it shows labe
 | 9Router & VPS | `/api/gateway/status`, `/api/gateway/models` | None | Sample model catalog; health shown as unknown |
 
 The "Sample agent capabilities" table and the cron snippet on the gateway page are always documentation samples.
+
+### Database migrations
+
+Schema changes live in `supabase/migrations/`, applied in file-name order. With the Supabase CLI (`bunx supabase`):
+
+```bash
+bunx supabase login
+bunx supabase link --project-ref <your-project-ref>
+bun run db:push
+```
+
+Without the CLI, paste each file from `supabase/migrations/` into the Supabase SQL Editor, oldest first. Every file is idempotent, so re-running one is safe. Add a change as a new timestamped file (`bun run db:new <name>`); never edit a migration that has already been applied.
 
 ### Environment
 

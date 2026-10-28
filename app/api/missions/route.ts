@@ -5,6 +5,7 @@ import { getSupabaseAdmin } from "@/lib/supabase";
 import { advanceMission, reportAdvanceError } from "@/lib/orchestrator";
 import { mapMissionRow } from "@/lib/orchestrator-store";
 import { parseMissionCreateBody } from "@/lib/mission-input";
+import { prepareMissionWorkspace } from "@/lib/worktree";
 import { AppConfigError } from "@/lib/types";
 import type { MissionSummaryDTO } from "@/lib/types";
 
@@ -89,6 +90,33 @@ export async function POST(request: NextRequest) {
 
     const missionId = `mission-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 
+    // Resolve the workspace before the mission exists, so a bad path or
+    // branch is a 400 the user sees now, not a mission that fails later.
+    let workspaceColumns: Record<string, string | null> = {};
+    if (input.workspacePath) {
+      try {
+        const ws = await prepareMissionWorkspace({
+          workspacePath: input.workspacePath,
+          missionId,
+          baseBranch: input.baseBranch,
+          isolate: input.isolateWorkspace,
+        });
+        workspaceColumns =
+          ws.kind === "worktree"
+            ? {
+                agent_workspace_path: ws.path,
+                base_branch: ws.baseRef,
+                work_branch: ws.branch,
+                worktree_path: ws.worktreePath,
+                repo_root: ws.repoRoot,
+              }
+            : { agent_workspace_path: ws.path };
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : "Could not prepare the workspace";
+        return NextResponse.json({ error: message }, { status: 400 });
+      }
+    }
+
     const supabase = getSupabaseAdmin();
 
     const { data: newMission, error: createErr } = await supabase
@@ -105,12 +133,16 @@ export async function POST(request: NextRequest) {
         max_parallel_workers: input.maxParallelWorkers,
         max_retries: input.maxRetries,
         workspace_path: input.workspacePath,
+        ...workspaceColumns,
       })
       .select()
       .single();
 
     if (createErr) {
-      return NextResponse.json({ error: createErr.message }, { status: 500 });
+      const hint = /agent_workspace_path|work_branch|worktree_path|repo_root|base_branch/.test(createErr.message)
+        ? " Run the Supabase migrations (bun run db:push) first."
+        : "";
+      return NextResponse.json({ error: createErr.message + hint }, { status: 500 });
     }
 
     // Start planning eagerly; on failure the next tick retries.

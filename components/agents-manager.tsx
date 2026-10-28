@@ -169,7 +169,7 @@ function blankAgent(): Agent {
     role: "Backend",
     stage: "workers",
     specialty: presets[2].specialty,
-    model: models[0],
+    model: "",
     profile: "default",
     prompt: presets[2].prompt,
     url: "",
@@ -397,7 +397,7 @@ export function AgentsManager() {
             </div>
             <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-2 text-xs">
               <dt className="text-white/70">Model</dt>
-              <dd className="break-words">{agent.model}</dd>
+              <dd className="break-words">{agent.model || "Hermes default"}</dd>
               <dt className="text-white/70">Profile</dt>
               <dd className="min-w-0">
                 <code className="agent-chip break-all">{agent.profile}</code>
@@ -788,9 +788,9 @@ export function AgentsManager() {
                 <Input
                   id="agent-model"
                   list="agent-model-options"
-                  required
                   maxLength={160}
                   value={draft.model}
+                  placeholder="Hermes default"
                   onChange={(event) =>
                     setDraft({ ...draft, model: event.target.value })
                   }
@@ -805,8 +805,8 @@ export function AgentsManager() {
                   id="agent-model-help"
                   className="text-xs text-muted-foreground"
                 >
-                  Type to search suggestions or enter a custom model ID. Sample
-                  catalog, availability unverified.
+                  Leave empty to use the model of the Hermes profile. Suggestions
+                  are a sample catalog, availability unverified.
                 </p>
               </div>
               <div className="space-y-2">
@@ -957,7 +957,7 @@ export function AgentsManager() {
             <dt className="text-muted-foreground">Role</dt>
             <dd>{preview?.role}</dd>
             <dt className="text-muted-foreground">Model</dt>
-            <dd className="break-words">{preview?.model}</dd>
+            <dd className="break-words">{preview?.model || "Hermes default"}</dd>
             <dt className="text-muted-foreground">Profile</dt>
             <dd className="break-words">{preview?.profile}</dd>
             <dt className="text-muted-foreground">Connection</dt>

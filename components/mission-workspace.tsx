@@ -51,6 +51,7 @@ import {
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
 import { RunInspectorSheet } from "@/components/run-inspector-sheet";
+import { WorktreeBar } from "@/components/worktree-bar";
 import {
   MarkdownArtifactViewer,
   type ArtifactFile,
@@ -85,6 +86,9 @@ type MissionView = Omit<DemoMission, "tasks"> & {
   phase?: MissionPhase;
   lastError?: string | null;
   artifacts?: ArtifactFile[];
+  /** Mission branch when it runs in a git worktree (live missions only). */
+  workBranch?: string | null;
+  baseBranch?: string | null;
 };
 
 const PHASE_STEP: Record<MissionPhase, number> = {
@@ -119,6 +123,8 @@ function parseMissionDetail(json: unknown): MissionView | null {
     status: m.status,
     phase: m.phase,
     lastError: m.lastError,
+    workBranch: m.workBranch,
+    baseBranch: m.baseBranch,
     tasks: m.tasks.map((t) => ({
       id: t.taskKey ?? t.id.slice(0, 8),
       rowId: t.id,
@@ -200,6 +206,8 @@ export function MissionWorkspace() {
   const [prompt, setPrompt] = useState("");
   const [pause, setPause] = useState(false);
   const [workspace, setWorkspace] = useState("");
+  const [baseBranch, setBaseBranch] = useState("");
+  const [isolate, setIsolate] = useState(true);
   const [workers, setWorkers] = useState("3");
   const [retries, setRetries] = useState("2");
   const [launching, setLaunching] = useState(false);
@@ -260,6 +268,8 @@ export function MissionWorkspace() {
       prompt: prompt.trim(),
       pause_after_planning: pause,
       workspace_path: workspace.trim() || undefined,
+      base_branch: baseBranch.trim() || undefined,
+      isolate_workspace: isolate,
       max_parallel_workers: parseIntOr(workers, 3),
       max_retries: parseIntOr(retries, 2),
     });
@@ -593,13 +603,35 @@ export function MissionWorkspace() {
             <CollapsibleContent>
               <div className="grid gap-5 border-t p-5 sm:grid-cols-2 lg:grid-cols-4">
                 <div className="space-y-2">
-                  <Label htmlFor="workspace-path">VPS workspace path</Label>
+                  <Label htmlFor="workspace-path">Workspace folder</Label>
                   <Input
                     id="workspace-path"
                     value={workspace}
                     onChange={(event) => setWorkspace(event.target.value)}
-                    placeholder="/root/projects/portal"
+                    placeholder="/Users/you/projects/portal"
+                    aria-describedby="workspace-path-help"
                   />
+                  <p id="workspace-path-help" className="text-xs text-muted-foreground">
+                    On the machine running Neiro and Hermes.
+                  </p>
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="base-branch">Base branch</Label>
+                  <Input
+                    id="base-branch"
+                    value={baseBranch}
+                    onChange={(event) => setBaseBranch(event.target.value)}
+                    placeholder="Current branch"
+                    disabled={!isolate}
+                    maxLength={200}
+                    autoCapitalize="off"
+                    autoCorrect="off"
+                    spellCheck={false}
+                    aria-describedby="base-branch-help"
+                  />
+                  <p id="base-branch-help" className="text-xs text-muted-foreground">
+                    The new mission branch starts here.
+                  </p>
                 </div>
                 <div className="space-y-2">
                   <Label htmlFor="worker-limit">Parallel workers</Label>
@@ -630,6 +662,20 @@ export function MissionWorkspace() {
                     onCheckedChange={setPause}
                   />
                   <Label htmlFor="pause-plan">Pause after PRD review</Label>
+                </div>
+                <div className="flex items-center gap-3">
+                  <Switch
+                    id="isolate-workspace"
+                    checked={isolate}
+                    onCheckedChange={setIsolate}
+                    aria-describedby="isolate-workspace-help"
+                  />
+                  <div>
+                    <Label htmlFor="isolate-workspace">Work on a new branch</Label>
+                    <p id="isolate-workspace-help" className="text-xs text-muted-foreground">
+                      Git worktree on neiro/&lt;mission&gt;. Your checkout stays untouched.
+                    </p>
+                  </div>
                 </div>
               </div>
               <p className="border-t px-5 py-3 text-xs text-muted-foreground">
@@ -713,6 +759,15 @@ export function MissionWorkspace() {
             </div>
           </div>
         </div>
+        {isLive && mission?.workBranch && (
+          <WorktreeBar
+            missionId={mission.id}
+            branch={mission.workBranch}
+            baseBranch={mission.baseBranch ?? null}
+            status={mission.status}
+            onDiscarded={refresh}
+          />
+        )}
         {mission?.lastError && (
           <Alert variant="destructive" role="alert">
             <AlertTitle>Orchestrator error</AlertTitle>

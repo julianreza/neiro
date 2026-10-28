@@ -681,7 +681,7 @@ async function failAttempt(
 /* ------------------------------------------------------------------ */
 
 export const ROUTING_MIGRATION_HINT =
-  "Routing columns missing: re-run supabase/schema.sql (section 9) before enabling NEIRO_LAYA_MODEL_PATH";
+  "Routing columns missing: run the Supabase migrations (bun run db:push) before enabling NEIRO_LAYA_MODEL_PATH";
 
 /** Postgres 42703 / PostgREST PGRST204: a column the code writes is not in the table. */
 function isMissingColumnError(err: unknown): boolean {
@@ -709,7 +709,7 @@ async function routeTask(
       routedAt: now,
     });
   } catch (err: unknown) {
-    // The router is on but schema.sql section 9 was never run: say so plainly
+    // The router is on but the migrations were never applied: say so plainly
     // instead of a generic per-task error on every tick.
     if (!isMissingColumnError(err)) throw err;
     console.error("[orchestrator] routing columns missing", { taskId: task.id, error: errorMessage(err) });
@@ -874,6 +874,25 @@ export async function overrideRoute(
   return assignFromGate(task, agent, { routingStatus: "overridden", humanAgentId: agent.id }, d);
 }
 
+/**
+ * Where the work lives, for every stage's prompt. QA and Review get it too,
+ * so they can inspect the real files instead of only the coder's summary.
+ */
+function workspaceLines(m: MissionDetailDTO, stage: "Coding" | "QA check" | "Review"): string[] {
+  const folder = m.agentWorkspacePath || m.workspacePath;
+  if (!folder) return [];
+  const lines = [`Workspace: ${folder}`];
+  if (m.workBranch) {
+    lines.push(`Branch: ${m.workBranch} (a git worktree created for this mission)`);
+    lines.push(
+      stage === "Coding"
+        ? `Commit your changes on ${m.workBranch} with clear messages. Do not switch, create, push or delete branches.`
+        : `Inspect the files and \`git log\` on ${m.workBranch}. Do not modify or commit anything.`,
+    );
+  }
+  return lines;
+}
+
 function taskPrompt(m: MissionDetailDTO, task: MissionTask): string {
   const deliverable = truncateMiddle(task.resultOutput ?? "", MAX_PROMPT_CONTEXT_CHARS);
   switch (task.stage) {
@@ -882,14 +901,30 @@ function taskPrompt(m: MissionDetailDTO, task: MissionTask): string {
         "Execute the following task:",
         `Title: ${task.title}`,
         `Requirements: ${task.result || task.title}`,
-        m.workspacePath ? `Workspace: ${m.workspacePath}` : "",
+        ...workspaceLines(m, "Coding"),
       ]
         .filter(Boolean)
         .join("\n");
     case "QA check":
-      return `Verify the deliverables for task "${task.title}".\n\nRequirements: ${task.result || task.title}\n\nDeliverable:\n${deliverable}\n\nEnd your response with VERDICT: PASS or VERDICT: FAIL.`;
+      return [
+        `Verify the deliverables for task "${task.title}".`,
+        "",
+        `Requirements: ${task.result || task.title}`,
+        ...workspaceLines(m, "QA check"),
+        "",
+        `Deliverable:\n${deliverable}`,
+        "",
+        "End your response with VERDICT: PASS or VERDICT: FAIL.",
+      ].join("\n");
     default:
-      return `Review security, accessibility, and quality for task "${task.title}".\n\nDeliverable:\n${deliverable}\n\nEnd with VERDICT: APPROVED or VERDICT: CHANGES_REQUESTED.`;
+      return [
+        `Review security, accessibility, and quality for task "${task.title}".`,
+        ...workspaceLines(m, "Review"),
+        "",
+        `Deliverable:\n${deliverable}`,
+        "",
+        "End with VERDICT: APPROVED or VERDICT: CHANGES_REQUESTED.",
+      ].join("\n");
   }
 }
 

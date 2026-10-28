@@ -280,8 +280,14 @@ export async function startHermesRun(
   const body: Record<string, unknown> = {
     input: input.prompt,
     instructions: input.instructions || agent.prompt || "",
-    model: input.model || agent.model || "",
   };
+
+  // An empty model means "use the Hermes profile's own model". Sending
+  // model: "" (or a name Hermes has no provider for) fails the run with 404.
+  const model = (input.model || agent.model || "").trim();
+  if (model) {
+    body.model = model;
+  }
 
   if (input.sessionId) {
     body.session_id = input.sessionId;

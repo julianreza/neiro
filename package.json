@@ -7,7 +7,9 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "test": "bun test --conditions=react-server"
+    "test": "bun test --conditions=react-server",
+    "db:push": "bunx supabase db push",
+    "db:new": "bunx supabase migration new"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.118.0",

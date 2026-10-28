@@ -7,6 +7,7 @@ export const MISSION_LIMITS = {
   maxParallelWorkers: { min: 1, max: 10, default: 3 },
   maxRetries: { min: 0, max: 5, default: 2 },
   workspacePathMaxChars: 500,
+  baseBranchMaxChars: 200,
   titleMaxChars: 200,
 } as const;
 
@@ -17,7 +18,19 @@ export type MissionCreateInput = {
   maxParallelWorkers: number;
   maxRetries: number;
   workspacePath: string | null;
+  /** Branch the mission worktree starts from. Null = the repo's current HEAD. */
+  baseBranch: string | null;
+  /** Work in a git worktree on a new branch instead of in the folder itself. */
+  isolateWorkspace: boolean;
 };
+
+// Conservative subset of `git check-ref-format`: no spaces, no "..", no "//",
+// no leading "-" (it would read as a git option), no trailing "." or "/".
+const BRANCH_NAME = /^(?!-)(?!.*\.\.)(?!.*\/\/)(?!.*\.lock$)[A-Za-z0-9._/-]+(?<![./])$/;
+
+export function isValidBranchName(name: string): boolean {
+  return name.length <= MISSION_LIMITS.baseBranchMaxChars && BRANCH_NAME.test(name);
+}
 
 export type MissionCreateParseResult =
   | { ok: true; value: MissionCreateInput }
@@ -84,6 +97,22 @@ export function parseMissionCreateBody(body: unknown): MissionCreateParseResult 
     workspacePath = trimmed || null;
   }
 
+  let baseBranch: string | null = null;
+  if (b.base_branch !== undefined && b.base_branch !== null) {
+    if (typeof b.base_branch !== "string") {
+      return { ok: false, error: "base_branch must be a string" };
+    }
+    const trimmed = b.base_branch.trim();
+    if (trimmed && !isValidBranchName(trimmed)) {
+      return { ok: false, error: "base_branch is not a valid git branch name" };
+    }
+    baseBranch = trimmed || null;
+  }
+
+  if (b.isolate_workspace !== undefined && typeof b.isolate_workspace !== "boolean") {
+    return { ok: false, error: "isolate_workspace must be a boolean" };
+  }
+
   return {
     ok: true,
     value: {
@@ -93,6 +122,8 @@ export function parseMissionCreateBody(body: unknown): MissionCreateParseResult 
       maxParallelWorkers: workers.value,
       maxRetries: retries.value,
       workspacePath,
+      baseBranch,
+      isolateWorkspace: b.isolate_workspace !== false,
     },
   };
 }
