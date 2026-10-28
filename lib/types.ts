@@ -35,6 +35,8 @@ export type Agent = {
   key_enc?: string | null;
   enabled: boolean;
   activeRun: boolean;
+  /** Max tokens this agent may spend in one mission; null = no limit. */
+  tokenBudget?: number | null;
   createdAt?: string;
   updatedAt?: string;
 };
@@ -79,6 +81,8 @@ export type Mission = {
   runStartedAt: string | null;
   lastError: string | null;
   lastErrorAt: string | null;
+  /** Max tokens all tasks in this mission may use; null = no limit. */
+  tokenBudget?: number | null;
   createdAt?: string;
   updatedAt?: string;
 };

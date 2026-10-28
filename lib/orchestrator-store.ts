@@ -149,6 +149,7 @@ export function mapAgentRow(row: Row): Agent {
     key_enc: str(row.key_enc),
     enabled: Boolean(row.enabled ?? true),
     activeRun: Boolean(row.active_run ?? false),
+    tokenBudget: num(row.token_budget),
     createdAt: str(row.created_at) ?? undefined,
     updatedAt: str(row.updated_at) ?? undefined,
   };
@@ -175,6 +176,7 @@ export function mapMissionRow(row: Row): Mission {
     runStartedAt: str(row.run_started_at),
     lastError: str(row.last_error),
     lastErrorAt: str(row.last_error_at),
+    tokenBudget: num(row.token_budget),
     createdAt: str(row.created_at) ?? undefined,
     updatedAt: str(row.updated_at) ?? undefined,
   };

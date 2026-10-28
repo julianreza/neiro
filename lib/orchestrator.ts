@@ -48,6 +48,10 @@ import type {
   MissionTask,
   TaskStage,
 } from "@/lib/types";
+import { budgetBlock } from "@/lib/budget";
+import { safeNotify, shortHash } from "@/lib/notifications";
+import type { Notifier } from "@/lib/notifications";
+import { supabaseNotifier } from "@/lib/notifications-store";
 
 /* ------------------------------------------------------------------ */
 /* Dependencies                                                        */
@@ -70,6 +74,11 @@ export type OrchestratorDeps = {
    * NEIRO_LAYA_MODEL_PATH.
    */
   router?: TaskRouter | null;
+  /**
+   * Announces mission events (feed + webhook). Omit for the real notifier;
+   * when a custom store is passed (tests) it defaults to none.
+   */
+  notify?: Notifier;
 };
 
 const realHermes: HermesClient = {
@@ -86,6 +95,7 @@ function resolveDeps(deps?: Partial<OrchestratorDeps>): OrchestratorDeps {
     newId: deps?.newId ?? (() => crypto.randomUUID()),
     router:
       deps?.router !== undefined ? deps.router : isRouterEnabled() ? createLayaRouter() : null,
+    notify: deps?.notify ?? (deps?.store ? undefined : supabaseNotifier),
   };
 }
 
@@ -309,8 +319,17 @@ export async function reportAdvanceError(
 ): Promise<void> {
   const message = errorMessage(err);
   console.error("[orchestrator] advance failed", { missionId, taskId, error: message });
+  const d = resolveDeps(deps);
   try {
-    await resolveDeps(deps).store.setMissionError(missionId, message.slice(0, MAX_ERROR_CHARS));
+    await d.store.setMissionError(missionId, message.slice(0, MAX_ERROR_CHARS));
+    await safeNotify(d.notify, {
+      kind: "mission_error",
+      missionId,
+      taskId: taskId ?? null,
+      title: "Mission is stuck",
+      body: message.slice(0, 500),
+      dedupeKey: `error:${missionId}:${shortHash(message)}`,
+    });
   } catch (storeErr: unknown) {
     console.error("[orchestrator] could not record mission error", {
       missionId,
@@ -457,13 +476,22 @@ async function stepMissionRun(m: MissionDetailDTO, d: OrchestratorDeps, ctx: Pas
 
 /** spec → executing; pauses for operator approval when requested. */
 async function enterExecuting(m: MissionDetailDTO, guard: MissionGuard, d: OrchestratorDeps) {
-  await d.store.updateMissionIf(m.id, guard, {
+  const moved = await d.store.updateMissionIf(m.id, guard, {
     phase: "executing",
     runId: null,
     runAgentId: null,
     runStartedAt: null,
     ...(m.pauseAfterPlanning ? { status: "awaiting_plan_approval" as const } : {}),
   });
+  if (moved && m.pauseAfterPlanning) {
+    await safeNotify(d.notify, {
+      kind: "plan_ready",
+      missionId: m.id,
+      title: "Plan ready for your approval",
+      body: m.title,
+      dedupeKey: `plan:${m.id}`,
+    });
+  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -478,11 +506,20 @@ async function stepSummarize(m: MissionDetailDTO, d: OrchestratorDeps) {
     content: `Mission completed successfully. All ${m.tasks.length} tasks passed QA and final review.`,
     dedupeKey: `summary:${m.id}`,
   });
-  await d.store.updateMissionIf(
+  const done = await d.store.updateMissionIf(
     m.id,
     { phase: "summarizing", runId: null, status: "running" },
     { phase: "done" satisfies MissionPhase, status: "completed" },
   );
+  if (done) {
+    await safeNotify(d.notify, {
+      kind: "mission_completed",
+      missionId: m.id,
+      title: "Mission completed",
+      body: `${m.title}: all ${m.tasks.length} tasks done.`,
+      dedupeKey: `done:${m.id}`,
+    });
+  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -672,7 +709,17 @@ async function failAttempt(
       ...clearRun,
     });
   } else {
-    await d.store.updateTaskIf(task.id, guard, { stage: "Needs you", tokens, ...clearRun });
+    const escalated = await d.store.updateTaskIf(task.id, guard, { stage: "Needs you", tokens, ...clearRun });
+    if (escalated) {
+      await safeNotify(d.notify, {
+        kind: "task_needs_you",
+        missionId: m.id,
+        taskId: task.id,
+        title: "A task needs you",
+        body: `"${task.title}" failed ${task.retries + 1} time(s) in ${task.stage}.`,
+        dedupeKey: `needs:${task.id}:${task.retries}`,
+      });
+    }
   }
 }
 
@@ -727,7 +774,7 @@ async function routeTask(
     if (!agent) throw new Error(`Laya picked an unknown agent: ${decision.agentId}`);
     const outcome = routeOutcome(decision);
 
-    await d.store.updateTaskIf(task.id, lockGuard, {
+    const routed = await d.store.updateTaskIf(task.id, lockGuard, {
       stage: outcome.stage,
       routingStatus: outcome.routingStatus,
       layaAgentId: agent.id,
@@ -742,6 +789,16 @@ async function routeTask(
         ? { agentId: agent.id, agentName: agent.name, model: agent.model }
         : {}),
     });
+    if (routed && outcome.stage === "Awaiting routing") {
+      await safeNotify(d.notify, {
+        kind: "routing_needs_you",
+        missionId: task.missionId,
+        taskId: task.id,
+        title: "Pick an agent for a task",
+        body: `"${task.title}": ${outcome.reason ?? "Laya wants a human to choose."}`,
+        dedupeKey: `routing:${task.id}`,
+      });
+    }
   } catch (err: unknown) {
     const reason = errorMessage(err).slice(0, MAX_ERROR_CHARS);
     console.warn("[orchestrator] task routing failed; using the default agent", {
@@ -947,6 +1004,28 @@ async function startTaskRun(
   if (!agent) {
     await release();
     ctx.problems.push(`No enabled agent for ${task.stage} on task "${task.title}"`);
+    return;
+  }
+
+  const overBudget = budgetBlock(m, agent);
+  if (overBudget) {
+    const parked = await d.store.updateTaskIf(task.id, claimGuard, {
+      stage: "Needs you",
+      runId: null,
+      runAgentId: null,
+      runStartedAt: null,
+    });
+    if (parked) {
+      await d.store.setMissionError(m.id, overBudget.message);
+      await safeNotify(d.notify, {
+        kind: "budget_reached",
+        missionId: m.id,
+        taskId: task.id,
+        title: "Token budget reached",
+        body: overBudget.message,
+        dedupeKey: `budget:${task.id}:${overBudget.scope}:${overBudget.limit}`,
+      });
+    }
     return;
   }
 

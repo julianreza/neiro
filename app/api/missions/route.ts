@@ -9,24 +9,66 @@ import { prepareMissionWorkspace } from "@/lib/worktree";
 import { AppConfigError } from "@/lib/types";
 import type { MissionSummaryDTO } from "@/lib/types";
 
-export async function GET() {
+const HISTORY_STATUSES = new Set(["running", "awaiting_plan_approval", "completed", "cancelled"]);
+
+/**
+ * Missions, newest first. Optional history filters:
+ * `?status=completed,cancelled` `&q=text` (title search) `&limit=1-200`
+ * `&before=<created_at ISO>|<id>` (next page; treat nextBefore as opaque).
+ * Timestamp-only boundaries remain supported. No params = every mission, as before.
+ */
+export async function GET(request: NextRequest) {
   await connection();
 
   try {
     const supabase = getSupabaseAdmin();
+    const params = request.nextUrl.searchParams;
 
-    const { data: missions, error: missionsErr } = await supabase
-      .from("missions")
-      .select("*")
-      .order("created_at", { ascending: false });
+    let query = supabase.from("missions").select("*")
+      .order("created_at", { ascending: false })
+      .order("id", { ascending: false });
+
+    const statuses = (params.get("status") ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+    if (statuses.some((s) => !HISTORY_STATUSES.has(s))) {
+      return NextResponse.json({ error: `status must be among: ${[...HISTORY_STATUSES].join(", ")}` }, { status: 400 });
+    }
+    if (statuses.length > 0) query = query.in("status", statuses);
+
+    const q = (params.get("q") ?? "").trim().slice(0, 100);
+    if (q) query = query.ilike("title", `%${q.replace(/[\\%_]/g, (c) => `\\${c}`)}%`);
+
+    const before = params.get("before");
+    if (before) {
+      const separator = before.indexOf("|");
+      const timestamp = separator < 0 ? before : before.slice(0, separator);
+      const id = separator < 0 ? null : before.slice(separator + 1);
+      if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})$/.test(timestamp)
+        || Number.isNaN(Date.parse(timestamp)) || id === "") {
+        return NextResponse.json({ error: "before must be a history cursor or ISO timestamp" }, { status: 400 });
+      }
+      query = id === null
+        ? query.lt("created_at", timestamp)
+        : query.or(`created_at.lt.${timestamp},and(created_at.eq.${timestamp},id.lt.${JSON.stringify(id)})`);
+    }
+
+    const rawLimit = Number(params.get("limit"));
+    const limit = Number.isInteger(rawLimit) && rawLimit > 0 ? Math.min(rawLimit, 200) : null;
+    if (limit !== null) query = query.limit(limit);
+
+    const { data: missions, error: missionsErr } = await query;
 
     if (missionsErr) {
       return NextResponse.json({ error: missionsErr.message }, { status: 500 });
     }
 
-    const { data: tasks, error: tasksErr } = await supabase
-      .from("mission_tasks")
-      .select("mission_id, stage, tokens");
+    const missionIds = (missions || []).map((m: Record<string, unknown>) => String(m.id));
+    const { data: tasks, error: tasksErr } =
+      missionIds.length === 0
+        ? { data: [], error: null }
+        : missionIds.length > 200
+          ? // Too many ids for one URL: read all task stats, as before filters existed.
+            await supabase.from("mission_tasks").select("mission_id, stage, tokens")
+          : await supabase.from("mission_tasks").select("mission_id, stage, tokens").in("mission_id", missionIds);
 
     if (tasksErr) {
       return NextResponse.json({ error: tasksErr.message }, { status: 500 });
@@ -66,7 +108,18 @@ export async function GET() {
       };
     });
 
-    return NextResponse.json({ missions: summaries }, { status: 200 });
+    const last = summaries[summaries.length - 1];
+    return NextResponse.json(
+      {
+        missions: summaries,
+        // Cursor for the next history page, when a page limit was asked for.
+        nextBefore:
+          limit !== null && summaries.length === limit && last?.createdAt
+            ? `${last.createdAt}|${last.id}`
+            : null,
+      },
+      { status: 200 }
+    );
   } catch (err: unknown) {
     if (err instanceof AppConfigError) {
       return NextResponse.json(
@@ -133,13 +186,16 @@ export async function POST(request: NextRequest) {
         max_parallel_workers: input.maxParallelWorkers,
         max_retries: input.maxRetries,
         workspace_path: input.workspacePath,
+        // Only sent when set, so a database without the budget migration
+        // still accepts missions that don't use it.
+        ...(input.tokenBudget !== null ? { token_budget: input.tokenBudget } : {}),
         ...workspaceColumns,
       })
       .select()
       .single();
 
     if (createErr) {
-      const hint = /agent_workspace_path|work_branch|worktree_path|repo_root|base_branch/.test(createErr.message)
+      const hint = /agent_workspace_path|work_branch|worktree_path|repo_root|base_branch|token_budget/.test(createErr.message)
         ? " Run the Supabase migrations (bun run db:push) first."
         : "";
       return NextResponse.json({ error: createErr.message + hint }, { status: 500 });
