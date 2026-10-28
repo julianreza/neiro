@@ -1,0 +1,3 @@
+# Supabase CLI project config. Only what `supabase link` / `supabase db push`
+# need; everything else uses CLI defaults. Migrations: supabase/migrations/.
+project_id = "neiro"
