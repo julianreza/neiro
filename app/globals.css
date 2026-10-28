@@ -1079,20 +1079,78 @@ section.console-lane[data-stage] > :first-child h2 {
   --you-ink: #0f766e;
   --bite: 2.5rem;
   padding: 6rem 1rem 4rem;
-  overflow-x: clip;
+  overflow: clip;
   background-color: var(--canvas);
-  background-image: radial-gradient(
-    color-mix(in srgb, var(--rail) 22%, transparent) 1.2px,
-    transparent 1.3px
-  );
-  background-size: 18px 18px;
   color: var(--foreground);
+}
+
+/* Background: cable paths (login option 4). Pressed-in grooves run from the
+   screen edges into the card; teal sparks flow along them toward you,
+   like the wires on the AI team page. Faster while signing in, red on
+   an error. */
+.login-wires {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 0;
+  pointer-events: none;
+  --spark: var(--rail);
+}
+
+.login-wires path {
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* Groove: dark edge up-left, light edge down-right, canvas in the middle. */
+.login-wire-lo { stroke: var(--neu-lo, #d3d8df); stroke-width: 9px; transform: translate(-2px, -2px); }
+.login-wire-hi { stroke: var(--neu-hi, #fff); stroke-width: 9px; transform: translate(2px, 2px); }
+.login-wire-base { stroke: var(--canvas); stroke-width: 6px; }
+
+.login-wire-spark {
+  stroke: var(--spark);
+  stroke-width: 3px;
+  stroke-dasharray: 32 400;
+  filter: drop-shadow(0 0 3px var(--spark)) drop-shadow(0 0 8px var(--spark));
+  animation: login-spark var(--dur, 3.4s) linear infinite;
+  animation-delay: var(--d, 0s);
+}
+
+/* Dark: the rail teal (#0f766e) is too dim to glow on near-black, and
+   the dark groove edge vanishes. Brighter spark, wider groove with a
+   faint teal floor and a lighter lower edge. */
+.dark .login-wires { --spark: #2dd4bf; }
+.dark .login-wire-lo { stroke: #040506; stroke-width: 12px; } /* deep edge */
+.dark .login-wire-hi { stroke: #2b2f38; stroke-width: 12px; }
+.dark .login-wire-base {
+  stroke: color-mix(in srgb, #2dd4bf 12%, #0b0c10);
+  stroke-width: 8px;
+}
+
+.login-wires[data-status="pending"] .login-wire-spark {
+  animation-duration: 1.2s;
+}
+
+.login-wires[data-status="error"],
+.dark .login-wires[data-status="error"] {
+  --spark: var(--status-danger);
+}
+
+@keyframes login-spark {
+  from { stroke-dashoffset: 432; }
+  to { stroke-dashoffset: 0; }
 }
 
 .dark .login-shell {
   --rail: #0f766e;
   --rail-deep: #164e63;
   --you-ink: #5eead4;
+  /* A lighter dark canvas for this page, so raised and pressed-in
+     shapes have room to show. Card (#18191e) now sits on the same tone. */
+  --canvas: #15171c;
+  --neu-lo: #08090c;
+  --neu-hi: #252830;
 }
 
 /* Card + peeking bots + badge share one box. */
@@ -1107,8 +1165,10 @@ section.console-lane[data-stage] > :first-child h2 {
 .login-card-shadow {
   position: relative;
   z-index: 1;
-  filter: drop-shadow(0 0 0.5px var(--border))
-    drop-shadow(0 30px 40px var(--surface-shadow));
+  /* Neumorphic lift: dark below-right, light above-left. drop-shadow
+     follows the bitten corner, a box-shadow would be cut by the mask. */
+  filter: drop-shadow(10px 10px 14px var(--neu-lo, #d3d8df))
+    drop-shadow(-8px -8px 12px var(--neu-hi, #fff));
 }
 
 .login-card {
@@ -1398,6 +1458,7 @@ section.console-lane[data-stage] > :first-child h2 {
   }
 
   /* Bots stay peeking, still. */
+  .login-wire-spark,
   .login-peek-top,
   .login-peek-side,
   .login-peek .bot-rig {
@@ -1407,6 +1468,9 @@ section.console-lane[data-stage] > :first-child h2 {
   .login-peek-side {
     transform: rotate(90deg);
   }
+
+  /* Sparks stay still, resting near the card end of each groove. */
+  .login-wire-spark { stroke-dashoffset: 40; }
 }
 
 /* ------------------------------------------------------------------

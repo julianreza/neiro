@@ -31,6 +31,17 @@ const PEEKERS = [
   { role: "QA", side: "side", pos: "52%", delay: "-2.5s" },
 ] as const;
 
+/** Background cable paths (1440×900 space). Each runs from a screen edge
+    into the middle, where the card covers its end. */
+const WIRES = [
+  { d: "M0 120 H180 Q200 120 200 140 V450 H720", delay: "0s", dur: "3.4s" },
+  { d: "M1440 90 H1260 Q1240 90 1240 110 V450 H720", delay: "-1.1s", dur: "3.4s" },
+  { d: "M260 900 V780 Q260 760 280 760 H720 V450", delay: "-2.3s", dur: "3.4s" },
+  { d: "M1440 820 H1180 Q1160 820 1160 800 V640 H720 V450", delay: "-0.6s", dur: "4s" },
+  { d: "M560 0 V60 Q560 80 580 80 H720 V450", delay: "-1.8s", dur: "2.9s" },
+  { d: "M0 700 H400 Q420 700 420 680 V450 H720", delay: "-2.9s", dur: "3.7s" },
+] as const;
+
 function LoginForm({
   onStatusChange,
 }: {
@@ -190,7 +201,35 @@ export default function LoginPage() {
         <ThemeToggle />
       </div>
 
+      {/* Cable paths: pressed-in grooves with teal sparks flowing to the
+          card. Faster while signing in, red on an error. */}
+      <svg
+        className="login-wires"
+        data-status={status}
+        viewBox="0 0 1440 900"
+        preserveAspectRatio="none"
+        aria-hidden="true"
+        focusable="false"
+      >
+        {WIRES.map((wire) => (
+          <g key={wire.d}>
+            <path className="login-wire-lo" d={wire.d} fill="none" vectorEffect="non-scaling-stroke" />
+            <path className="login-wire-hi" d={wire.d} fill="none" vectorEffect="non-scaling-stroke" />
+            <path className="login-wire-base" d={wire.d} fill="none" vectorEffect="non-scaling-stroke" />
+            <path
+              className="login-wire-spark"
+              d={wire.d}
+              fill="none"
+              pathLength={400}
+              vectorEffect="non-scaling-stroke"
+              style={{ "--d": wire.delay, "--dur": wire.dur } as React.CSSProperties}
+            />
+          </g>
+        ))}
+      </svg>
+
       <div className="login-stage">
+
         {PEEKERS.map((bot) => (
           <span
             key={bot.role}
