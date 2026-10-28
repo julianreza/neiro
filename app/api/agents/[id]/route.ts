@@ -3,6 +3,7 @@ import { connection } from "next/server";
 import type { NextRequest } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { AppConfigError } from "@/lib/types";
+import { parseTokenBudget } from "@/lib/budget";
 import type { Agent } from "@/lib/types";
 
 type RouteContext = {
@@ -62,6 +63,7 @@ export async function PATCH(request: NextRequest, context: RouteContext) {
       "key_enc",
       "enabled",
       "activeRun",
+      "tokenBudget",
     ];
 
     const updates: Record<string, unknown> = {};
@@ -69,6 +71,10 @@ export async function PATCH(request: NextRequest, context: RouteContext) {
       if (key in body) {
         if (key === "activeRun") {
           updates.active_run = body[key];
+        } else if (key === "tokenBudget") {
+          const budget = parseTokenBudget(body[key], "tokenBudget");
+          if (!budget.ok) return NextResponse.json({ error: budget.error }, { status: 400 });
+          updates.token_budget = budget.value;
         } else {
           updates[key] = body[key];
         }

@@ -1,3 +1,5 @@
+import { parseTokenBudget } from "@/lib/budget";
+
 /**
  * Validation for POST /api/missions. Kept framework-free so it is unit-tested
  * directly (lib/mission-input.test.ts).
@@ -22,6 +24,8 @@ export type MissionCreateInput = {
   baseBranch: string | null;
   /** Work in a git worktree on a new branch instead of in the folder itself. */
   isolateWorkspace: boolean;
+  /** Max tokens for all tasks; null = no limit. */
+  tokenBudget: number | null;
 };
 
 // Conservative subset of `git check-ref-format`: no spaces, no "..", no "//",
@@ -113,6 +117,9 @@ export function parseMissionCreateBody(body: unknown): MissionCreateParseResult 
     return { ok: false, error: "isolate_workspace must be a boolean" };
   }
 
+  const budget = parseTokenBudget(b.token_budget, "token_budget");
+  if (!budget.ok) return budget;
+
   return {
     ok: true,
     value: {
@@ -124,6 +131,7 @@ export function parseMissionCreateBody(body: unknown): MissionCreateParseResult 
       workspacePath,
       baseBranch,
       isolateWorkspace: b.isolate_workspace !== false,
+      tokenBudget: budget.value,
     },
   };
 }

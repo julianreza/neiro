@@ -15,6 +15,7 @@ test("parseMissionCreateBody applies defaults", () => {
       workspacePath: null,
       baseBranch: null,
       isolateWorkspace: true,
+      tokenBudget: null,
     },
   });
 });
