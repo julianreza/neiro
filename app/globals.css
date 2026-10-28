@@ -2638,3 +2638,367 @@ section.console-lane[data-stage] > :first-child h2 {
 }
 @keyframes live-dot-pulse { 50% { opacity: 0.25; } }
 @media (prefers-reduced-motion: reduce) { .live-dot { animation: none; } }
+
+/* ── History (design H15): the PM robot tells what happened ── */
+.history-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.875rem 1rem;
+}
+.history-mark {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 2.75rem;
+  height: 2.75rem;
+  border-radius: 16px;
+  color: #fff;
+  background: linear-gradient(150deg, #14b8a6, #134e4a);
+  box-shadow: 0 12px 20px -14px #134e4a;
+}
+.history-seg {
+  height: auto;
+  padding: 4px;
+  gap: 4px;
+  border-radius: 999px;
+  background: transparent;
+  box-shadow: var(--neu-inset-sm, inset 0 1px 3px rgb(15 23 42 / 0.12));
+}
+.history-seg [data-slot="tabs-trigger"] {
+  min-height: 2.5rem;
+  padding: 0 1.125rem;
+  gap: 0.5rem;
+  border: 0;
+  border-radius: 999px;
+  color: var(--muted-foreground);
+  font-size: 0.875rem;
+}
+.history-seg [data-slot="tabs-trigger"]:is([data-state="active"], [data-active]) {
+  background: var(--card);
+  color: var(--primary);
+  font-weight: 650;
+  box-shadow: var(--neu-raise-sm, 0 8px 18px -12px rgb(15 23 42 / 0.45));
+}
+
+/* Search and filters share one raised bar. */
+.story-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 0.75rem;
+  margin-top: 1.5rem;
+  padding: 0.5rem;
+  border-radius: 22px;
+  background: var(--card);
+  color: var(--card-foreground);
+  box-shadow: var(--neu-raise-sm, 0 8px 18px -12px rgb(15 23 42 / 0.45));
+}
+.story-search-wrap { position: relative; flex: 1 1 15rem; min-width: 0; }
+.story-search-icon {
+  position: absolute;
+  left: 0.95rem;
+  top: 50%;
+  width: 1rem;
+  height: 1rem;
+  transform: translateY(-50%);
+  color: var(--muted-foreground);
+  pointer-events: none;
+}
+.story-search {
+  height: 2.75rem;
+  padding-left: 2.6rem;
+  border: 0;
+  border-radius: 999px;
+  background: var(--background);
+  box-shadow: var(--neu-inset-sm, inset 0 1px 3px rgb(15 23 42 / 0.12));
+  font-size: 0.9375rem;
+}
+.story-search:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+.story-chips { display: flex; flex-wrap: wrap; gap: 0.25rem; }
+.story-chip {
+  --tone: var(--muted-foreground);
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  min-height: 2.5rem;
+  padding: 0 0.95rem;
+  border-radius: 999px;
+  color: var(--muted-foreground);
+  font-size: 0.875rem;
+  font-weight: 550;
+  transition: background-color 150ms ease, color 150ms ease;
+}
+.story-chip i { width: 0.5rem; height: 0.5rem; border-radius: 999px; background: var(--tone); }
+.story-chip:hover { background: var(--secondary); color: var(--foreground); }
+.story-chip[aria-pressed="true"] { background: var(--primary); color: var(--primary-foreground); }
+.story-chip[aria-pressed="true"] i { background: currentColor; }
+.story-chip:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+.story-chip[data-tone="done"] { --tone: var(--status-success); }
+.story-chip[data-tone="live"] { --tone: var(--status-running); }
+.story-chip[data-tone="off"] { --tone: #94a3b8; }
+.story-chip[data-tone="live"] i { animation: story-blink 1.4s ease-in-out infinite; }
+
+/* Feed, grouped by day. */
+.story-feed { display: grid; gap: 1.75rem; margin-top: 1.75rem; }
+.story-day {
+  display: flex;
+  align-items: center;
+  gap: 0.625rem;
+  font-size: 0.9375rem;
+  font-weight: 700;
+}
+.story-day-count {
+  padding: 0.125rem 0.6rem;
+  border-radius: 999px;
+  background: var(--secondary);
+  color: var(--muted-foreground);
+  font-size: 0.75rem;
+  font-weight: 550;
+}
+.story-list { display: grid; gap: 0.875rem; margin-top: 0.875rem; }
+
+.story { display: flex; align-items: flex-start; gap: 0.625rem; }
+.story-bot { flex: none; display: flex; justify-content: center; width: 2.75rem; margin-top: -0.25rem; }
+.story-bot .agent-bot { font-size: 5.5px; margin: 0; }
+.story-bubble {
+  display: grid;
+  gap: 0.375rem;
+  flex: 1;
+  min-width: 0;
+  padding: 0.75rem 1rem 0.8rem;
+  border-radius: 6px 20px 20px 20px;
+  background: var(--card);
+  color: var(--card-foreground);
+  box-shadow: var(--neu-raise-sm, 0 8px 18px -12px rgb(15 23 42 / 0.45));
+  transition: transform 160ms ease, box-shadow 160ms ease;
+}
+a.story-bubble:hover { transform: translateY(-2px); box-shadow: var(--neu-raise, 0 14px 26px -14px rgb(15 23 42 / 0.5)); }
+a.story-bubble:focus-visible,
+.story-more:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+.story-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 0.75rem; }
+.story-text { min-width: 0; font-size: 0.9375rem; line-height: 1.5; overflow-wrap: anywhere; }
+.story-text b { font-weight: 650; }
+.story-meta { font-size: 0.75rem; color: var(--muted-foreground); }
+.story-warn { font-size: 0.8125rem; color: var(--status-warning); }
+.story[data-status="cancelled"] .story-text { color: var(--muted-foreground); }
+.story[data-status="cancelled"] .story-text b { color: var(--foreground); }
+
+.story-pill {
+  --a: #94a3b8;
+  --b: #475569;
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.15rem 0.6rem;
+  border-radius: 999px;
+  color: #fff;
+  font-size: 0.6875rem;
+  font-weight: 700;
+  line-height: 1.4;
+  background: linear-gradient(150deg, var(--a), var(--b));
+}
+.story-pill[data-tone="done"] { --a: #10b981; --b: #047857; }
+.story-pill[data-tone="live"] { --a: #3b82f6; --b: #1e40af; }
+.story-pill[data-tone="wait"] { --a: #f59e0b; --b: #b45309; }
+.story-pill[data-tone="bad"] { --a: #f43f5e; --b: #be123c; }
+.story-pill[data-tone="live"]::before {
+  content: "";
+  width: 0.375rem;
+  height: 0.375rem;
+  border-radius: 999px;
+  background: #fff;
+  animation: story-blink 1.4s ease-in-out infinite;
+}
+@keyframes story-blink { 50% { opacity: 0.25; } }
+
+/* Questions: you ask on the right, the robot answers on the left. */
+.story-pair { display: grid; gap: 0.5rem; }
+.story-ask {
+  justify-self: end;
+  display: grid;
+  justify-items: end;
+  gap: 0.25rem;
+  max-width: min(32rem, 85%);
+}
+.story-ask-text {
+  padding: 0.625rem 0.875rem;
+  border-radius: 20px 20px 6px 20px;
+  background: var(--primary);
+  color: var(--primary-foreground);
+  font-size: 0.9375rem;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+.story-answer { font-size: 0.9375rem; }
+.story-bubble[data-folded] .story-answer {
+  max-height: 9.5rem;
+  overflow: hidden;
+  -webkit-mask-image: linear-gradient(#000 60%, transparent);
+  mask-image: linear-gradient(#000 60%, transparent);
+}
+.story-more {
+  justify-self: start;
+  min-height: 2.25rem;
+  padding: 0 0.875rem;
+  border-radius: 999px;
+  color: var(--primary);
+  font-size: 0.8125rem;
+  font-weight: 600;
+  box-shadow: var(--neu-raise-sm, 0 8px 18px -12px rgb(15 23 42 / 0.45));
+}
+.story-more:hover { box-shadow: var(--neu-raise, 0 14px 26px -14px rgb(15 23 42 / 0.5)); }
+.story-thinking { display: inline-flex; gap: 0.3125rem; padding: 0 0 0 0.5rem; vertical-align: middle; }
+.story-thinking i {
+  width: 0.4375rem;
+  height: 0.4375rem;
+  border-radius: 999px;
+  background: var(--primary);
+  animation: story-think 1.2s ease-in-out infinite;
+}
+.story-thinking i:nth-child(2) { animation-delay: 0.15s; }
+.story-thinking i:nth-child(3) { animation-delay: 0.3s; }
+@keyframes story-think { 0%, 100% { opacity: 0.25; } 50% { opacity: 1; } }
+
+/* Markdown inside a robot's answer bubble. */
+.story-md { max-width: 72ch; line-height: 1.6; }
+.story-md > * + * { margin-top: 0.625rem; }
+.story-md ul { list-style: disc; padding-left: 1.25rem; }
+.story-md ol { list-style: decimal; padding-left: 1.25rem; }
+.story-md code { padding: 0.0625rem 0.3125rem; border-radius: 0.375rem; background: var(--muted); font-size: 0.85em; }
+.story-md pre { overflow-x: auto; padding: 0.75rem; border-radius: 0.75rem; background: var(--muted); }
+.story-md pre code { padding: 0; background: none; }
+.story-md h1, .story-md h2, .story-md h3 { font-weight: 600; }
+
+.story-empty {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  margin-top: 1.5rem;
+  padding: 1.25rem 1.5rem;
+  border-radius: 22px;
+  background: var(--card);
+  color: var(--card-foreground);
+  box-shadow: var(--neu-raise-sm, 0 8px 18px -12px rgb(15 23 42 / 0.45));
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .story-bubble, .story-chip { transition: none; }
+  a.story-bubble:hover { transform: none; }
+  .story-chip[data-tone="live"] i, .story-pill[data-tone="live"]::before, .story-thinking i { animation: none; }
+}
+
+/* History, wide layout: bigger robots in the question chat. */
+.story-bot { width: 3.25rem; }
+.story-bot .agent-bot { font-size: 6.5px; }
+.story-bubble { padding: 0.875rem 1.25rem; }
+
+/* Questions stay at a readable line length on wide screens. */
+.story-pair { max-width: 60rem; }
+
+/* ── History missions (design H17): a rail of stations; the robot stands where the mission got to ── */
+.rail-list { display: grid; gap: 0.75rem; margin-top: 0.5rem; }
+.rail-card,
+.rail-legend {
+  display: grid;
+  grid-template-columns: minmax(12rem, 22rem) minmax(0, 1fr) 7rem;
+  align-items: center;
+  column-gap: 2rem;
+  padding: 0 1.25rem;
+}
+.rail-legend { margin-top: 0.75rem; color: var(--muted-foreground); font-size: 0.75rem; font-weight: 600; }
+.rail-legend-stops { display: flex; justify-content: space-between; }
+.rail-legend-stops span { width: 3.5rem; text-align: center; }
+.rail-card {
+  position: relative;
+  padding-block: 0.5rem 0.75rem;
+  border-radius: 20px;
+  background: var(--card);
+  color: var(--card-foreground);
+  box-shadow: var(--neu-raise-sm, 0 8px 18px -12px rgb(15 23 42 / 0.45));
+  transition: transform 160ms ease, box-shadow 160ms ease;
+}
+.rail-card:hover { transform: translateY(-2px); box-shadow: var(--neu-raise, 0 14px 26px -14px rgb(15 23 42 / 0.5)); }
+.rail-card:has(.rail-link:focus-visible) { outline: 2px solid var(--ring); outline-offset: 2px; }
+.rail-title { display: grid; gap: 0.2rem; min-width: 0; }
+.rail-link {
+  overflow: hidden;
+  font-size: 0.9375rem;
+  font-weight: 650;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  outline: none;
+}
+/* The whole card opens the mission; the robot sits above this layer so it can still be clicked. */
+.rail-link::after { content: ""; position: absolute; inset: 0; border-radius: inherit; }
+.rail-card > .story-pill { justify-self: end; min-width: 5.75rem; justify-content: center; }
+
+.rail-track {
+  --stop: 3.5rem;
+  position: relative;
+  display: flex;
+  justify-content: space-between;
+  padding-top: 2.6rem;
+}
+.rail-line,
+.rail-fill {
+  position: absolute;
+  top: calc(2.6rem + 5.5px);
+  left: calc(var(--stop) / 2);
+  height: 3px;
+  border-radius: 999px;
+}
+.rail-line { right: calc(var(--stop) / 2); background: var(--border); }
+.rail-fill {
+  width: calc((100% - var(--stop)) * var(--at));
+  background: var(--primary);
+  transition: width 600ms cubic-bezier(.2,.8,.2,1);
+}
+.rail-card[data-status="cancelled"] .rail-fill { background: #94a3b8; }
+.rail-stop { position: relative; z-index: 1; display: grid; justify-items: center; gap: 0.25rem; width: var(--stop); }
+.rail-stop i {
+  width: 14px;
+  height: 14px;
+  border-radius: 999px;
+  background: var(--card);
+  box-shadow: 0 0 0 2px var(--border);
+}
+.rail-stop small { display: none; font-size: 0.625rem; color: var(--muted-foreground); }
+.rail-stop[data-state="done"] i { background: var(--primary); box-shadow: 0 0 0 2px var(--primary); }
+.rail-card[data-status="cancelled"] .rail-stop[data-state="done"] i { background: #94a3b8; box-shadow: 0 0 0 2px #94a3b8; }
+.rail-stop[data-state="now"] i { background: var(--status-running); box-shadow: 0 0 0 2px var(--status-running); animation: rail-ping 1.6s ease-out infinite; }
+.rail-stop[data-state="wait"] i { background: var(--status-warning); box-shadow: 0 0 0 2px var(--status-warning); }
+.rail-stop[data-state="stop"] i {
+  background: color-mix(in oklab, var(--status-danger) 22%, var(--card));
+  box-shadow: 0 0 0 2px var(--status-danger);
+}
+.rail-bot {
+  position: absolute;
+  top: 0;
+  left: calc(var(--stop) / 2 + (100% - var(--stop)) * var(--at));
+  z-index: 2;
+  transform: translateX(-50%);
+  transition: left 600ms cubic-bezier(.2,.8,.2,1);
+}
+.rail-bot .agent-bot { font-size: 4.5px; margin: 0; }
+/* A running mission's robot walks on the spot. */
+.rail-card[data-status="running"] .rail-bot { animation: rail-walk 0.9s ease-in-out infinite; }
+@keyframes rail-walk { 50% { translate: 0 -3px; } }
+@keyframes rail-ping {
+  0% { box-shadow: 0 0 0 2px var(--status-running), 0 0 0 2px color-mix(in oklab, var(--status-running) 45%, transparent); }
+  100% { box-shadow: 0 0 0 2px var(--status-running), 0 0 0 9px transparent; }
+}
+
+@media (max-width: 767px) {
+  .rail-legend { display: none; }
+  .rail-card { grid-template-columns: minmax(0, 1fr) auto; row-gap: 0.25rem; padding-inline: 1rem; }
+  .rail-track { grid-column: 1 / -1; grid-row: 2; --stop: 2.75rem; }
+  .rail-card > .story-pill { grid-column: 2; grid-row: 1; min-width: 0; }
+  .rail-stop small { display: block; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .rail-card, .rail-fill, .rail-bot { transition: none; }
+  .rail-card:hover { transform: none; }
+  .rail-card[data-status="running"] .rail-bot, .rail-stop[data-state="now"] i { animation: none; }
+}
