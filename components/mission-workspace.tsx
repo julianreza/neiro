@@ -349,6 +349,10 @@ export function MissionWorkspace() {
   }
 
   const gateTasks = tasks.filter((t) => t.stage === "Awaiting routing");
+  // Approval tasks live only in the "Waiting for your OK" card, so the
+  // board never shows a second Approve/Deny for the same task.
+  const laneTasks = (stage: TaskStage) =>
+    tasks.filter((t) => t.stage === stage && !t.approval);
 
   function updateTask(id: string, stage: TaskStage) {
     if (isLive) {
@@ -875,17 +879,10 @@ export function MissionWorkspace() {
                       >
                         <h3 className="board-pill">
                           {stage}
-                          <span>
-                            {
-                              tasks.filter((task) => task.stage === stage)
-                                .length
-                            }
-                          </span>
+                          <span>{laneTasks(stage).length}</span>
                         </h3>
                         <div className={`console-tray space-y-3 rounded-lg p-2 ${tasks.length === 0 ? "min-h-24 border-dashed" : "min-h-60"}`}>
-                          {tasks
-                            .filter((task) => task.stage === stage)
-                            .map((task) => (
+                          {laneTasks(stage).map((task) => (
                               <article
                                 key={task.id}
                                 className="console-task board-task"
@@ -937,27 +934,6 @@ export function MissionWorkspace() {
                                   {task.model} ·{" "}
                                   {formatCompactTokens(task.tokens)} tokens
                                 </p>
-                                {task.approval && (
-                                  <div className="mt-3 flex gap-1">
-                                    <Button
-                                      size="sm"
-                                      className="h-7 flex-1 text-[10px]"
-                                      onClick={() =>
-                                        updateTask(task.id, "Coding")
-                                      }
-                                    >
-                                      Approve
-                                    </Button>
-                                    <Button
-                                      size="sm"
-                                      variant="outline"
-                                      className="h-7 flex-1 text-[10px]"
-                                      onClick={() => denyTool(task.id)}
-                                    >
-                                      Deny
-                                    </Button>
-                                  </div>
-                                )}
                                 <button
                                   className="mt-3 flex w-full items-center justify-between border-t pt-3 text-[10px] text-muted-foreground hover:text-foreground"
                                   onClick={() => setInspected(task.id)}
@@ -967,7 +943,7 @@ export function MissionWorkspace() {
                                 </button>
                               </article>
                             ))}
-                          {!tasks.some((task) => task.stage === stage) && (
+                          {laneTasks(stage).length === 0 && (
                             <div className="lane-empty" style={agentLook("PM")}>
                               <span inert aria-hidden="true">
                                 <AgentBot

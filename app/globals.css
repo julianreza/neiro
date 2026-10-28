@@ -843,6 +843,14 @@ section.console-lane[data-stage] > :first-child h2 {
   background: #0f766e;
 }
 
+/* No :has() means no bite: tuck the badge inside the corner instead. */
+@supports not selector(:has(*)) {
+  .card-badge {
+    top: 0.75rem;
+    right: 0.75rem;
+  }
+}
+
 /* Live "connected" dot. */
 .pulse-dot {
   position: relative;
@@ -1103,6 +1111,14 @@ section.console-lane[data-stage] > :first-child h2 {
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.35),
     0 10px 20px -10px var(--rail-deep);
+}
+
+/* No CSS mask means no bite: tuck the badge inside the square corner. */
+@supports not ((mask-image: none) or (-webkit-mask-image: none)) {
+  .login-badge {
+    top: 0.75rem;
+    right: 0.75rem;
+  }
 }
 
 /* Bots behind the card: they rise, look at the cursor, then hide. */
