@@ -34,21 +34,19 @@ async function checkMissionHistory() {
     assert.equal(first.status, 200);
     const page1 = await first.json();
     assert.equal(queries[0].searchParams.get("order"), "created_at.desc,id.desc");
-    assert.equal(page1.nextBefore, timestamp);
-    assert.equal(page1.nextBeforeId, "mission-b");
+    assert.equal(page1.nextBefore, `${timestamp}|mission-b`);
 
-    const second = await getPage(new URLSearchParams({ limit: "1", before: page1.nextBefore, beforeId: page1.nextBeforeId }));
+    const second = await getPage(new URLSearchParams({ limit: "1", before: page1.nextBefore }));
     assert.equal(second.status, 200);
     const page2 = await second.json();
-    assert.equal(queries[1].searchParams.get("or"), `(created_at.lt."${timestamp}",and(created_at.eq."${timestamp}",id.lt."mission-b"))`);
+    assert.equal(queries[1].searchParams.get("or"), `(created_at.lt.${timestamp},and(created_at.eq.${timestamp},id.lt."mission-b"))`);
     assert.equal(queries[1].searchParams.get("created_at"), null);
     assert.deepEqual([...page1.missions, ...page2.missions].map((m) => m.id), ["mission-b", "mission-a"]);
 
     const invalidCursors: Record<string, string>[] = [
-      { before: timestamp },
-      { beforeId: "mission-b" },
-      { before: "invalid", beforeId: "mission-b" },
-      { before: `${timestamp},id.gt.anything`, beforeId: "mission-b" },
+      { before: `${timestamp}|` },
+      { before: "invalid" },
+      { before: `${timestamp},id.gt.anything|mission-b` },
     ];
     for (const params of invalidCursors) {
       assert.equal((await getPage(new URLSearchParams(params))).status, 400);
@@ -58,7 +56,6 @@ async function checkMissionHistory() {
     const unpaged = await getPage(new URLSearchParams());
     const all = await unpaged.json();
     assert.equal(all.nextBefore, null);
-    assert.equal(all.nextBeforeId, null);
   } finally {
     globalThis.fetch = savedFetch;
     envKeys.forEach((key, i) => {

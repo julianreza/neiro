@@ -60,6 +60,8 @@ type Agent = {
   url: string;
   enabled: boolean;
   activeRun: boolean;
+  /** Max tokens per mission; null = no limit. */
+  tokenBudget?: number | null;
 };
 
 const presets = [
@@ -199,6 +201,7 @@ function parseAgents(json: unknown): Agent[] {
     url: String(row.url ?? ""),
     enabled: Boolean(row.enabled ?? true),
     activeRun: Boolean(row.activeRun ?? row.active_run ?? false),
+    tokenBudget: Number(row.token_budget ?? row.tokenBudget) > 0 ? Number(row.token_budget ?? row.tokenBudget) : null,
   }));
 }
 
@@ -807,6 +810,26 @@ export function AgentsManager() {
                 >
                   Leave empty to use the model of the Hermes profile. Suggestions
                   are a sample catalog, availability unverified.
+                </p>
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="agent-token-budget">Token budget per mission</Label>
+                <Input
+                  id="agent-token-budget"
+                  type="number"
+                  min="0"
+                  step="1000"
+                  inputMode="numeric"
+                  placeholder="No limit"
+                  value={draft.tokenBudget ?? ""}
+                  onChange={(event) => {
+                    const n = Number.parseInt(event.target.value, 10);
+                    setDraft({ ...draft, tokenBudget: Number.isFinite(n) && n > 0 ? n : null });
+                  }}
+                  aria-describedby="agent-token-budget-help"
+                />
+                <p id="agent-token-budget-help" className="text-xs text-muted-foreground">
+                  This agent stops at Needs you after using this many tokens in one mission. Empty means no limit.
                 </p>
               </div>
               <div className="space-y-2">

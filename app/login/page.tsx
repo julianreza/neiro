@@ -40,6 +40,8 @@ function LoginForm({
   const nextUrl = searchParams?.get("next") || "/";
 
   const [passcode, setPasscode] = useState("");
+  const [mode, setMode] = useState<"passcode" | "account">("passcode");
+  const [username, setUsername] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [isPending, startTransition] = useTransition();
 
@@ -59,7 +61,9 @@ function LoginForm({
         const res = await fetch("/api/auth", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ passcode }),
+          body: JSON.stringify(
+            mode === "account" ? { username: username.trim(), password: passcode } : { passcode }
+          ),
         });
 
         if (!res.ok) {
@@ -75,7 +79,7 @@ function LoginForm({
     });
   }
 
-  const isEmpty = passcode.length === 0;
+  const isEmpty = passcode.length === 0 || (mode === "account" && username.trim().length === 0);
 
   return (
     <form onSubmit={handleSubmit} className="space-y-5">
@@ -86,22 +90,41 @@ function LoginForm({
         </Alert>
       )}
 
+      {mode === "account" && (
+        <div className="space-y-2">
+          <Label htmlFor="username" className="text-sm font-medium">
+            Username
+          </Label>
+          <Input
+            id="username"
+            autoComplete="username"
+            value={username}
+            onChange={(e) => setUsername(e.target.value)}
+            required
+            autoFocus
+            disabled={isPending}
+            aria-invalid={error ? true : undefined}
+            className="h-11 text-base sm:text-sm"
+          />
+        </div>
+      )}
+
       <div className="space-y-2">
         <Label htmlFor="passcode" className="text-sm font-medium">
-          Admin passcode
+          {mode === "account" ? "Password" : "Admin passcode"}
         </Label>
         <Input
           id="passcode"
           type="password"
           autoComplete="current-password"
-          placeholder="Enter your passcode"
+          placeholder={mode === "account" ? undefined : "Enter your passcode"}
           value={passcode}
           onChange={(e) => {
             setPasscode(e.target.value);
             onStatusChange(e.target.value ? "typing" : "idle");
           }}
           required
-          autoFocus
+          autoFocus={mode === "passcode"}
           disabled={isPending}
           aria-invalid={error ? true : undefined}
           className="h-11 text-base sm:text-sm"
@@ -126,6 +149,18 @@ function LoginForm({
           </>
         )}
       </Button>
+
+      <button
+        type="button"
+        className="mx-auto block text-sm text-muted-foreground underline-offset-4 hover:text-foreground hover:underline"
+        onClick={() => {
+          setMode(mode === "passcode" ? "account" : "passcode");
+          setError(null);
+          onStatusChange("idle");
+        }}
+      >
+        {mode === "passcode" ? "Sign in with a username" : "Use the admin passcode"}
+      </button>
     </form>
   );
 }

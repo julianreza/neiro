@@ -80,80 +80,146 @@ export function timingSafeEqualString(a: string, b: string): boolean {
   return constantTimeEqual(bufA, bufB);
 }
 
-/**
- * Signs a session token with format: `${exp}.${hmacHex}`
- */
-export async function signSessionToken(
-  secret: string,
-  expiresAtMs: number = Date.now() + SESSION_TTL_MS
-): Promise<string> {
-  const key = await getHmacKey(secret);
-  const data = encoder.encode(expiresAtMs.toString());
-  const signature = await crypto.subtle.sign("HMAC", key, data);
-  const hmacHex = bufferToHex(signature);
-  return `${expiresAtMs}.${hmacHex}`;
+export type Role = "admin" | "viewer";
+export const ROLES: readonly Role[] = ["admin", "viewer"];
+
+export function isRole(value: unknown): value is Role {
+  return value === "admin" || value === "viewer";
 }
 
-/**
- * Verifies the HMAC-SHA256 signature and expiration timestamp of a session token
- */
-export async function verifySessionToken(
-  token: string | undefined,
-  secret: string | undefined
-): Promise<boolean> {
-  if (!token || !secret || secret.length < MIN_SECRET_LENGTH) {
-    return false;
-  }
+/** Who a request acts as. `sub` is a user id, or OWNER_SUB for the passcode. */
+export type Session = { sub: string; role: Role };
 
-  const parts = token.split(".");
-  if (parts.length !== 2) {
-    return false;
-  }
+/** The DASHBOARD_SECRET holder: always admin, not a row in app_users. */
+export const OWNER_SUB = "owner";
+export const OWNER_SESSION: Session = { sub: OWNER_SUB, role: "admin" };
 
-  const [expStr, hmacHex] = parts;
-  const expiresAtMs = parseInt(expStr, 10);
-  if (Number.isNaN(expiresAtMs) || expiresAtMs <= Date.now()) {
-    return false;
-  }
+function base64UrlEncode(text: string): string {
+  const bytes = encoder.encode(text);
+  let binary = "";
+  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
 
-  const sigBytes = hexToUint8Array(hmacHex);
-  if (!sigBytes) {
-    return false;
+function base64UrlDecode(value: string): string | null {
+  try {
+    const padded = value.replace(/-/g, "+").replace(/_/g, "/") + "===".slice((value.length + 3) % 4);
+    const binary = atob(padded);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    return new TextDecoder().decode(bytes);
+  } catch {
+    return null;
   }
+}
 
+async function hmacHex(secret: string, data: string): Promise<string> {
+  const key = await getHmacKey(secret);
+  return bufferToHex(await crypto.subtle.sign("HMAC", key, encoder.encode(data)));
+}
+
+async function hmacMatches(secret: string, data: string, sigHex: string): Promise<boolean> {
+  const sigBytes = hexToUint8Array(sigHex);
+  if (!sigBytes) return false;
   try {
     const key = await getHmacKey(secret);
-    const data = encoder.encode(expStr);
-    return await crypto.subtle.verify("HMAC", key, sigBytes as unknown as BufferSource, data);
+    return await crypto.subtle.verify("HMAC", key, sigBytes as unknown as BufferSource, encoder.encode(data));
   } catch {
     return false;
   }
 }
 
 /**
- * Checks whether an incoming NextRequest is authorized via cookie or Bearer header
+ * Signs a session token: `v2.${exp}.${base64url(json session)}.${hmacHex}`.
+ * The HMAC covers everything before the last dot, so the role can't be edited.
  */
-export async function isAuthorizedRequest(request: NextRequest): Promise<boolean> {
+export async function signSessionToken(
+  secret: string,
+  expiresAtMs: number = Date.now() + SESSION_TTL_MS,
+  session: Session = OWNER_SESSION
+): Promise<string> {
+  const body = `v2.${expiresAtMs}.${base64UrlEncode(JSON.stringify({ sub: session.sub, role: session.role }))}`;
+  return `${body}.${await hmacHex(secret, body)}`;
+}
+
+/**
+ * Returns the session a token carries, or null when it is forged, expired or
+ * malformed. Legacy `${exp}.${hmacHex}` tokens (issued before user accounts)
+ * stay valid until they expire and act as the owner.
+ */
+export async function readSessionToken(
+  token: string | undefined,
+  secret: string | undefined
+): Promise<Session | null> {
+  if (!token || !secret || secret.length < MIN_SECRET_LENGTH) return null;
+
+  const parts = token.split(".");
+  if (parts.length === 2) {
+    const [expStr, sig] = parts;
+    const exp = parseInt(expStr, 10);
+    if (Number.isNaN(exp) || exp <= Date.now()) return null;
+    return (await hmacMatches(secret, expStr, sig)) ? OWNER_SESSION : null;
+  }
+
+  if (parts.length !== 4 || parts[0] !== "v2") return null;
+  const [, expStr, payload, sig] = parts;
+  const exp = parseInt(expStr, 10);
+  if (Number.isNaN(exp) || exp <= Date.now()) return null;
+  if (!(await hmacMatches(secret, `v2.${expStr}.${payload}`, sig))) return null;
+
+  const json = base64UrlDecode(payload);
+  if (!json) return null;
+  try {
+    const parsed = JSON.parse(json) as { sub?: unknown; role?: unknown };
+    if (typeof parsed.sub !== "string" || !parsed.sub || !isRole(parsed.role)) return null;
+    return { sub: parsed.sub, role: parsed.role };
+  } catch {
+    return null;
+  }
+}
+
+/** Verifies a session token's signature and expiry. */
+export async function verifySessionToken(
+  token: string | undefined,
+  secret: string | undefined
+): Promise<boolean> {
+  return (await readSessionToken(token, secret)) !== null;
+}
+
+/**
+ * The session behind a request: the Bearer DASHBOARD_SECRET (cron, scripts)
+ * is the owner; otherwise the signed neiro_session cookie decides.
+ */
+export async function getRequestSession(request: NextRequest): Promise<Session | null> {
   const secret = process.env.DASHBOARD_SECRET;
   if (!secret || secret.length < MIN_SECRET_LENGTH) {
     warnWeakSecretOnce(secret);
-    return false;
+    return null;
   }
 
-  // 1. Check Bearer Authorization header
   const authHeader = request.headers.get("authorization");
   if (authHeader?.startsWith("Bearer ")) {
     const token = authHeader.slice(7).trim();
-    if (token && timingSafeEqualString(token, secret)) {
-      return true;
-    }
+    if (token && timingSafeEqualString(token, secret)) return OWNER_SESSION;
   }
 
-  // 2. Check neiro_session cookie
-  const cookie = request.cookies.get(SESSION_COOKIE)?.value;
-  if (cookie && (await verifySessionToken(cookie, secret))) {
-    return true;
-  }
+  return readSessionToken(request.cookies.get(SESSION_COOKIE)?.value, secret);
+}
 
-  return false;
+/** Checks whether an incoming NextRequest is authorized via cookie or Bearer header. */
+export async function isAuthorizedRequest(request: NextRequest): Promise<boolean> {
+  return (await getRequestSession(request)) !== null;
+}
+
+const READ_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
+
+/**
+ * Role policy for API calls. Admins may do anything. Viewers may read, and
+ * may sign out, but may not change anything or see the user list.
+ */
+export function roleAllows(role: Role, method: string, pathname: string): boolean {
+  if (role === "admin") return true;
+  if (pathname === "/api/users" || pathname.startsWith("/api/users/")) return false;
+  if (pathname === "/api/auth" && method.toUpperCase() === "DELETE") return true;
+  return READ_METHODS.has(method.toUpperCase());
 }

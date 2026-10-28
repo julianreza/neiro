@@ -10,11 +10,17 @@ import {
   Bot,
   Clock3,
   Command,
+  History,
+  Inbox,
   Layers3,
   Network,
+  Radio,
+  Users,
 } from "lucide-react";
 import { toast } from "sonner";
 import { ThemeToggle } from "@/components/theme-toggle";
+import { NotificationBell } from "@/components/notification-bell";
+import { useRole } from "@/hooks/use-role";
 import { TiltEffect } from "@/components/tilt-effect";
 import { DesktopRail, MobileRail } from "@/components/nav-rail";
 import type {
@@ -38,9 +44,13 @@ import {
 
 const navigation: NavItem[] = [
   { href: "/", label: "Mission control", icon: Layers3 },
+  { href: "/needs-you", label: "Needs you", icon: Inbox },
+  { href: "/live", label: "Live log", icon: Radio },
+  { href: "/history", label: "History", icon: History },
   { href: "/agents", label: "AI team", icon: Bot },
   { href: "/schedules", label: "Time AI", icon: Clock3 },
   { href: "/gateway", label: "9Router & VPS", icon: Network },
+  { href: "/users", label: "Users", icon: Users },
 ];
 
 const RAIL_KEY = "neiro.rail.expanded";
@@ -104,6 +114,22 @@ function DashboardSession({
   const railExpanded = useSyncExternalStore(subscribeRail, readRail, () => true);
   const router = useRouter();
   const { setTheme } = useTheme();
+  const role = useRole();
+  // Waiting count for the phone bar's Needs you badge. The session remounts
+  // on every page change, so this refreshes on each navigation.
+  const [needsYou, setNeedsYou] = useState(0);
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/needs-you", { cache: "no-store" })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data: { count?: unknown } | null) => {
+        if (!cancelled) setNeedsYou(Number(data?.count) || 0);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
   useEffect(() => {
     function onKey(event: KeyboardEvent) {
       if ((event.metaKey || event.ctrlKey) && event.key === "k") {
@@ -140,7 +166,9 @@ function DashboardSession({
     router.push("/login");
     router.refresh();
   }
-  const current = navigation.find((item) => item.href === pathname);
+  // Viewers cannot manage users, so the Users page is hidden from them.
+  const items = role === "viewer" ? navigation.filter((item) => item.href !== "/users") : navigation;
+  const current = items.find((item) => item.href === pathname);
 
   return (
     <TooltipProvider delayDuration={150}>
@@ -157,7 +185,7 @@ function DashboardSession({
         {/* Desktop: floating icon rail with a carved-out active tab. */}
         <aside className="sticky top-5 hidden h-[calc(100svh-2.5rem)] shrink-0 py-5 pl-5 md:flex">
           <DesktopRail
-            items={navigation}
+            items={items}
             pathname={pathname}
             memory={railMemory}
             onSignOut={() => void signOut()}
@@ -188,6 +216,7 @@ function DashboardSession({
               >
                 <Command className="size-4" />
               </Button>
+              <NotificationBell />
               <ThemeToggle />
             </div>
           </header>
@@ -213,10 +242,11 @@ function DashboardSession({
 
         {/* Mobile: same rail, laid out as a floating bottom bar. */}
         <MobileRail
-          items={navigation}
+          items={items}
           pathname={pathname}
           memory={railMemory}
           onSignOut={() => void signOut()}
+          badges={{ "/needs-you": needsYou }}
         />
 
         <CommandDialog
@@ -232,7 +262,7 @@ function DashboardSession({
           <CommandList>
             <CommandEmpty>No matching commands.</CommandEmpty>
             <CommandGroup heading="Workspace">
-              {navigation.map(({ href, label, icon: Icon }) => (
+              {items.map(({ href, label, icon: Icon }) => (
                 <CommandItem key={href} onSelect={() => navigate(href)}>
                   <Icon />
                   {label}

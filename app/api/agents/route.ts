@@ -3,6 +3,7 @@ import { connection } from "next/server";
 import type { NextRequest } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { AppConfigError } from "@/lib/types";
+import { parseTokenBudget } from "@/lib/budget";
 import type { Agent, AgentPublic } from "@/lib/types";
 
 export async function GET() {
@@ -92,9 +93,14 @@ export async function POST(request: NextRequest) {
       active_run: false,
     };
 
+    // Only sent when set, so a database without the budget migration still works.
+    const budget = parseTokenBudget(body?.tokenBudget, "tokenBudget");
+    if (!budget.ok) return NextResponse.json({ error: budget.error }, { status: 400 });
+    const row = budget.value !== null ? { ...newAgent, token_budget: budget.value } : newAgent;
+
     const { data, error } = await supabase
       .from("agents")
-      .insert(newAgent)
+      .insert(row)
       .select()
       .single();
 
