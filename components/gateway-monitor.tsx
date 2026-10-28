@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import Image from "next/image";
 import { Cable, Check, Copy, Lock, RefreshCw, Search, Terminal, Unplug } from "lucide-react";
 import { toast } from "sonner";
 import type { GatewayStatusDTO } from "@/lib/types";
@@ -182,11 +183,6 @@ type Vital = {
 };
 type VitalState = "alive" | "down" | "unset" | "checking";
 
-// A heartbeat line per service: alive services beat, down ones flatline,
-// unconfigured ones show a dashed "no signal" line.
-const BEAT_PATH =
-  "M0 20 H70 L80 20 L88 6 L98 34 L106 20 H190 L200 20 L208 6 L218 34 L226 20 H320 L330 20 L338 6 L348 34 L356 20 H480";
-
 function vitalState(vital: Vital, loading: boolean): VitalState {
   if (loading) return "checking";
   if (vital.connected) return "alive";
@@ -200,17 +196,44 @@ const stateLabel: Record<VitalState, string> = {
   checking: "Checking…",
 };
 
-function VitalsPanel({ vitals, loading }: { vitals: Vital[]; loading: boolean }) {
+const sceneArt: Record<string, { scene: string; stage?: string; layers: { src: string; w: number; h: number; className: string }[] }> = {
+  "Supabase Postgres": {
+    scene: "service-scene-supabase",
+    layers: [{ src: "/gateway/supabase-bolt.png", w: 387, h: 400, className: "service-art service-art-bolt" }],
+  },
+  "9Router Gateway": {
+    scene: "service-scene-router",
+    layers: [{ src: "/gateway/9router-hex.png", w: 255, h: 233, className: "service-art service-art-hex" }],
+  },
+  "Hermes Agent VPS": {
+    scene: "service-scene-hermes",
+    stage: "service-stage-hermes",
+    layers: [
+      { src: "/gateway/hermes-girl.png", w: 571, h: 608, className: "service-art service-art-girl" },
+      { src: "/gateway/hermes-moon.png", w: 180, h: 172, className: "service-art service-art-moon" },
+    ],
+  },
+};
+
+function ServicePanel({
+  vitals,
+  loading,
+  onCopy,
+}: {
+  vitals: Vital[];
+  loading: boolean;
+  onCopy: (value: string, label: string) => void;
+}) {
   const aliveCount = vitals.filter((v) => !loading && v.connected).length;
   return (
-    <section aria-labelledby="gateway-vitals" className="vitals-panel">
-      <div className="flex flex-wrap items-end justify-between gap-4 border-b p-5">
+    <section aria-labelledby="setup-heading" className="space-y-4">
+      <div className="flex flex-wrap items-end justify-between gap-4">
         <div className="space-y-1">
-          <h2 id="gateway-vitals" className="text-lg font-semibold">
-            Connection vitals
+          <h2 id="setup-heading" className="scroll-mt-24 text-lg font-semibold">
+            Connections
           </h2>
           <p className="text-sm text-muted-foreground">
-            A live line beats. A flat line means the service is not answering.
+            Each service, its health, and the keys it needs on the server.
           </p>
         </div>
         <p className="vitals-count" aria-live="polite">
@@ -218,49 +241,89 @@ function VitalsPanel({ vitals, loading }: { vitals: Vital[]; loading: boolean })
           <span className="text-muted-foreground">/{vitals.length} connected</span>
         </p>
       </div>
-      <ul className="divide-y">
+      <ul className="grid gap-4 lg:grid-cols-3">
         {vitals.map((vital) => {
           const state = vitalState(vital, loading);
+          const art = sceneArt[vital.name];
+          const broken = state === "down" || state === "unset";
           return (
             <li
               key={vital.name}
-              className="vital-row grid gap-x-6 gap-y-2 p-5 md:grid-cols-[15rem_minmax(0,1fr)_12rem] md:items-center"
+              className="service-card vital-row"
               data-state={state}
+              onPointerMove={followPointer}
+              onPointerLeave={resetPointer}
             >
-              <div className="min-w-0 space-y-1">
-                <h3 className="flex items-center gap-2 text-base font-semibold tracking-tight">
-                  <span className="vital-dot" aria-hidden="true" />
-                  {vital.name}
-                </h3>
-                <p className="text-xs text-muted-foreground">{vital.note}</p>
+              <div className={`service-scene ${art?.scene ?? ""}`} aria-hidden="true">
+                <span className="service-signal">
+                  <i />
+                  <i />
+                  <i />
+                  <i />
+                </span>
+                <div className={`service-stage ${art?.stage ?? ""}`}>
+                  {art?.layers.map((layer) => (
+                    <Image
+                      key={layer.src}
+                      src={layer.src}
+                      alt=""
+                      width={layer.w}
+                      height={layer.h}
+                      className={layer.className}
+                      draggable={false}
+                    />
+                  ))}
+                </div>
               </div>
-              <svg
-                className="vital-line"
-                viewBox="0 0 480 40"
-                preserveAspectRatio="none"
-                role="img"
-                aria-label={`${vital.name}: ${stateLabel[state]}`}
-              >
-                <path className="vital-line-base" d="M0 20 H480" />
-                {state === "alive" && <path className="vital-line-beat" d={BEAT_PATH} />}
-              </svg>
-              <div className="min-w-0 space-y-1 md:text-right">
-                <p className="vital-state text-sm font-semibold">{stateLabel[state]}</p>
-                <p className="text-xs break-words text-muted-foreground">{vital.detail}</p>
-                {(state === "down" || state === "unset") && (
-                  <a
-                    href="#setup-heading"
-                    className="inline-flex min-h-10 items-center gap-1.5 text-sm font-medium underline-offset-4 hover:underline"
-                  >
+              <div className="space-y-3 p-4">
+                <div className="space-y-1">
+                  <h3 className="text-base font-semibold tracking-tight">{vital.name}</h3>
+                  <p className="text-sm text-muted-foreground">
+                    <span className="service-signal-text font-semibold">{stateLabel[state]}</span>
+                    {" · "}
+                    {vital.detail}
+                  </p>
+                  <p className="text-xs text-muted-foreground">{vital.note}</p>
+                </div>
+                {broken && (
+                  <p className="flex items-center gap-1.5 text-xs font-medium text-[var(--vital)]">
                     <Cable className="size-3.5" aria-hidden="true" />
-                    Set <code className="code-chip">{vital.envKeys}</code>
-                  </a>
+                    Set these keys on the server, then refresh.
+                  </p>
                 )}
+                <ul className="space-y-1.5">
+                  {vital.keys.map((key) => (
+                    <li key={key.name} className="flex items-center gap-2">
+                      <code className="code-chip min-w-0 truncate font-medium" title={key.description}>
+                        {key.name}
+                      </code>
+                      {key.secret && (
+                        <span className="secret-pill">
+                          <Lock className="size-3" aria-hidden="true" />
+                          Secret
+                        </span>
+                      )}
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="ml-auto min-h-10"
+                        aria-label={`Copy key name ${key.name}`}
+                        onClick={() => onCopy(key.name, "Key name")}
+                      >
+                        <Copy aria-hidden="true" />
+                      </Button>
+                    </li>
+                  ))}
+                </ul>
               </div>
             </li>
           );
         })}
       </ul>
+      <p className="text-xs text-muted-foreground">
+        Configure credentials in the server deployment environment, never in
+        this UI. This demo does not collect, store, or display secrets.
+      </p>
     </section>
   );
 }
@@ -434,63 +497,7 @@ export function GatewayMonitor() {
           </div>
         </div>
       )}
-      <VitalsPanel loading={statusLoading} vitals={vitals} />
-
-      <section className="space-y-4" aria-labelledby="setup-heading">
-        <div>
-          <h2 id="setup-heading" className="scroll-mt-24 text-lg font-semibold">
-            Connection setup
-          </h2>
-          <p className="text-sm text-muted-foreground">
-            Keys each service needs. Set them on the server, then refresh.
-          </p>
-        </div>
-        <div className="grid gap-4 lg:grid-cols-3">
-          {vitals.map((vital) => {
-            const state = vitalState(vital, statusLoading);
-            return (
-              <div key={vital.name} className="setup-group vital-row" data-state={state}>
-                <div className="flex items-center justify-between gap-2 border-b px-4 py-3">
-                  <h3 className="flex items-center gap-2 text-sm font-semibold">
-                    <span className="vital-dot" aria-hidden="true" />
-                    {vital.name}
-                  </h3>
-                  <span className="vital-state text-xs font-medium">{stateLabel[state]}</span>
-                </div>
-                <ul className="divide-y">
-                  {vital.keys.map((key) => (
-                    <li key={key.name} className="space-y-2 px-4 py-3">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <code className="code-chip break-all font-medium">{key.name}</code>
-                        {key.secret && (
-                          <span className="secret-pill">
-                            <Lock className="size-3" aria-hidden="true" />
-                            Secret
-                          </span>
-                        )}
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          className="ml-auto min-h-10"
-                          aria-label={`Copy key name ${key.name}`}
-                          onClick={() => void copy(key.name, "Key name")}
-                        >
-                          <Copy aria-hidden="true" />
-                        </Button>
-                      </div>
-                      <p className="text-xs text-muted-foreground">{key.description}</p>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            );
-          })}
-        </div>
-        <p className="text-xs text-muted-foreground">
-          Configure credentials in the server deployment environment, never in
-          this UI. This demo does not collect, store, or display secrets.
-        </p>
-      </section>
+      <ServicePanel loading={statusLoading} vitals={vitals} onCopy={(v, l) => void copy(v, l)} />
 
       <section className="min-w-0 space-y-4" aria-labelledby="models-heading">
         <div>

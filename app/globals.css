@@ -1953,6 +1953,136 @@ section.console-lane[data-stage] > :first-child h2 {
   .vital-row[data-state="checking"] .vital-line-base { animation: none; }
 }
 
+/* ── Service card (option A): themed scene + cut-out 3D art + keys ── */
+.service-card {
+  position: relative;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 1rem;
+  background: var(--card);
+  color: var(--card-foreground);
+}
+.service-card.vital-row:hover { background: var(--card); }
+/* Status (option 3): signal bars in the top-right corner of the scene. */
+.service-card { --signal: #94a3b8; }
+.service-card[data-state="alive"] { --signal: #22c55e; }
+.service-card[data-state="down"] { --signal: #ef4444; }
+.service-card[data-state="unset"] { --signal: #eab308; }
+.service-signal-text { color: var(--signal); }
+.service-signal {
+  position: absolute;
+  top: 0.75rem;
+  right: 0.85rem;
+  z-index: 1;
+  display: flex;
+  align-items: flex-end;
+  gap: 3px;
+  padding: 0.35rem 0.45rem;
+  border-radius: 0.5rem;
+  background: rgb(0 0 0 / 0.35);
+}
+.service-scene-router .service-signal { background: rgb(124 45 18 / 0.18); }
+.service-signal i {
+  width: 5px;
+  border-radius: 1.5px;
+  background: color-mix(in oklab, var(--signal) 28%, transparent);
+}
+.service-signal i:nth-child(1) { height: 6px; }
+.service-signal i:nth-child(2) { height: 10px; }
+.service-signal i:nth-child(3) { height: 14px; }
+.service-signal i:nth-child(4) { height: 18px; }
+/* Lit bars: alive = 4 (last one pulses), unset = 2, down = 1. */
+.service-card[data-state="alive"] .service-signal i,
+.service-card[data-state="unset"] .service-signal i:nth-child(-n + 2),
+.service-card[data-state="down"] .service-signal i:nth-child(1) { background: var(--signal); }
+.service-card[data-state="alive"] .service-signal i:nth-child(4) { animation: service-signal-pulse 1.4s ease-in-out infinite; }
+.service-card[data-state="checking"] .service-signal i { animation: service-signal-scan 1.2s ease-in-out infinite; }
+.service-card[data-state="checking"] .service-signal i:nth-child(2) { animation-delay: 0.15s; }
+.service-card[data-state="checking"] .service-signal i:nth-child(3) { animation-delay: 0.3s; }
+.service-card[data-state="checking"] .service-signal i:nth-child(4) { animation-delay: 0.45s; }
+@keyframes service-signal-pulse {
+  50% { opacity: 0.35; }
+}
+@keyframes service-signal-scan {
+  50% { background: var(--signal); }
+}
+.service-scene {
+  position: relative;
+  height: 11rem;
+  overflow: hidden;
+  display: grid;
+  place-items: center;
+}
+.service-scene-supabase {
+  background-color: #0b3d2a;
+  background-image: radial-gradient(#3ecf8e33 1.2px, transparent 1.4px);
+  background-size: 14px 14px;
+}
+.service-scene-router {
+  background-color: #fff1e8;
+  background-image: repeating-conic-gradient(from 0deg at 50% 50%, #ff7a4522 0 2deg, transparent 2deg 15deg);
+}
+.service-scene-hermes {
+  background-color: #10154a;
+  background-image:
+    radial-gradient(circle at 55% 45%, #2d3cd6aa, transparent 65%),
+    radial-gradient(#ffffffaa 1px, transparent 1.5px),
+    radial-gradient(#ffffff55 1px, transparent 1.5px);
+  background-size: auto, 60px 60px, 37px 37px;
+  background-position: 0 0, 0 0, 18px 22px;
+}
+.service-stage { position: relative; display: grid; place-items: center; }
+.service-stage-hermes {
+  position: absolute;
+  right: 10%;
+  bottom: -1.5rem;
+  height: 12.5rem;
+  aspect-ratio: 571 / 608;
+}
+.service-art {
+  pointer-events: none;
+  user-select: none;
+  translate: calc(var(--ex, 0em) * 6) calc(var(--ey, 0em) * 6);
+  transition: translate 220ms ease-out;
+}
+.service-art-bolt {
+  width: auto;
+  height: 7rem;
+  filter: drop-shadow(0 6px 0 #155c3d) drop-shadow(0 16px 14px rgb(0 0 0 / 0.4));
+  animation: service-float 3.2s ease-in-out infinite;
+}
+.service-art-hex {
+  width: auto;
+  height: 8.5rem;
+  filter: drop-shadow(0 14px 14px rgb(124 45 18 / 0.3));
+  animation: service-float 3.6s ease-in-out infinite;
+}
+.service-art-girl {
+  width: 100%;
+  height: auto;
+  filter: drop-shadow(4px 6px 6px rgb(110 120 255 / 0.55));
+}
+.service-art-moon {
+  position: absolute;
+  left: 1.75%;
+  top: 42.4%;
+  width: 31.5%;
+  height: auto;
+  translate: calc(var(--ex, 0em) * 14) calc(var(--ey, 0em) * 12);
+  filter: drop-shadow(0 0 12px #a5b4fc);
+  animation: service-float 2.6s ease-in-out infinite reverse;
+}
+.service-card[data-state="down"] .service-art,
+.service-card[data-state="unset"] .service-art { animation: none; filter: grayscale(0.7) brightness(0.8); }
+@keyframes service-float {
+  50% { transform: translateY(-7px); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .service-art { transition: none; }
+  .service-signal i { animation: none !important; }
+  .service-art { animation: none; translate: none; }
+}
+
 /* ── Agent card (option C): gradient per role + interactive 3D bot ── */
 .agent-card {
   container-type: inline-size;
