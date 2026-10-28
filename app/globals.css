@@ -1948,7 +1948,6 @@ section.console-lane[data-stage] > :first-child h2 {
   border-radius: 0.5rem;
   background: rgb(0 0 0 / 0.35);
 }
-.service-scene-router .service-signal { background: rgb(124 45 18 / 0.18); }
 .service-signal i {
   width: 5px;
   border-radius: 1.5px;
@@ -1985,10 +1984,6 @@ section.console-lane[data-stage] > :first-child h2 {
   background-image: radial-gradient(#3ecf8e33 1.2px, transparent 1.4px);
   background-size: 14px 14px;
 }
-.service-scene-router {
-  background-color: #fff1e8;
-  background-image: repeating-conic-gradient(from 0deg at 50% 50%, #ff7a4522 0 2deg, transparent 2deg 15deg);
-}
 .service-scene-hermes {
   background-color: #10154a;
   background-image:
@@ -2017,12 +2012,6 @@ section.console-lane[data-stage] > :first-child h2 {
   height: 7rem;
   filter: drop-shadow(0 6px 0 #155c3d) drop-shadow(0 16px 14px rgb(0 0 0 / 0.4));
   animation: service-float 3.2s ease-in-out infinite;
-}
-.service-art-hex {
-  width: auto;
-  height: 8.5rem;
-  filter: drop-shadow(0 14px 14px rgb(124 45 18 / 0.3));
-  animation: service-float 3.6s ease-in-out infinite;
 }
 .service-art-girl {
   width: 100%;

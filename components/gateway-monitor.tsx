@@ -37,7 +37,7 @@ const models: {
     id: "demo/research-combo",
     name: "Research routing combo",
     type: "combo",
-    provider: "Sample 9Router combo",
+    provider: "Sample combo",
   },
   {
     id: "demo/claude-sonnet",
@@ -163,13 +163,14 @@ function parseStatus(json: unknown): GatewayStatusDTO | null {
 }
 
 function parseModels(json: unknown): ModelRow[] {
-  const list = (json as { models?: { id: string; owned_by?: string }[] } | null)?.models;
-  if (!Array.isArray(list)) throw new Error("Malformed /api/gateway/models response");
+  const list = (json as { models?: { id: string; providerName?: string; provider?: string }[] } | null)
+    ?.models;
+  if (!Array.isArray(list)) throw new Error("Malformed /api/agents/models response");
   return list.map((item) => ({
     id: item.id,
     name: item.id.split("/").pop() || item.id,
     type: "chat" as Exclude<Category, "all">,
-    provider: item.owned_by || "9Router",
+    provider: item.providerName || item.provider || "Hermes",
   }));
 }
 
@@ -200,10 +201,6 @@ const sceneArt: Record<string, { scene: string; stage?: string; layers: { src: s
   "Supabase Postgres": {
     scene: "service-scene-supabase",
     layers: [{ src: "/gateway/supabase-bolt.png", w: 387, h: 400, className: "service-art service-art-bolt" }],
-  },
-  "9Router Gateway": {
-    scene: "service-scene-router",
-    layers: [{ src: "/gateway/9router-hex.png", w: 255, h: 233, className: "service-art service-art-hex" }],
   },
   "Hermes Agent VPS": {
     scene: "service-scene-hermes",
@@ -241,7 +238,7 @@ function ServicePanel({
           <span className="text-muted-foreground">/{vitals.length} connected</span>
         </p>
       </div>
-      <ul className="grid gap-4 lg:grid-cols-3">
+      <ul className="grid gap-4 lg:grid-cols-2">
         {vitals.map((vital) => {
           const state = vitalState(vital, loading);
           const art = sceneArt[vital.name];
@@ -333,7 +330,7 @@ export function GatewayMonitor() {
   const [showAllModels, setShowAllModels] = useState(false);
   const [query, setQuery] = useState("");
   const status = useLiveData<GatewayStatusDTO | null>("/api/gateway/status", null, parseStatus);
-  const modelList = useLiveData<ModelRow[]>("/api/gateway/models", models, parseModels);
+  const modelList = useLiveData<ModelRow[]>("/api/agents/models", models, parseModels);
   const liveStatus = status.source === "live" ? status.data : null;
   const displayModels: ModelRow[] = modelList.source === "loading" ? [] : modelList.data;
   const modelsAreSample = modelList.source !== "live";
@@ -404,33 +401,15 @@ export function GatewayMonitor() {
       ],
     },
     {
-      name: "9Router Gateway",
-      connected: liveStatus?.nineRouter?.status === "connected",
-      detail:
-        liveStatus?.nineRouter?.status === "connected"
-          ? `Online (${displayModels.length} models, ${liveStatus?.nineRouter?.latencyMs ?? 0}ms)`
-          : statusLoading
-            ? "Checking…"
-            : liveStatus?.nineRouter?.error || "LLM Gateway unreachable",
-      note: "LLM inference router and model discovery.",
-      envKeys: "NINEROUTER_URL",
-      keys: [
-        {
-          name: "NINEROUTER_URL",
-          description: "Gateway base URL for model discovery and inference routing.",
-        },
-      ],
-    },
-    {
       name: "Hermes Agent VPS",
       connected: liveStatus?.hermes?.status === "connected",
       detail:
         liveStatus?.hermes?.status === "connected"
-          ? `Agent runtime ready (${liveStatus?.hermes?.latencyMs ?? 0}ms)`
+          ? `Agent runtime ready (${modelsAreSample ? "" : `${displayModels.length} models, `}${liveStatus?.hermes?.latencyMs ?? 0}ms)`
           : statusLoading
             ? "Checking…"
             : liveStatus?.hermes?.error || "Hermes VPS unreachable",
-      note: "Autonomous coding agent runtime.",
+      note: "Agent runtime. Runs every model; the model provider is set in Hermes.",
       envKeys: "HERMES_DEFAULT_URL",
       keys: [
         { name: "HERMES_DEFAULT_URL", description: "Default Hermes agent endpoint on your VPS." },
