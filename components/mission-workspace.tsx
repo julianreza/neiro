@@ -5,7 +5,6 @@ import {
   ArrowDown,
   ArrowRight,
   Check,
-  ChevronDown,
   Clock3,
   FileText,
   GitBranch,
@@ -40,18 +39,13 @@ import { MiniRocket, StatObject, statLook, type StatKind } from "@/components/st
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Textarea } from "@/components/ui/textarea";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import {
-  Collapsible,
-  CollapsibleContent,
-  CollapsibleTrigger,
-} from "@/components/ui/collapsible";
 import { RunInspectorSheet } from "@/components/run-inspector-sheet";
 import { WorktreeBar } from "@/components/worktree-bar";
+import { MissionComposer } from "@/components/mission-composer";
 import {
   MarkdownArtifactViewer,
   type ArtifactFile,
@@ -237,13 +231,6 @@ export function MissionWorkspace() {
   const tokens = tasks.reduce((sum, task) => sum + task.tokens, 0);
   const activeStep = isLive && mission?.phase ? PHASE_STEP[mission.phase] : 2;
   const maxRetriesShown = parseIntOr(retries, 2);
-  // Shown next to the locked Launch button, so the lock icon is explained
-  // where it appears (not only in a hover tooltip).
-  const launchBlockedReason = !isLive
-    ? "Connect Supabase on the Gateway page to launch"
-    : !prompt.trim()
-      ? "Write an objective to launch"
-      : null;
   const assignedAgents = new Set(tasks.map((t) => t.agent).filter((a) => a && a !== "Unassigned")).size;
 
   useEffect(() => {
@@ -256,7 +243,7 @@ export function MissionWorkspace() {
     detail.reload();
   }
 
-  async function launch() {
+  async function launch(mode: "build" | "fix" | "plan" = "build") {
     if (!prompt.trim()) {
       input.current?.focus();
       toast.error("Describe the mission objective first");
@@ -266,11 +253,19 @@ export function MissionWorkspace() {
       toast.error("Demo mode: connect Supabase to launch missions.");
       return;
     }
+    const objective = prompt.trim();
+    const brief =
+      mode === "fix"
+        ? `Bug fix. First reproduce the problem and find the root cause, then fix it and prove the fix.\n\nBug report:\n${objective}`
+        : mode === "plan"
+          ? `Quick plan. Keep the plan and the spec short: the goal and a small task list.\n\nGoal:\n${objective}`
+          : objective;
+    const pauseForPlan = mode === "plan" || pause;
     setLaunching(true);
     const { ok, data } = await postJson("/api/missions", {
-      title: prompt.trim().split("\n")[0].slice(0, 80),
-      prompt: prompt.trim(),
-      pause_after_planning: pause,
+      title: objective.split("\n")[0].slice(0, 80),
+      prompt: brief,
+      pause_after_planning: pauseForPlan,
       workspace_path: workspace.trim() || undefined,
       base_branch: baseBranch.trim() || undefined,
       isolate_workspace: isolate,
@@ -287,7 +282,7 @@ export function MissionWorkspace() {
     if (created?.id) setSelectedId(created.id);
     setPrompt("");
     toast.success(
-      pause ? "Mission launched. It will pause for plan approval." : "Mission launched.",
+      pauseForPlan ? "Mission launched. It will pause for plan approval." : "Mission launched.",
     );
     refresh();
   }
@@ -495,220 +490,106 @@ export function MissionWorkspace() {
           </div>
         ))}
       </section>
-      <section
-        className="mission-chat"
-        aria-labelledby="composer-title"
-        style={agentLook("PM")}
-        onPointerMove={followPointer}
-        onPointerLeave={resetPointer}
-      >
-        <div className="chat-thread" aria-live="polite">
-          <div className="chat-row">
-            <AgentBot
-              name="Orchestrator"
-              role="PM"
-              asleep={false}
-              working={mission?.status === "running"}
-            />
-            <div className="chat-bubble chat-bubble-bot">
-              <h2 id="composer-title">What should your team build today?</h2>
-              <p>Describe the outcome. I will plan it and hand out the work.</p>
-            </div>
-          </div>
-          {mission && (
-            <>
-              <p className="chat-bubble chat-bubble-user">{mission.title}</p>
-              <div className="chat-row">
-                <span className="chat-avatar-gap" aria-hidden="true" />
-                <div className="chat-bubble chat-bubble-bot">
-                  <p>
-                    {done === tasks.length && tasks.length > 0
-                      ? `Done. All ${tasks.length} tasks are finished.`
-                      : `On it. ${done} of ${tasks.length} tasks are done.`}
-                  </p>
-                  <div
-                    className="chat-progress"
-                    role="progressbar"
-                    aria-label="Mission progress"
-                    aria-valuemin={0}
-                    aria-valuemax={tasks.length}
-                    aria-valuenow={done}
-                  >
-                    <i style={{ width: `${tasks.length ? (done / tasks.length) * 100 : 0}%` }} />
-                  </div>
-                </div>
-              </div>
-            </>
-          )}
+      <MissionComposer
+        prompt={prompt}
+        onPromptChange={setPrompt}
+        workspace={workspace}
+        onWorkspaceChange={setWorkspace}
+        inputRef={input}
+        isLive={isLive}
+        launching={launching}
+        onLaunch={launch}
+        advanced={
+          <>
+      <div className="grid gap-5 p-5 sm:grid-cols-2 lg:grid-cols-3">
+        <div className="space-y-2">
+          <Label htmlFor="base-branch">Base branch</Label>
+          <Input
+            id="base-branch"
+            value={baseBranch}
+            onChange={(event) => setBaseBranch(event.target.value)}
+            placeholder="Current branch"
+            disabled={!isolate}
+            maxLength={200}
+            autoCapitalize="off"
+            autoCorrect="off"
+            spellCheck={false}
+            aria-describedby="base-branch-help"
+          />
+          <p id="base-branch-help" className="text-xs text-muted-foreground">
+            The new mission branch starts here.
+          </p>
         </div>
-        <form
-          onSubmit={(event) => {
-            event.preventDefault();
-            launch();
-          }}
-        >
-          <div className="chat-input">
-            <Label htmlFor="mission-prompt" className="sr-only">
-              Mission objective
-            </Label>
-            <Textarea
-              ref={input}
-              id="mission-prompt"
-              value={prompt}
-              onChange={(event) => setPrompt(event.target.value)}
-              onKeyDown={(event) => {
-                if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
-                  event.preventDefault();
-                  launch();
-                }
-              }}
-              placeholder="Type a mission, for example: build a landing page for our app"
-              className="min-h-24 resize-y border-0 bg-transparent p-0 text-base shadow-none focus-visible:ring-0 md:text-sm"
-              maxLength={20000}
-            />
+        <div className="space-y-2">
+          <Label htmlFor="worker-limit">Parallel workers</Label>
+          <Input
+            id="worker-limit"
+            type="number"
+            min="1"
+            max="10"
+            value={workers}
+            onChange={(event) => setWorkers(event.target.value)}
+          />
+        </div>
+        <div className="space-y-2">
+          <Label htmlFor="retry-limit">Max auto-fix retries</Label>
+          <Input
+            id="retry-limit"
+            type="number"
+            min="0"
+            max="5"
+            value={retries}
+            onChange={(event) => setRetries(event.target.value)}
+          />
+        </div>
+        <div className="space-y-2">
+          <Label htmlFor="token-budget">Token budget</Label>
+          <Input
+            id="token-budget"
+            type="number"
+            min="0"
+            step="1000"
+            inputMode="numeric"
+            placeholder="No limit"
+            value={tokenBudget}
+            onChange={(event) => setTokenBudget(event.target.value)}
+            aria-describedby="token-budget-help"
+          />
+          <p id="token-budget-help" className="text-xs text-muted-foreground">
+            Tasks stop at Needs you when the mission uses this many tokens. Empty or 0 means no limit.
+          </p>
+        </div>
+        <div className="flex items-center gap-3">
+          <Switch
+            id="pause-plan"
+            checked={pause}
+            onCheckedChange={setPause}
+          />
+          <Label htmlFor="pause-plan">Pause after PRD review</Label>
+        </div>
+        <div className="flex items-center gap-3">
+          <Switch
+            id="isolate-workspace"
+            checked={isolate}
+            onCheckedChange={setIsolate}
+            aria-describedby="isolate-workspace-help"
+          />
+          <div>
+            <Label htmlFor="isolate-workspace">Work on a new branch</Label>
+            <p id="isolate-workspace-help" className="text-xs text-muted-foreground">
+              Git worktree on neiro/&lt;mission&gt;. Your checkout stays untouched.
+            </p>
           </div>
-          <Collapsible>
-            <div className="chat-actions flex flex-wrap items-center justify-between gap-3">
-              <CollapsibleTrigger asChild>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="sm"
-                  className="text-muted-foreground"
-                >
-                  <ChevronDown className="size-3.5" />
-                  Advanced options
-                </Button>
-              </CollapsibleTrigger>
-              <div className="flex flex-wrap items-center justify-end gap-x-4 gap-y-2">
-                {launchBlockedReason ? (
-                  <span
-                    id="launch-disabled-reason"
-                    className="text-xs text-muted-foreground"
-                  >
-                    {launchBlockedReason}
-                  </span>
-                ) : (
-                  <span className="hidden text-xs text-muted-foreground sm:block">
-                    ⌘ / Ctrl + Enter
-                  </span>
-                )}
-                <Button
-                  type="submit"
-                  className="console-launch"
-                  disabled={!isLive || launching || !prompt.trim()}
-                  aria-describedby={launchBlockedReason ? "launch-disabled-reason" : undefined}
-                  title={launchBlockedReason ?? undefined}
-                >
-                  <Play className="size-3.5" />
-                  {launching ? "Launching…" : "Launch mission"}
-                </Button>
-              </div>
-            </div>
-            <CollapsibleContent>
-              <div className="grid gap-5 border-t p-5 sm:grid-cols-2 lg:grid-cols-4">
-                <div className="space-y-2">
-                  <Label htmlFor="workspace-path">Workspace folder</Label>
-                  <Input
-                    id="workspace-path"
-                    value={workspace}
-                    onChange={(event) => setWorkspace(event.target.value)}
-                    placeholder="/Users/you/projects/portal"
-                    aria-describedby="workspace-path-help"
-                  />
-                  <p id="workspace-path-help" className="text-xs text-muted-foreground">
-                    On the machine running Neiro and Hermes.
-                  </p>
-                </div>
-                <div className="space-y-2">
-                  <Label htmlFor="base-branch">Base branch</Label>
-                  <Input
-                    id="base-branch"
-                    value={baseBranch}
-                    onChange={(event) => setBaseBranch(event.target.value)}
-                    placeholder="Current branch"
-                    disabled={!isolate}
-                    maxLength={200}
-                    autoCapitalize="off"
-                    autoCorrect="off"
-                    spellCheck={false}
-                    aria-describedby="base-branch-help"
-                  />
-                  <p id="base-branch-help" className="text-xs text-muted-foreground">
-                    The new mission branch starts here.
-                  </p>
-                </div>
-                <div className="space-y-2">
-                  <Label htmlFor="worker-limit">Parallel workers</Label>
-                  <Input
-                    id="worker-limit"
-                    type="number"
-                    min="1"
-                    max="10"
-                    value={workers}
-                    onChange={(event) => setWorkers(event.target.value)}
-                  />
-                </div>
-                <div className="space-y-2">
-                  <Label htmlFor="retry-limit">Max auto-fix retries</Label>
-                  <Input
-                    id="retry-limit"
-                    type="number"
-                    min="0"
-                    max="5"
-                    value={retries}
-                    onChange={(event) => setRetries(event.target.value)}
-                  />
-                </div>
-                <div className="space-y-2">
-                  <Label htmlFor="token-budget">Token budget</Label>
-                  <Input
-                    id="token-budget"
-                    type="number"
-                    min="0"
-                    step="1000"
-                    inputMode="numeric"
-                    placeholder="No limit"
-                    value={tokenBudget}
-                    onChange={(event) => setTokenBudget(event.target.value)}
-                    aria-describedby="token-budget-help"
-                  />
-                  <p id="token-budget-help" className="text-xs text-muted-foreground">
-                    Tasks stop at Needs you when the mission uses this many tokens. Empty or 0 means no limit.
-                  </p>
-                </div>
-                <div className="flex items-center gap-3">
-                  <Switch
-                    id="pause-plan"
-                    checked={pause}
-                    onCheckedChange={setPause}
-                  />
-                  <Label htmlFor="pause-plan">Pause after PRD review</Label>
-                </div>
-                <div className="flex items-center gap-3">
-                  <Switch
-                    id="isolate-workspace"
-                    checked={isolate}
-                    onCheckedChange={setIsolate}
-                    aria-describedby="isolate-workspace-help"
-                  />
-                  <div>
-                    <Label htmlFor="isolate-workspace">Work on a new branch</Label>
-                    <p id="isolate-workspace-help" className="text-xs text-muted-foreground">
-                      Git worktree on neiro/&lt;mission&gt;. Your checkout stays untouched.
-                    </p>
-                  </div>
-                </div>
-              </div>
-              <p className="border-t px-5 py-3 text-xs text-muted-foreground">
-                {isLive
-                  ? "Applied to this mission: the orchestrator enforces the pause, worker cap and retry cap."
-                  : "Demo mode: these options are saved only when Supabase is connected."}
-              </p>
-            </CollapsibleContent>
-          </Collapsible>
-        </form>
-      </section>
+        </div>
+      </div>
+      <p className="border-t px-5 py-3 text-xs text-muted-foreground">
+        {isLive
+          ? "Applied to this mission: the orchestrator enforces the pause, worker cap and retry cap."
+          : "Demo mode: these options are saved only when Supabase is connected."}
+      </p>
+          </>
+        }
+      />
       <section className="space-y-5">
         <div className="mission-pass">
           <div className="pass-main">
