@@ -13,6 +13,8 @@ test("parseMissionCreateBody applies defaults", () => {
       maxParallelWorkers: 3,
       maxRetries: 2,
       workspacePath: null,
+      baseBranch: null,
+      isolateWorkspace: true,
     },
   });
 });
@@ -25,12 +27,16 @@ test("parseMissionCreateBody keeps valid operator controls", () => {
     max_parallel_workers: 1,
     max_retries: 0,
     workspace_path: " /srv/app ",
+    base_branch: " main ",
+    isolate_workspace: false,
   });
   assert.ok(result.ok);
   assert.equal(result.value.pauseAfterPlanning, true);
   assert.equal(result.value.maxParallelWorkers, 1);
   assert.equal(result.value.maxRetries, 0);
   assert.equal(result.value.workspacePath, "/srv/app");
+  assert.equal(result.value.baseBranch, "main");
+  assert.equal(result.value.isolateWorkspace, false);
 });
 
 test("parseMissionCreateBody rejects invalid input", () => {
@@ -45,6 +51,11 @@ test("parseMissionCreateBody rejects invalid input", () => {
     [{ prompt: "x", max_retries: 6 }, /max_retries/],
     [{ prompt: "x", workspace_path: 42 }, /workspace_path/],
     [{ prompt: "x", workspace_path: "a".repeat(501) }, /workspace_path/],
+    [{ prompt: "x", base_branch: 7 }, /base_branch/],
+    [{ prompt: "x", base_branch: "--force" }, /base_branch/],
+    [{ prompt: "x", base_branch: "a..b" }, /base_branch/],
+    [{ prompt: "x", base_branch: "has space" }, /base_branch/],
+    [{ prompt: "x", isolate_workspace: "yes" }, /isolate_workspace/],
   ];
   for (const [body, pattern] of cases) {
     const result = parseMissionCreateBody(body);

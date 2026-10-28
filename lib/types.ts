@@ -65,6 +65,14 @@ export type Mission = {
   maxParallelWorkers: number;
   maxRetries: number;
   workspacePath: string | null;
+  /** Branch the mission worktree was cut from (null = repo HEAD at creation). */
+  baseBranch: string | null;
+  /** Folder the agents work in: the worktree, or workspacePath when not isolated. */
+  agentWorkspacePath: string | null;
+  /** Mission branch (neiro/<mission>) when the workspace is a git worktree. */
+  workBranch: string | null;
+  worktreePath: string | null;
+  repoRoot: string | null;
   /** Active Hermes run id, or a `claim:<uuid>` token while a run is being started. */
   runId: string | null;
   runAgentId: string | null;
