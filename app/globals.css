@@ -1683,38 +1683,17 @@ section.console-lane[data-stage] > :first-child h2 {
   }
 }
 
-/* Gateway: heartbeat vitals, setup groups, model families, agents, terminal */
-.vitals-panel {
+/* Gateway: service status, model families, agents, terminal */
+.vital-row {
   --vital-alive: #0891b2;
   --vital-down: #e11d48;
   --vital-unset: #ca8a04;
   --vital-idle: var(--muted-foreground);
-  border: 1px solid var(--border);
-  border-radius: 1rem;
-  background:
-    radial-gradient(120% 140% at 100% 0%, color-mix(in oklab, var(--primary) 9%, transparent), transparent 55%),
-    var(--card);
-  color: var(--card-foreground);
-  box-shadow: 0 1px 0 var(--border), 0 18px 40px -28px color-mix(in oklab, var(--primary) 60%, transparent);
-  overflow: hidden;
 }
-.dark .vitals-panel,
-.dark .setup-group {
+.dark .vital-row {
   --vital-alive: #22d3ee;
   --vital-down: #fb7185;
   --vital-unset: #fde047;
-}
-.setup-group {
-  --vital-alive: #0891b2;
-  --vital-down: #e11d48;
-  --vital-unset: #ca8a04;
-  --vital-idle: var(--muted-foreground);
-  border: 1px solid var(--border);
-  border-top: 3px solid var(--vital);
-  border-radius: 0.875rem;
-  background: var(--card);
-  color: var(--card-foreground);
-  overflow: hidden;
 }
 .secret-pill {
   display: inline-flex;
@@ -1912,46 +1891,6 @@ section.console-lane[data-stage] > :first-child h2 {
 .vital-row[data-state="alive"] { --vital: var(--vital-alive); }
 .vital-row[data-state="down"] { --vital: var(--vital-down); }
 .vital-row[data-state="unset"] { --vital: var(--vital-unset); }
-.vital-dot {
-  width: 0.55rem;
-  height: 0.55rem;
-  border-radius: 999px;
-  background: var(--vital);
-  flex: none;
-}
-.vital-row[data-state="alive"] .vital-dot {
-  box-shadow: 0 0 0 0 color-mix(in oklab, var(--vital) 60%, transparent);
-  animation: vital-ping 1.6s ease-out infinite;
-}
-.vital-state { color: var(--vital); }
-.vital-line { width: 100%; height: 2.5rem; overflow: visible; }
-.vital-line path { fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; vector-effect: non-scaling-stroke; }
-.vital-line-base { stroke: var(--vital); opacity: 0.35; }
-.vital-row[data-state="unset"] .vital-line-base { stroke-dasharray: 4 7; opacity: 0.7; }
-.vital-row[data-state="down"] .vital-line-base { opacity: 0.6; }
-.vital-row[data-state="checking"] .vital-line-base { animation: vital-fade 1.2s ease-in-out infinite; }
-.vital-line-beat {
-  stroke: var(--vital);
-  stroke-width: 2.5;
-  stroke-dasharray: 560;
-  stroke-dashoffset: 560;
-  filter: drop-shadow(0 0 4px color-mix(in oklab, var(--vital) 55%, transparent));
-  animation: vital-beat 2.4s linear infinite;
-}
-@keyframes vital-beat {
-  to { stroke-dashoffset: -560; }
-}
-@keyframes vital-ping {
-  to { box-shadow: 0 0 0 7px transparent; }
-}
-@keyframes vital-fade {
-  50% { opacity: 0.1; }
-}
-@media (prefers-reduced-motion: reduce) {
-  .vital-line-beat { animation: none; stroke-dashoffset: 0; }
-  .vital-row[data-state="alive"] .vital-dot,
-  .vital-row[data-state="checking"] .vital-line-base { animation: none; }
-}
 
 /* ── Service card (option A): themed scene + cut-out 3D art + keys ── */
 .service-card {

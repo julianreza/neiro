@@ -294,7 +294,7 @@ function ServicePanel({
                 <ul className="space-y-1.5">
                   {vital.keys.map((key) => (
                     <li key={key.name} className="flex items-center gap-2">
-                      <code className="code-chip min-w-0 truncate font-medium" title={key.description}>
+                      <code className="code-chip min-w-0 truncate font-medium" title={`${key.name}: ${key.description}`}>
                         {key.name}
                       </code>
                       {key.secret && (
