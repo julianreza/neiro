@@ -50,7 +50,7 @@ export async function POST(request: NextRequest) {
       role,
       stage,
       specialty = "",
-      model = "Claude Sonnet 4.6",
+      model = "",
       profile = "default",
       prompt = "",
       url = "",
