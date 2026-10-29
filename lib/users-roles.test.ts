@@ -137,6 +137,55 @@ test("passcode failures lock across IPs, without blocking account logins", () =>
   assert.equal(limiter.check(limiterKeys("198.51.100.1", null)).ok, true);
 });
 
+test("clientAddress ignores spoofable headers unless trusted proxy hops are configured", () => {
+  const headers = new Headers({ "x-forwarded-for": "5.6.7.8, 10.0.0.1", "x-real-ip": "1.1.1.1" });
+  assert.equal(clientAddress(headers, ""), "local");
+  assert.equal(clientAddress(headers, "1"), "10.0.0.1");
+  assert.equal(clientAddress(headers, "2"), "5.6.7.8");
+  for (const hops of ["0", "-1", "3", "bad", "1.5"]) {
+    assert.equal(clientAddress(headers, hops), "local");
+  }
+  assert.equal(clientAddress(new Headers({ "x-real-ip": "1.1.1.1" }), "1"), "local");
+  assert.equal(clientAddress(new Headers({ "x-forwarded-for": "junk" }), "1"), "local");
+  assert.equal(clientAddress(new Headers({ "x-forwarded-for": "2001:db8::1" }), "1"), "2001:db8::1");
+});
+
+test("flooding limiter keys cannot evict active IP or username lockouts", () => {
+  let now = 0;
+  const limiter = new LoginLimiter(() => now);
+  const locked = ["ip:protected", "user:protected"];
+  for (let i = 0; i < 5; i++) limiter.recordFailure(locked);
+  for (let i = 0; i < 10_100; i++) limiter.recordFailure([`user:junk-${i}`]);
+  assert.equal(limiter.check(["ip:protected"]).ok, false);
+  assert.equal(limiter.check(["user:protected"]).ok, false);
+  now = 15 * 60 * 1000;
+  assert.equal(limiter.check(locked).ok, true);
+});
+
+test("limiter logs only lockout transitions with key kinds and no key values", () => {
+  const saved = console.warn;
+  const logs: unknown[][] = [];
+  console.warn = (...args: unknown[]) => { logs.push(args); };
+  try {
+    const limiter = new LoginLimiter(() => 0, 2, 60_000);
+    const keys = ["ip:private-address", "user:private-name"];
+    limiter.recordFailure(keys);
+    assert.equal(logs.length, 0);
+    limiter.recordFailure(keys);
+    assert.equal(logs.length, 2);
+    assert.deepEqual(logs.map((args) => args[1]), [
+      { event: "login_lockout", keyKind: "ip", retryAfterSec: 60 },
+      { event: "login_lockout", keyKind: "user", retryAfterSec: 60 },
+    ]);
+    limiter.check(keys);
+    limiter.recordFailure(keys);
+    assert.equal(logs.length, 2);
+    assert.doesNotMatch(JSON.stringify(logs), /private-address|private-name/);
+  } finally {
+    console.warn = saved;
+  }
+});
+
 test("role cache uses the current role, drops deleted users, fails closed", async () => {
   let now = 0;
   const roles = new Map<string, "admin" | "viewer">([["u1", "admin"]]);
