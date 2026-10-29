@@ -1,15 +1,12 @@
 import { NextResponse } from "next/server";
-import { connection } from "next/server";
 import type { NextRequest } from "next/server";
 import { isRole } from "@/lib/auth";
 import { hashPassword, passwordProblem } from "@/lib/passwords";
 import { createUser, listUsers, usernameProblem } from "@/lib/users-store";
-import { usersFailure as failure } from "@/lib/users-api";
+import { usersAdminSession, usersFailure as failure } from "@/lib/users-api";
 
-// Admin-only: proxy.ts refuses /api/users for any other role.
-
-export async function GET() {
-  await connection();
+export async function GET(request: NextRequest) {
+  if (!(await usersAdminSession(request))) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   try {
     return NextResponse.json({ users: await listUsers() }, { status: 200 });
   } catch (err: unknown) {
@@ -18,6 +15,7 @@ export async function GET() {
 }
 
 export async function POST(request: NextRequest) {
+  if (!(await usersAdminSession(request))) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   const body = await request.json().catch(() => null);
   const username = typeof body?.username === "string" ? body.username.trim() : body?.username;
   const role = body?.role ?? "viewer";

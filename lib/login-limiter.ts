@@ -39,11 +39,19 @@ export class LoginLimiter {
     const now = this.now();
     for (const key of keys) {
       let entry = this.entries.get(key);
+      if (entry && entry.lockedUntil > now) continue;
       if (!entry || now - entry.windowStart >= this.windowMs) {
         entry = { failures: 0, windowStart: now, lockedUntil: 0 };
       }
       entry.failures += 1;
-      if (entry.failures >= this.maxFailures) entry.lockedUntil = now + this.windowMs;
+      if (entry.failures >= this.maxFailures) {
+        entry.lockedUntil = now + this.windowMs;
+        console.warn("[auth]", {
+          event: "login_lockout",
+          keyKind: key === PASSCODE_KEY ? "passcode" : key.startsWith("user:") ? "user" : "ip",
+          retryAfterSec: Math.ceil(this.windowMs / 1000),
+        });
+      }
       this.entries.delete(key); // re-insert so Map order stays oldest-first
       this.entries.set(key, entry);
     }
@@ -57,8 +65,9 @@ export class LoginLimiter {
   private prune(now: number): void {
     for (const [key, entry] of this.entries) {
       const stale = entry.lockedUntil <= now && now - entry.windowStart >= this.windowMs;
-      // Key churn must not erase the IP-independent passcode defense.
-      if (stale || (this.entries.size > MAX_KEYS && key !== PASSCODE_KEY)) this.entries.delete(key);
+      // Key churn must not erase the passcode defense or any active lockout.
+      const evictable = key !== PASSCODE_KEY && entry.lockedUntil <= now;
+      if (stale || (this.entries.size > MAX_KEYS && evictable)) this.entries.delete(key);
       else if (this.entries.size <= MAX_KEYS) break;
     }
   }
@@ -72,14 +81,19 @@ export function loginLimiter(): LoginLimiter {
   return globalForLimiter.__neiroLoginLimiter;
 }
 
-/** Trust XFF only behind a configured, fixed chain of proxies that append it. */
+/**
+ * XFF is spoofable without a trusted ingress. Only use a fixed hop from the
+ * right when the origin is reachable exclusively through that proxy chain.
+ * NextRequest has no socket address; otherwise share one fail-closed bucket.
+ */
 export function clientAddress(
   headers: Headers,
-  trustedProxyHops = Number(process.env.NEIRO_TRUSTED_PROXY_HOPS ?? 0)
+  trustedProxyHops: number | string | undefined = process.env.NEIRO_TRUSTED_PROXY_HOPS
 ): string {
-  if (!Number.isSafeInteger(trustedProxyHops) || trustedProxyHops < 1) return "local";
-  const hops = headers.get("x-forwarded-for")?.split(",");
-  const address = hops?.[hops.length - trustedProxyHops]?.trim();
+  const hops = Number(trustedProxyHops ?? 0);
+  if (!Number.isSafeInteger(hops) || hops < 1) return "local";
+  const forwarded = headers.get("x-forwarded-for")?.split(",");
+  const address = forwarded?.[forwarded.length - hops]?.trim();
   return address && isIP(address) ? address : "local";
 }
 

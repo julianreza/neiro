@@ -4,9 +4,7 @@ import { isRole } from "@/lib/auth";
 import { hashPassword, passwordProblem } from "@/lib/passwords";
 import { sessionRoles } from "@/lib/session-roles";
 import { deleteUser, updateUser } from "@/lib/users-store";
-import { usersFailure as failure } from "@/lib/users-api";
-
-// Admin-only: proxy.ts refuses /api/users for any other role.
+import { usersAdminSession, usersFailure as failure } from "@/lib/users-api";
 
 type RouteContext = {
   params: Promise<{ id: string }>;
@@ -16,6 +14,7 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
 /** Change a user's role and/or reset their password. */
 export async function PATCH(request: NextRequest, context: RouteContext) {
+  if (!(await usersAdminSession(request))) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   const { id } = await context.params;
   if (!UUID_RE.test(id)) return NextResponse.json({ error: "User not found" }, { status: 404 });
 
@@ -45,9 +44,11 @@ export async function PATCH(request: NextRequest, context: RouteContext) {
 }
 
 export async function DELETE(request: NextRequest, context: RouteContext) {
+  const session = await usersAdminSession(request);
+  if (!session) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   const { id } = await context.params;
   if (!UUID_RE.test(id)) return NextResponse.json({ error: "User not found" }, { status: 404 });
-  if (request.headers.get("x-neiro-user") === id) {
+  if (session.sub === id) {
     return NextResponse.json({ error: "You can't delete your own account." }, { status: 409 });
   }
 

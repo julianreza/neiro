@@ -38,11 +38,15 @@ export async function POST(request: NextRequest) {
 
   const body = await request.json().catch(() => null);
   const username = typeof body?.username === "string" ? body.username.trim() : "";
+  const validUsername = usernameProblem(username) === null;
   const password = typeof body?.password === "string" ? body.password : "";
   const passcode = typeof body?.passcode === "string" ? body.passcode : "";
 
   const limiter = loginLimiter();
-  const keys = limiterKeys(clientAddress(request.headers), username || null);
+  const address = clientAddress(request.headers);
+  // An invalid account name counts against the IP only: it must not seed a
+  // user key, nor touch the shared passcode lock that guards owner sign-in.
+  const keys = username && !validUsername ? [`ip:${address}`] : limiterKeys(address, username || null);
   const gate = limiter.check(keys);
   if (!gate.ok) {
     const minutes = Math.ceil(gate.retryAfterSec / 60);
@@ -55,7 +59,7 @@ export async function POST(request: NextRequest) {
   let session: Session | null = null;
   try {
     if (username) {
-      if (!usernameProblem(username) && password) {
+      if (validUsername && password) {
         const found = await findUserForLogin(username);
         // Hash even for unknown names so timing doesn't reveal which exist.
         const ok = await verifyPassword(password, found?.passwordHash ?? (await dummyHash()));
@@ -68,6 +72,7 @@ export async function POST(request: NextRequest) {
       session = OWNER_SESSION;
     }
   } catch (err: unknown) {
+    console.error("[auth]", { event: "login_error", error: err });
     if (err instanceof AppConfigError) {
       return NextResponse.json({ error: err.message, code: err.code }, { status: 503 });
     }
