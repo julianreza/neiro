@@ -26,9 +26,19 @@ const looks: Record<string, Look> = {
   Content: { from: "#f59e0b", to: "#78350f", c1: "#fde68a", c2: "#fbbf24", c3: "#b45309", glow: "#fef9c3", accessory: "brush" },
   QA: { from: "#3b82f6", to: "#1e3a8a", c1: "#bfdbfe", c2: "#60a5fa", c3: "#1d4ed8", glow: "#dbeafe", accessory: "mag" },
   Security: { from: "#334155", to: "#020617", c1: "#fecdd3", c2: "#fb7185", c3: "#be123c", glow: "#ffe4e6", accessory: "check" },
+  "Q&A": { from: "#06b6d4", to: "#164e63", c1: "#a5f3fc", c2: "#22d3ee", c3: "#0e7490", glow: "#cffafe", accessory: "book" },
 };
 
 const fallback = looks.PM;
+
+/** Every role that has its own look. */
+export const botRoles = Object.keys(looks);
+
+/** A role's look plus the key it was found under (unknown roles use PM). */
+export function botLook(role: string): Look & { key: string } {
+  const key = role in looks ? role : "PM";
+  return { key, ...looks[key] };
+}
 
 /** Best-guess role for a free-text agent name ("Backend worker" -> Backend). */
 export function roleForAgent(name: string): string {
@@ -43,6 +53,7 @@ export function roleForAgent(name: string): string {
     [/content|writer|muse/, "Content"],
     [/\bqa\b|test|inspect|sentinel/, "QA"],
     [/review|security|lens/, "Security"],
+    [/q&a|\bask\b|answer|oracle/, "Q&A"],
   ];
   const hit = hits.find(([re]) => re.test(n));
   if (hit) return hit[1];

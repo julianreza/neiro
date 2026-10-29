@@ -5,21 +5,25 @@ import { useLiveData } from "@/hooks/use-live-data";
 import { DataSourceBadge } from "@/components/data-source-badge";
 import {
   AgentBot,
-  agentColor,
   agentLook,
   followPointer,
   resetPointer,
 } from "@/components/agent-bot";
-import { TeamWires } from "@/components/team-wires";
+import {
+  TeamOffice,
+  officeStatus,
+  statusOf,
+  type Focusable,
+} from "@/components/team-office";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   Bot,
   Copy,
   FlaskConical,
+  Hand,
   Pencil,
   Plus,
   RotateCcw,
-  Search,
   ShieldAlert,
   Trash2,
   Unplug,
@@ -45,6 +49,7 @@ const stages = [
   { id: "qa", name: "QA", detail: "Exercise the result" },
   { id: "reviewer", name: "Reviewer", detail: "Independent final pass" },
   { id: "scheduled", name: "Scheduled", detail: "Recurring assignments" },
+  { id: "ask", name: "Q&A", detail: "Answer questions" },
 ] as const;
 
 type Stage = (typeof stages)[number]["id"];
@@ -128,16 +133,29 @@ const presets = [
     prompt:
       "Review trust boundaries, permissions, and data handling. Report evidence-backed risks with practical remediation steps.",
   },
+  {
+    role: "Q&A",
+    stage: "ask",
+    specialty: "Answers questions about the project",
+    prompt:
+      "Answer questions about the project quickly and accurately. Read only the files you need, name the files and lines behind your answer, and say plainly when you are not sure. Never change files.",
+  },
 ] as const;
 
-const models = [
-  "Claude Sonnet 4.6",
-  "Claude Opus 4.6",
-  "GPT-5.4",
-  "Gemini 3.1 Pro",
-  "DeepSeek V3.2",
-  "Qwen3 Coder",
-];
+type HermesModel = { id: string; providerName: string };
+const noHermesModels: HermesModel[] = [];
+
+function parseHermesModels(json: unknown): HermesModel[] {
+  const rows = (json as { models?: unknown } | null)?.models;
+  if (!Array.isArray(rows)) throw new Error("Malformed /api/agents/models response");
+  return rows.flatMap((row) => {
+    const r = row as { id?: unknown; providerName?: unknown };
+    return typeof r.id === "string"
+      ? [{ id: r.id, providerName: typeof r.providerName === "string" ? r.providerName : "" }]
+      : [];
+  });
+}
+
 const starters: Agent[] = [
   ["neiro", "Neiro", "PM", "Claude Opus 4.6", "coordinator", true],
   ["scribe", "Scribe", "PRD", "Claude Sonnet 4.6", "product", false],
@@ -224,21 +242,49 @@ export function AgentsManager() {
   const live = useLiveData<Agent[]>("/api/agents", starters, parseAgents);
   const readOnly = live.source !== "live";
   const agents: Agent[] = live.source === "loading" ? [] : live.data;
-  const [search, setSearch] = useState("");
   const [draft, setDraft] = useState<Agent | null>(null);
+  const savedAgent = agents.find((agent) => agent.id === draft?.id);
+  const unsavedEndpoint = draft && draft.url.trim() !== (savedAgent?.url ?? "").trim();
+  const modelParams = new URLSearchParams();
+  if (savedAgent) modelParams.set("agentId", savedAgent.id);
+  if (draft) modelParams.set("profile", draft.profile);
+  // Model suggestions come from Hermes only; Hermes forwards to 9Router.
+  const hermesModels = useLiveData<HermesModel[]>(
+    draft && !unsavedEndpoint ? `/api/agents/models?${modelParams}` : null,
+    noHermesModels,
+    parseHermesModels,
+  );
+  const modelOptions = hermesModels.source === "live" ? hermesModels.data : [];
   const [deleting, setDeleting] = useState<Agent | null>(null);
   const [preview, setPreview] = useState<Agent | null>(null);
   const [probeShown, setProbeShown] = useState(false);
   const [formError, setFormError] = useState("");
-  const actionOrigin = useRef<HTMLButtonElement | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const actionOrigin = useRef<Focusable | null>(null);
 
-  const visible = agents.filter((agent) =>
-    `${agent.name} ${agent.specialty} ${agent.role} ${agent.model} ${agent.profile}`
-      .toLowerCase()
-      .includes(search.toLowerCase()),
-  );
+  const visible = agents;
+  const lead = agents.find((agent) => agent.stage === "orchestrator");
+  const counts = { work: 0, on: 0, off: 0 };
+  agents.forEach((agent) => counts[statusOf(agent)]++);
+  const directing = agents.filter(
+    (agent) => agent !== lead && statusOf(agent) === "work",
+  ).length;
+  const greeting =
+    live.source === "loading"
+      ? "Checking who is in the office…"
+      : !lead
+        ? "No orchestrator yet. Add one to direct the team."
+        : !lead.enabled
+          ? `${lead.name} is paused. Turn it on to direct the team.`
+          : directing
+            ? `${lead.name} is directing ${directing} ${directing === 1 ? "agent" : "agents"} right now.`
+            : `${lead.name} is ready for the next mission.`;
+  const selected =
+    visible.find((agent) => agent.id === selectedId) ??
+    visible.find((agent) => agent.stage === "orchestrator") ??
+    visible[0];
 
-  function edit(agent: Agent, trigger: HTMLButtonElement) {
+  function edit(agent: Agent, trigger: Focusable) {
     if (readOnly) {
       toast.error(DEMO_READ_ONLY);
       return;
@@ -312,7 +358,6 @@ export function AgentsManager() {
       toast.error(`Could not restore starters: ${error}`);
       return;
     }
-    setSearch("");
     toast.success("Starter team restored");
     live.reload();
   }
@@ -323,41 +368,7 @@ export function AgentsManager() {
     else document.getElementById("new-demo-agent")?.focus();
   }
 
-  const laneLook = (id: Stage): React.CSSProperties => {
-    const lead = visible.find((agent) => agent.stage === id);
-    return lead ? agentLook(lead.role) : {};
-  };
-
-  const renderLane = (stage: (typeof stages)[number], index: number) => {
-    const members = visible.filter((agent) => agent.stage === stage.id);
-    return (
-      <section
-        key={stage.id}
-        className="console-lane min-w-0 space-y-3"
-        aria-labelledby={`stage-${stage.id}`}
-        data-stage={stage.id}
-        style={laneLook(stage.id)}
-      >
-        <div className="lane-head border-b pb-3">
-          <div>
-            <h2
-              id={`stage-${stage.id}`}
-              className="flex items-center gap-2 font-semibold"
-            >
-              {stage.name}
-              <span
-                className="rounded-full bg-secondary px-2 py-0.5 text-xs font-medium tabular-nums text-muted-foreground"
-                aria-label={`${members.length} ${members.length === 1 ? "agent" : "agents"}`}
-              >
-                {members.length}
-              </span>
-            </h2>
-            <p className="mt-1 text-xs text-muted-foreground">
-              {stage.detail}
-            </p>
-          </div>
-        </div>
-        {members.map((agent, memberIndex) => (
+  const renderCard = (agent: Agent) => (
           <article
             key={agent.id}
             className="agent-card space-y-4"
@@ -366,7 +377,7 @@ export function AgentsManager() {
             }
             style={
               {
-                "--i": index + memberIndex,
+                "--i": 0,
                 ...agentLook(agent.role),
               } as React.CSSProperties
             }
@@ -491,44 +502,47 @@ export function AgentsManager() {
               </Button>
             </div>
           </article>
-        ))}
-        {!members.length && (
-          <div className="team-empty rounded-xl border border-dashed p-4 text-sm text-muted-foreground">
-            {search
-              ? "No matches in this stage."
-              : "No specialist assigned."}
-            <Button
-              className="mt-3 flex min-h-10"
-              variant="outline"
-              onClick={(event) =>
-                edit(
-                  { ...blankAgent(), stage: stage.id },
-                  event.currentTarget,
-                )
-              }
-            >
-              Add to {stage.name.toLowerCase()}
-            </Button>
-          </div>
-        )}
-      </section>
-    );
-  };
+  );
 
   return (
     <div className="space-y-8 p-4 md:p-8">
-      <header className="flex flex-wrap items-start justify-between gap-4">
-        <div className="space-y-2">
-          <p className="eyebrow">
-            People, translated into agents
-          </p>
-          <h1 className="text-3xl font-semibold tracking-tight">AI team</h1>
-          <p className="max-w-2xl text-sm text-muted-foreground">
-            Define each specialist, then place them where they belong in the
-            mission.
-          </p>
+      <header className="team-hero flex flex-wrap items-center justify-between gap-6">
+        <div className="flex min-w-0 items-center gap-4">
+          <span className="team-hero-bot" style={agentLook(lead?.role ?? "PM")}>
+            <AgentBot
+              name={lead?.name ?? "Orchestrator"}
+              role={lead?.role ?? "PM"}
+              asleep={lead ? !lead.enabled : true}
+              working={lead?.activeRun ?? false}
+            />
+          </span>
+          <div className="min-w-0 space-y-2">
+            <h1 className="text-3xl font-semibold tracking-tight">AI team</h1>
+            <p className="team-hero-bubble" aria-live="polite">
+              <Hand className="team-hero-wave size-4 shrink-0" aria-hidden="true" />
+              <span>{greeting}</span>
+            </p>
+          </div>
         </div>
-        <div className="flex flex-wrap gap-2">
+        <div className="flex flex-col items-start gap-3 sm:items-end">
+          <dl className="flex gap-5 text-xs text-muted-foreground">
+            {(Object.keys(officeStatus) as (keyof typeof officeStatus)[]).map((status) => (
+              <div key={status} className="flex flex-col-reverse">
+                <dt className="flex items-center gap-1.5">
+                  <i
+                    className="size-1.5 rounded-full"
+                    style={{ background: officeStatus[status].color }}
+                    aria-hidden="true"
+                  />
+                  {officeStatus[status].label}
+                </dt>
+                <dd className="text-xl font-semibold tabular-nums text-foreground">
+                  {counts[status]}
+                </dd>
+              </div>
+            ))}
+          </dl>
+          <div className="flex flex-wrap gap-2">
           <Button
             className="min-h-10"
             variant="outline"
@@ -549,6 +563,7 @@ export function AgentsManager() {
             <Plus />
             New agent
           </Button>
+          </div>
         </div>
       </header>
 
@@ -580,109 +595,62 @@ export function AgentsManager() {
         </div>
       )}
 
-      <section
-        className="flex flex-wrap items-end justify-between gap-4"
-        aria-label="Team filters"
-      >
-        <div className="w-full space-y-2 sm:max-w-sm">
-          <Label htmlFor="agent-search">Find a specialist</Label>
-          <div className="relative">
-            <Search className="absolute top-3 left-3 size-4 text-muted-foreground" />
-            <Input
-              id="agent-search"
-              className="h-10 pl-9 text-base sm:text-sm"
-              placeholder="Search name, model, role, or profile"
-              value={search}
-              onChange={(event) => setSearch(event.target.value)}
-            />
-          </div>
-        </div>
-        <p className="text-sm text-muted-foreground" aria-live="polite">
-          {visible.length} of {agents.length} {readOnly ? "demo " : ""}agents ·{" "}
-          {agents.filter((agent) => agent.enabled).length} enabled
-        </p>
-      </section>
-
       {live.source === "loading" ? null : visible.length === 0 ? (
         <section className="flex min-h-64 flex-col items-center justify-center gap-4 border border-dashed p-8 text-center">
           <Bot className="size-8 text-muted-foreground" />
           <div>
-            <h2 className="font-semibold">
-              {agents.length
-                ? "No matching specialists"
-                : "A team starts with one specialist"}
-            </h2>
+            <h2 className="font-semibold">A team starts with one specialist</h2>
             <p className="mt-2 text-sm text-muted-foreground">
-              {agents.length
-                ? "Try a different name, model, or profile."
-                : "Create an agent or restore the starter team."}
+              Create an agent or restore the starter team.
             </p>
           </div>
-          {agents.length ? (
-            <Button variant="outline" onClick={() => setSearch("")}>
-              Clear search
-            </Button>
-          ) : (
-            <Button
-              onClick={(event) => edit(blankAgent(), event.currentTarget)}
-              disabled={readOnly}
-              title={readOnly ? DEMO_READ_ONLY : undefined}
-            >
-              <Plus />
-              Create agent
-            </Button>
-          )}
+          <Button
+            onClick={(event) => edit(blankAgent(), event.currentTarget)}
+            disabled={readOnly}
+            title={readOnly ? DEMO_READ_ONLY : undefined}
+          >
+            <Plus />
+            Create agent
+          </Button>
         </section>
       ) : (
-        <div className="team-tree">
-          {(() => {
-            const [root, ...branches] = stages;
-            const isLive = (id: Stage) =>
-              visible.some((agent) => agent.stage === id && agent.enabled);
-            const anyLive = visible.some((agent) => agent.enabled);
-            const middle = (branches.length - 1) / 2;
-            return (
-              <>
-                <TeamWires
-                  wires={branches.map((stage) => {
-                    const lead = visible.find((a) => a.stage === stage.id);
-                    return {
-                      id: stage.id,
-                      color: lead ? agentColor(lead.role) : "var(--primary)",
-                      live: isLive(stage.id),
-                    };
-                  })}
-                />
-                <div className="team-root">{renderLane(root, 0)}</div>
-                <div
-                  className="team-trunk"
-                  aria-hidden="true"
-                  data-live={anyLive || undefined}
-                />
-                <div
-                  className="team-branches"
-                  style={
-                    { "--branch-count": branches.length } as React.CSSProperties
-                  }
-                >
-                  {branches.map((stage, i) => (
-                    <div
-                      key={stage.id}
-                      className="team-branch"
-                      data-live={isLive(stage.id) || undefined}
-                      data-side={i < middle ? "left" : "right"}
-                      style={
-                        { "--b": i, ...laneLook(stage.id) } as React.CSSProperties
-                      }
+        <div className="grid items-start gap-6 xl:grid-cols-[minmax(0,1fr)_22rem]">
+          <TeamOffice
+            rooms={stages}
+            agents={visible}
+            selectedId={selected?.id ?? null}
+            onSelect={setSelectedId}
+            onAdd={(stage, trigger) =>
+              edit({ ...blankAgent(), stage: stage as Stage }, trigger)
+            }
+          />
+          <aside className="space-y-4" aria-label="Selected agent">
+            {selected && renderCard(selected)}
+            <nav aria-label="Team roster" className="rounded-xl border p-2">
+              <ul className="space-y-1">
+                {visible.map((agent) => (
+                  <li key={agent.id}>
+                    <button
+                      type="button"
+                      className="flex min-h-10 w-full items-center gap-2 rounded-lg px-3 text-left text-sm hover:bg-muted aria-pressed:bg-muted aria-pressed:font-medium"
+                      aria-pressed={agent.id === selected?.id}
+                      onClick={() => setSelectedId(agent.id)}
                     >
-                      <span className="team-pulse" aria-hidden="true" />
-                      {renderLane(stage, i + 1)}
-                    </div>
-                  ))}
-                </div>
-              </>
-            );
-          })()}
+                      <i
+                        className="size-2 shrink-0 rounded-full"
+                        style={{ background: officeStatus[statusOf(agent)].color }}
+                        aria-hidden="true"
+                      />
+                      <span className="min-w-0 flex-1 truncate">{agent.name}</span>
+                      <span className="text-xs text-muted-foreground">
+                        {stages.find((stage) => stage.id === agent.stage)?.name}
+                      </span>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </nav>
+          </aside>
         </div>
       )}
 
@@ -800,16 +768,22 @@ export function AgentsManager() {
                   aria-describedby="agent-model-help"
                 />
                 <datalist id="agent-model-options">
-                  {models.map((model) => (
-                    <option key={model} value={model} />
+                  {modelOptions.map((model) => (
+                    <option key={model.id} value={model.id} label={model.providerName} />
                   ))}
                 </datalist>
                 <p
                   id="agent-model-help"
                   className="text-xs text-muted-foreground"
                 >
-                  Leave empty to use the model of the Hermes profile. Suggestions
-                  are a sample catalog, availability unverified.
+                  Leave empty to use the model of the Hermes profile.{" "}
+                  {unsavedEndpoint
+                    ? "Save the provider URL to load its models."
+                    : hermesModels.source === "loading"
+                    ? "Loading models from Hermes…"
+                    : hermesModels.source === "live"
+                      ? `${modelOptions.length} models available in Hermes.`
+                      : `Hermes models unavailable: ${hermesModels.reason}.`}
                 </p>
               </div>
               <div className="space-y-2">

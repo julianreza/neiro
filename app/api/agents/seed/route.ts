@@ -87,6 +87,20 @@ const STARTER_AGENTS = [
     enabled: true,
     active_run: false,
   },
+  {
+    id: "qa-answerer",
+    name: "Oracle Q&A",
+    role: "Q&A",
+    stage: "ask",
+    specialty: "Answers questions about the project",
+    model: "",
+    profile: "default",
+    prompt:
+      "Answer questions about the project quickly and accurately. Read only the files you need, name the files and lines behind your answer, and say plainly when you are not sure. Never change files.",
+    url: "",
+    enabled: true,
+    active_run: false,
+  },
 ];
 
 export async function POST() {

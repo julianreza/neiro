@@ -1,7 +1,6 @@
 import { NextResponse } from "next/server";
 import { connection } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
-import { getNineRouterStatus } from "@/lib/ninerouter";
 import { probeHermesAgent } from "@/lib/hermes";
 import { AppConfigError } from "@/lib/types";
 import type {
@@ -23,7 +22,6 @@ export async function GET() {
         process.env.SUPABASE_SERVICE_ROLE_KEY,
     ),
     hermes: Boolean(process.env.HERMES_DEFAULT_URL),
-    ninerouter: Boolean(process.env.NINEROUTER_URL),
   };
 
   let supabaseStatus: GatewayStatusDTO["supabase"] = {
@@ -129,29 +127,6 @@ export async function GET() {
     }
   }
 
-  // Probe NineRouter
-  let nineRouterRes: {
-    ok: boolean;
-    latencyMs: number;
-    modelsCount: number;
-    error?: string;
-  } = {
-    ok: false,
-    latencyMs: 0,
-    modelsCount: 0,
-  };
-  try {
-    nineRouterRes = await getNineRouterStatus();
-  } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : String(err);
-    nineRouterRes = {
-      ok: false,
-      latencyMs: 0,
-      modelsCount: 0,
-      error: message,
-    };
-  }
-
   // Probe Default Hermes Agent fallback
   try {
     const dummyDefaultAgent: Agent = {
@@ -184,20 +159,11 @@ export async function GET() {
     error: defaultHermesStatus.error,
   };
 
-  const nineRouterServiceStatus: GatewayStatusDTO["nineRouter"] = {
-    name: "9Router",
-    status: nineRouterRes.ok ? "connected" : "disconnected",
-    latencyMs: nineRouterRes.latencyMs,
-    detail: `${nineRouterRes.modelsCount} models`,
-    error: nineRouterRes.error,
-  };
-
   const body = {
     configured,
     cron: cronStatus,
     supabase: supabaseStatus,
     hermes: hermesStatus,
-    nineRouter: nineRouterServiceStatus,
     defaultHermes: defaultHermesStatus,
     agentsHealth,
     checkedAt: new Date().toISOString(),

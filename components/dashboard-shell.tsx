@@ -1,12 +1,10 @@
 "use client";
 
-import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { useTheme } from "next-themes";
 import {
   Activity,
-  ArrowUpRight,
   Bot,
   Clock3,
   Command,
@@ -49,7 +47,7 @@ const navigation: NavItem[] = [
   { href: "/history", label: "History", icon: History },
   { href: "/agents", label: "AI team", icon: Bot },
   { href: "/schedules", label: "Time AI", icon: Clock3 },
-  { href: "/gateway", label: "9Router & VPS", icon: Network },
+  { href: "/gateway", label: "Gateway", icon: Network },
   { href: "/users", label: "Users", icon: Users },
 ];
 
@@ -220,20 +218,6 @@ function DashboardSession({
               <ThemeToggle />
             </div>
           </header>
-          <div className="mx-4 flex flex-wrap items-center justify-between gap-2 rounded-2xl bg-secondary/60 px-4 py-2.5 text-xs md:mx-8">
-            <p className="text-muted-foreground">
-              <span className="mr-2 font-medium text-foreground">
-                Preview workspace
-              </span>{" "}
-              Sample data. Changes stay in memory; no agents are running.
-            </p>
-            <Link
-              href="/gateway"
-              className="inline-flex items-center gap-1 font-medium text-primary"
-            >
-              Connection setup <ArrowUpRight className="size-3" />
-            </Link>
-          </div>
           <div id="main-content" tabIndex={-1} className="min-w-0 flex-1">
             {children}
           </div>
