@@ -1,7 +1,17 @@
 import "server-only";
 import { NextResponse } from "next/server";
+import type { NextRequest } from "next/server";
+import { getRequestSession } from "@/lib/auth";
+import { sessionRoles } from "@/lib/session-roles";
 import { UserConflictError } from "@/lib/users-store";
 import { AppConfigError } from "@/lib/types";
+
+/** Re-check credentials and current role even when the proxy is bypassed. */
+export async function usersAdminSession(request: NextRequest) {
+  const signed = await getRequestSession(request);
+  const session = signed ? await sessionRoles().refresh(signed) : null;
+  return session?.role === "admin" ? session : null;
+}
 
 /** Maps a users-API error to a JSON response with the right status. */
 export function usersFailure(err: unknown, fallback: string) {

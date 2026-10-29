@@ -1,3 +1,5 @@
+import { isIP } from "node:net";
+
 /**
  * Counts failed sign-ins per key (client IP, and username) and locks a key
  * out for a while once it fails too often. Kept in memory: one Neiro server
@@ -36,11 +38,19 @@ export class LoginLimiter {
     const now = this.now();
     for (const key of keys) {
       let entry = this.entries.get(key);
+      if (entry && entry.lockedUntil > now) continue;
       if (!entry || now - entry.windowStart >= this.windowMs) {
         entry = { failures: 0, windowStart: now, lockedUntil: 0 };
       }
       entry.failures += 1;
-      if (entry.failures >= this.maxFailures) entry.lockedUntil = now + this.windowMs;
+      if (entry.failures >= this.maxFailures) {
+        entry.lockedUntil = now + this.windowMs;
+        console.warn("[auth]", {
+          event: "login_lockout",
+          keyKind: key.startsWith("user:") ? "user" : "ip",
+          retryAfterSec: Math.ceil(this.windowMs / 1000),
+        });
+      }
       this.entries.delete(key); // re-insert so Map order stays oldest-first
       this.entries.set(key, entry);
     }
@@ -54,8 +64,9 @@ export class LoginLimiter {
   private prune(now: number): void {
     for (const [key, entry] of this.entries) {
       const stale = entry.lockedUntil <= now && now - entry.windowStart >= this.windowMs;
-      if (stale || this.entries.size > MAX_KEYS) this.entries.delete(key);
-      else break;
+      // Never clear an active lockout just because junk keys filled the map.
+      if (stale || (this.entries.size > MAX_KEYS && entry.lockedUntil <= now)) this.entries.delete(key);
+      else if (this.entries.size <= MAX_KEYS) break;
     }
   }
 }
@@ -68,10 +79,17 @@ export function loginLimiter(): LoginLimiter {
   return globalForLimiter.__neiroLoginLimiter;
 }
 
-/** Best-effort client address for rate-limit keys. */
-export function clientAddress(headers: Headers): string {
-  const forwarded = headers.get("x-forwarded-for")?.split(",")[0]?.trim();
-  return forwarded || headers.get("x-real-ip")?.trim() || "local";
+/**
+ * XFF is spoofable without a trusted ingress. Only use a fixed hop from the
+ * right when the origin is reachable exclusively through that proxy chain.
+ * NextRequest has no socket address; otherwise share one fail-closed bucket.
+ */
+export function clientAddress(headers: Headers, trustedHops = process.env.NEIRO_TRUSTED_PROXY_HOPS): string {
+  const hops = Number(trustedHops);
+  if (!Number.isSafeInteger(hops) || hops < 1) return "local";
+  const forwarded = headers.get("x-forwarded-for")?.split(",");
+  const address = forwarded?.[forwarded.length - hops]?.trim();
+  return address && isIP(address) ? address : "local";
 }
 
 export function limiterKeys(ip: string, username: string | null): string[] {
