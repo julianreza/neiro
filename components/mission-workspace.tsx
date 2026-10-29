@@ -4,7 +4,6 @@ import Link from "next/link";
 import { useState } from "react";
 import {
   Check,
-  ChevronRight,
   Clock3,
   FileText,
   Layers3,
@@ -19,12 +18,11 @@ import {
   demoRouteAgents,
   initialMissions,
   routeDemoTask,
-  stages,
   updateDemoTask,
 } from "@/lib/demo-missions";
 import type { DemoMission, DemoTask, RouteAgentOption, TaskStage } from "@/lib/demo-missions";
-import { RoutingGateCard, TaskRouteFlow } from "@/components/task-routing";
-import type { MissionDetailDTO, MissionPhase, MissionSummaryDTO } from "@/lib/types";
+import { RoutingGateCard } from "@/components/task-routing";
+import type { MissionArtifact, MissionDetailDTO, MissionPhase, MissionSummaryDTO } from "@/lib/types";
 import { formatCompactTokens } from "@/lib/utils";
 import { useLiveData } from "@/hooks/use-live-data";
 import { DataSourceBadge } from "@/components/data-source-badge";
@@ -48,6 +46,8 @@ import {
   MarkdownArtifactViewer,
   type ArtifactFile,
 } from "@/components/markdown-artifact-viewer";
+import { prdHref } from "@/lib/client-api";
+import { TaskChat } from "@/components/task-chat";
 
 /** Status label next to the mission title, in History's colours. */
 const MISSION_PILL: Record<MissionView["status"], { tone: StoryTone; label: string }> = {
@@ -76,17 +76,17 @@ const stageLook = Object.fromEntries(
   ]),
 ) as Record<TaskStage, React.CSSProperties>;
 
-/** Stages where the task's agent is busy, so its bot works. */
-const WORKING_STAGES = new Set<TaskStage>(["Coding", "QA check", "Final review"]);
 
 /** A task as the board renders it; `rowId` is the database id (live mode only). */
-type TaskView = DemoTask & { rowId?: string };
+type TaskView = DemoTask & { rowId?: string; brief?: string | null; resultOutput?: string | null };
 
 type MissionView = Omit<DemoMission, "tasks"> & {
   tasks: TaskView[];
   phase?: MissionPhase;
   lastError?: string | null;
   artifacts?: ArtifactFile[];
+  /** Every saved artifact, for the task chat (live missions only). */
+  rawArtifacts?: MissionArtifact[];
   /** Mission branch when it runs in a git worktree (live missions only). */
   workBranch?: string | null;
   baseBranch?: string | null;
@@ -132,6 +132,8 @@ function parseMissionDetail(json: unknown): MissionView | null {
       model: t.model,
       tokens: t.tokens,
       depends: t.depends,
+      brief: t.result ?? null,
+      resultOutput: t.resultOutput,
       approval: t.approval,
       retries: t.retries,
       routingStatus: t.routingStatus ?? null,
@@ -142,7 +144,9 @@ function parseMissionDetail(json: unknown): MissionView | null {
       routeConfidence: t.routeConfidence ?? null,
       routeReason: t.routeReason ?? null,
     })),
-    artifacts: m.artifacts.map((a) => ({
+    rawArtifacts: m.artifacts,
+    // Coding outputs live in the task chat, not in the Artifacts list.
+    artifacts: m.artifacts.filter((a) => a.kind !== "coding_output").map((a) => ({
       name: `${a.kind.toUpperCase()}.md`,
       label: a.title,
       content: a.content,
@@ -223,6 +227,7 @@ export function MissionWorkspace({ project }: { project: WorkspaceProject }) {
   const loading =
     list.source === "loading" || (isLive && effectiveId !== null && detail.source === "loading");
   const tasks = mission?.tasks ?? [];
+  const hasPrd = Boolean(mission?.artifacts?.some((a) => a.name === "PRD.md"));
   const done = tasks.filter((task) => task.stage === "Done").length;
   const tokens = tasks.reduce((sum, task) => sum + task.tokens, 0);
   // The mission's own retry cap; demo missions use the orchestrator default.
@@ -306,11 +311,6 @@ export function MissionWorkspace({ project }: { project: WorkspaceProject }) {
   }
 
   const gateTasks = tasks.filter((t) => t.stage === "Awaiting routing");
-  // Approval tasks live only in the "Waiting for your OK" card, so the
-  // board never shows a second Approve/Deny for the same task.
-  const laneTasks = (stage: TaskStage) =>
-    tasks.filter((t) => t.stage === stage && !t.approval);
-
   function updateTask(id: string, stage: TaskStage) {
     if (isLive) {
       const action =
@@ -373,6 +373,14 @@ export function MissionWorkspace({ project }: { project: WorkspaceProject }) {
             <Button variant="ghost" onClick={refresh}>
               <RefreshCw className="size-4" aria-hidden="true" />
               Refresh
+            </Button>
+          )}
+          {isLive && mission && hasPrd && (
+            <Button asChild variant="outline">
+              <Link href={prdHref(project.id, mission.id)}>
+                <FileText className="size-4" aria-hidden="true" />
+                Open PRD
+              </Link>
             </Button>
           )}
           {isDemo && effectiveId && (
@@ -497,13 +505,23 @@ export function MissionWorkspace({ project }: { project: WorkspaceProject }) {
               >
                 <p className="text-sm">
                   {isLive
-                    ? "Plan and PRD are ready. Review the artifacts, then approve to start execution."
+                    ? hasPrd
+                      ? "Plan and PRD are ready. Read the PRD, then approve or ask for changes."
+                      : "The plan is ready. Review the artifacts, then approve to start execution."
                     : "Preview plan ready. Approve to explore the local task board."}
                 </p>
-                <div className="flex gap-2">
+                <div className="flex flex-wrap gap-2">
                   <Button size="sm" onClick={() => void missionControl("approve_plan")}>
                     {isLive ? "Approve plan" : "Approve demo plan"}
                   </Button>
+                  {isLive && hasPrd && (
+                    <Button asChild size="sm" variant="secondary">
+                      <Link href={prdHref(project.id, mission.id)}>
+                        <FileText className="size-3.5" aria-hidden="true" />
+                        Open PRD
+                      </Link>
+                    </Button>
+                  )}
                   <Button
                     size="sm"
                     variant="outline"
@@ -634,107 +652,14 @@ export function MissionWorkspace({ project }: { project: WorkspaceProject }) {
                     Tasks show up here once the PM plans the mission.
                   </div>
                 ) : (
-                  <div className="board-strip">
-                    {stages.map((stage) => {
-                      const lane = laneTasks(stage);
-                      if (lane.length === 0) {
-                        return (
-                          <div
-                            key={stage}
-                            className="board-lane board-lane-thin"
-                            data-stage={stage}
-                            style={stageLook[stage]}
-                            title={`${stage}: no tasks`}
-                          >
-                            <span className="board-thin-count" aria-hidden="true">
-                              0
-                            </span>
-                            <h3 className="board-thin-label">
-                              {stage}
-                              <span className="sr-only">, no tasks</span>
-                            </h3>
-                            <span className="board-thin-bot" style={agentLook("PM")} inert aria-hidden="true">
-                              <AgentBot name="Idle agent" role="PM" asleep working={false} />
-                            </span>
-                          </div>
-                        );
-                      }
-                      return (
-                        <div
-                          key={stage}
-                          className="console-lane board-lane board-lane-wide"
-                          data-stage={stage}
-                          style={stageLook[stage]}
-                        >
-                          <h3 className="board-pill">
-                            {stage}
-                            <span>{lane.length}</span>
-                          </h3>
-                          <div className="console-tray">
-                            {lane.map((task) => (
-                              <article
-                                key={task.id}
-                                className="console-task board-task"
-                                data-stage={task.stage}
-                                style={agentLook(roleForAgent(task.agent))}
-                              >
-                                <div className="board-task-head">
-                                  <span className="board-task-bot">
-                                    <AgentBot
-                                      name={task.agent}
-                                      role={roleForAgent(task.agent)}
-                                      asleep={false}
-                                      working={WORKING_STAGES.has(task.stage)}
-                                    />
-                                    {task.stage === "Done" && (
-                                      <span className="board-task-done" aria-hidden="true">
-                                        <Check className="size-2.5" strokeWidth={3.5} />
-                                      </span>
-                                    )}
-                                  </span>
-                                  <span className="code-chip">{task.id}</span>
-                                  {task.retries > 0 && (
-                                    <span className="ml-auto text-[11px] font-semibold text-status-warning">
-                                      Retry {task.retries}/{maxRetriesShown}
-                                    </span>
-                                  )}
-                                </div>
-                                <h4 className="board-task-title" title={task.title}>
-                                  {task.title}
-                                </h4>
-                                {task.depends.length > 0 && (
-                                  <p className="board-task-needs">
-                                    Needs
-                                    {task.depends.map((dep) => (
-                                      <span key={dep} className="code-chip">
-                                        {dep}
-                                      </span>
-                                    ))}
-                                  </p>
-                                )}
-                                <TaskRouteFlow task={task} agents={routeAgents} />
-                                <button
-                                  type="button"
-                                  className="board-task-foot"
-                                  title={task.model}
-                                  onClick={() => setInspected(task.id)}
-                                >
-                                  <span className="sr-only">Inspect run: </span>
-                                  <span className="truncate font-medium text-foreground">
-                                    {task.agent}
-                                  </span>
-                                  <span className="shrink-0 tabular-nums">
-                                    {formatCompactTokens(task.tokens)} tokens
-                                  </span>
-                                  <ChevronRight className="ml-auto size-3.5 shrink-0" aria-hidden="true" />
-                                </button>
-                              </article>
-                            ))}
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
+                  <TaskChat
+                    tasks={tasks}
+                    artifacts={mission.rawArtifacts ?? []}
+                    maxRetries={maxRetriesShown}
+                    routeAgents={routeAgents}
+                    stageStyle={stageLook}
+                    onInspect={setInspected}
+                  />
                 )}
               </TabsContent>
               <TabsContent value="artifacts" className="mt-5">

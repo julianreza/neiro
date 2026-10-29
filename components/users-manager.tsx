@@ -7,12 +7,16 @@ import { Loader2, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Picker } from "@/components/ui/picker";
 import { useRole } from "@/hooks/use-role";
 import { sendJson, timeAgo } from "@/lib/client-api";
 
 type User = { id: string; username: string; role: "admin" | "viewer"; createdAt: string };
 
-const selectClass = "h-8 rounded-lg border border-input bg-background px-2 text-sm";
+const ROLE_OPTIONS = [
+  { value: "viewer", label: "Viewer" },
+  { value: "admin", label: "Admin" },
+];
 
 export function UsersManager() {
   const role = useRole();
@@ -126,10 +130,7 @@ export function UsersManager() {
         </div>
         <div className="space-y-1.5">
           <Label htmlFor="new-role">Role</Label>
-          <select id="new-role" className={`${selectClass} h-9 w-full`} value={newRole} onChange={(e) => setNewRole(e.target.value as User["role"])}>
-            <option value="viewer">Viewer</option>
-            <option value="admin">Admin</option>
-          </select>
+          <Picker id="new-role" value={newRole} onChange={(v) => setNewRole(v as User["role"])} options={ROLE_OPTIONS} />
         </div>
         <Button type="submit" disabled={saving}>
           Add user
@@ -157,18 +158,14 @@ export function UsersManager() {
                 <p className="font-medium">{user.username}</p>
                 <p className="text-xs text-muted-foreground">Added {timeAgo(user.createdAt)}</p>
               </div>
-              <label className="sr-only" htmlFor={`role-${user.id}`}>
-                Role for {user.username}
-              </label>
-              <select
+              <Picker
                 id={`role-${user.id}`}
-                className={selectClass}
+                size="sm"
+                aria-label={`Role for ${user.username}`}
                 value={user.role}
-                onChange={(e) => void changeRole(user, e.target.value as User["role"])}
-              >
-                <option value="viewer">Viewer</option>
-                <option value="admin">Admin</option>
-              </select>
+                onChange={(v) => void changeRole(user, v as User["role"])}
+                options={ROLE_OPTIONS}
+              />
               <Button size="sm" variant="outline" onClick={() => void resetPassword(user)}>
                 Reset password
               </Button>

@@ -6,7 +6,7 @@ import type { NextRequest } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { startHermesRun } from "@/lib/hermes";
 import { mapAgentRow } from "@/lib/orchestrator-store";
-import { recordAskStart } from "@/lib/ask-history";
+import { chatSessionId, recordAskStart } from "@/lib/ask-history";
 import { linkToProject } from "@/lib/projects-store";
 import { AppConfigError } from "@/lib/types";
 
@@ -86,10 +86,13 @@ export async function POST(request: NextRequest) {
     }
     const agent = mapAgentRow(data);
 
+    // One chat = one Hermes session: always the chat's first run id.
+    const hermesSessionId = sessionId ? await chatSessionId(supabase, sessionId) : undefined;
+
     const started = await startHermesRun(agent, {
       prompt: workspace ? `Question: ${question}\n\nWorkspace: ${workspace}` : `Question: ${question}`,
       instructions: [agent.prompt, workspace ? ASK_RULES : CHAT_RULES].filter(Boolean).join("\n\n"),
-      sessionId,
+      sessionId: hermesSessionId,
     });
     if (started.kind === "deferred") {
       return NextResponse.json({ error: "Hermes is busy. Try again in a minute." }, { status: 503 });
@@ -103,6 +106,7 @@ export async function POST(request: NextRequest) {
       question,
       workspacePath: workspace,
       followUpOf: sessionId,
+      sessionId: hermesSessionId,
     });
     await linkToProject(supabase, "ask_questions", started.runId, workspace);
 

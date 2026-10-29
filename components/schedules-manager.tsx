@@ -7,6 +7,7 @@ import { DataSourceBadge } from "@/components/data-source-badge";
 import { useLiveData } from "@/hooks/use-live-data";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
+import { Picker } from "@/components/ui/picker";
 import {
   Table,
   TableBody,
@@ -55,9 +56,6 @@ const initialSchedules: Schedule[] = [
     lastRun: "Never run · demo",
   },
 ];
-const selectClass =
-  "h-10 w-full rounded-md border border-input bg-background px-3 text-base focus-visible:outline-2 focus-visible:outline-ring sm:text-sm";
-
 function pickString(job: Record<string, unknown>, keys: string[], fallback = ""): string {
   for (const key of keys) {
     const value = job[key];
@@ -165,17 +163,12 @@ export function SchedulesManager() {
           </div>
           <div className="w-full space-y-2 sm:w-52">
             <Label htmlFor="schedule-profile">Agent profile</Label>
-            <select
+            <Picker
               id="schedule-profile"
-              className={selectClass}
               value={profile}
-              onChange={(event) => setProfile(event.target.value)}
-            >
-              <option value="all">All profiles</option>
-              {profiles.map((item) => (
-                <option key={item}>{item}</option>
-              ))}
-            </select>
+              onChange={setProfile}
+              options={[{ value: "all", label: "All profiles" }, ...profiles.map((item) => ({ value: item }))]}
+            />
           </div>
         </div>
         <div className="console-table min-w-0 overflow-hidden rounded-lg border">

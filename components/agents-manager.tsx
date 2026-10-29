@@ -38,7 +38,9 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { ModelPicker } from "@/components/model-picker";
 import { Label } from "@/components/ui/label";
+import { Picker } from "@/components/ui/picker";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 
@@ -197,9 +199,6 @@ function blankAgent(): Agent {
     activeRun: false,
   };
 }
-
-const selectClass =
-  "h-10 w-full min-w-0 rounded-lg border border-input bg-background px-3 text-base outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 sm:text-sm";
 
 const DEMO_READ_ONLY =
   "Demo mode: connect Supabase to add, edit or remove agents.";
@@ -690,13 +689,13 @@ export function AgentsManager() {
                 </div>
                 <div className="space-y-2">
                   <Label htmlFor="agent-role">Role preset</Label>
-                  <select
+                  <Picker
                     id="agent-role"
-                    className={selectClass}
                     value={draft.role}
-                    onChange={(event) => {
+                    options={presets.map((preset) => ({ value: preset.role }))}
+                    onChange={(role) => {
                       const preset = presets.find(
-                        (item) => item.role === event.target.value,
+                        (item) => item.role === role,
                       )!;
                       setDraft({
                         ...draft,
@@ -706,28 +705,16 @@ export function AgentsManager() {
                         prompt: preset.prompt,
                       });
                     }}
-                  >
-                    {presets.map((preset) => (
-                      <option key={preset.role}>{preset.role}</option>
-                    ))}
-                  </select>
+                  />
                 </div>
                 <div className="space-y-2">
                   <Label htmlFor="agent-stage">Stage</Label>
-                  <select
+                  <Picker
                     id="agent-stage"
-                    className={selectClass}
                     value={draft.stage}
-                    onChange={(event) =>
-                      setDraft({ ...draft, stage: event.target.value as Stage })
-                    }
-                  >
-                    {stages.map((stage) => (
-                      <option key={stage.id} value={stage.id}>
-                        {stage.name}
-                      </option>
-                    ))}
-                  </select>
+                    options={stages.map((stage) => ({ value: stage.id, label: stage.name }))}
+                    onChange={(stage) => setDraft({ ...draft, stage: stage as Stage })}
+                  />
                 </div>
                 <div className="space-y-2">
                   <Label htmlFor="agent-profile">Hermes profile</Label>
@@ -756,22 +743,20 @@ export function AgentsManager() {
               </div>
               <div className="space-y-2">
                 <Label htmlFor="agent-model">Model</Label>
-                <Input
+                <ModelPicker
                   id="agent-model"
-                  list="agent-model-options"
-                  maxLength={160}
                   value={draft.model}
-                  placeholder="Hermes default"
-                  onChange={(event) =>
-                    setDraft({ ...draft, model: event.target.value })
+                  options={modelOptions}
+                  status={
+                    hermesModels.source === "live"
+                      ? "ready"
+                      : hermesModels.source === "loading" && !unsavedEndpoint
+                        ? "loading"
+                        : "unavailable"
                   }
-                  aria-describedby="agent-model-help"
+                  onChange={(model) => setDraft({ ...draft, model: model.slice(0, 160) })}
+                  describedBy="agent-model-help"
                 />
-                <datalist id="agent-model-options">
-                  {modelOptions.map((model) => (
-                    <option key={model.id} value={model.id} label={model.providerName} />
-                  ))}
-                </datalist>
                 <p
                   id="agent-model-help"
                   className="text-xs text-muted-foreground"

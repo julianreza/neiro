@@ -150,6 +150,8 @@ export type MissionTask = TaskRouting & {
   runStartedAt: string | null;
   /** Output of the completed coding run. */
   resultOutput: string | null;
+  /** Hermes session of the task's coding runs; reused on every retry. */
+  sessionId: string | null;
   createdAt?: string;
   updatedAt?: string;
 };

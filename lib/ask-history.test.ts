@@ -6,7 +6,22 @@ import {
   isMissingAskTable,
   mapAskRow,
   splitAnswerFiles,
+  walkToRoot,
 } from "./ask-history";
+
+const parents = (map: Record<string, string>) => async (id: string) => map[id] ?? null;
+
+test("a follow-up of a follow-up still reaches the chat's first run", async () => {
+  assert.equal(await walkToRoot("run_c", parents({ run_c: "run_b", run_b: "run_a" })), "run_a");
+});
+
+test("the first run is its own chat session", async () => {
+  assert.equal(await walkToRoot("run_a", parents({})), "run_a");
+});
+
+test("a loop in the links does not hang", async () => {
+  assert.equal(await walkToRoot("run_a", parents({ run_a: "run_b", run_b: "run_a" })), "run_b");
+});
 
 test("a run still going saves nothing", () => {
   assert.equal(askStatusFromRun("running"), null);

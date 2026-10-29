@@ -43,12 +43,14 @@ import {
 import type {
   Agent,
   AgentStage,
+  MissionArtifact,
   MissionDetailDTO,
   MissionPhase,
   MissionTask,
   TaskStage,
 } from "@/lib/types";
 import { budgetBlock } from "@/lib/budget";
+import { nextPrdVersion, prdKey, prdNotesFor, prdTitle, prdVersions } from "@/lib/prd";
 import { safeNotify, shortHash } from "@/lib/notifications";
 import type { Notifier } from "@/lib/notifications";
 import { supabaseNotifier } from "@/lib/notifications-store";
@@ -357,7 +359,21 @@ function planPrompt(m: MissionDetailDTO): string {
 
 function specPrompt(m: MissionDetailDTO): string {
   const tasks = m.tasks.map((t) => ({ taskKey: t.taskKey, title: t.title, description: t.result }));
-  return `Write a Product Requirements Document (PRD) for this mission:\n\nMission Objective: ${m.prompt}\n\nTasks:\n${JSON.stringify(tasks, null, 2)}`;
+  const base = `Write a Product Requirements Document (PRD) for this mission:\n\nMission Objective: ${m.prompt}\n\nTasks:\n${JSON.stringify(tasks, null, 2)}`;
+  const version = nextPrdVersion(m.artifacts, m.id);
+  if (version <= 1) return base;
+  const previous = prdVersions(m.artifacts, m.id).find((v) => v.version === version - 1);
+  const notes = prdNotesFor(m.artifacts, m.id, version - 1);
+  return [
+    base,
+    "",
+    `The operator reviewed PRD v${version - 1} and asked for changes.`,
+    `Write the complete PRD v${version}: keep what is fine, fix every note below.`,
+    "",
+    `Operator notes:\n${notes?.content ?? "(none)"}`,
+    "",
+    `PRD v${version - 1}:\n${truncateMiddle(previous?.artifact.content ?? "", MAX_PROMPT_CONTEXT_CHARS)}`,
+  ].join("\n");
 }
 
 async function stepMissionRun(m: MissionDetailDTO, d: OrchestratorDeps, ctx: PassContext) {
@@ -468,12 +484,14 @@ async function stepMissionRun(m: MissionDetailDTO, d: OrchestratorDeps, ctx: Pas
     return;
   }
 
+  // A revision writes the next version; v1 and earlier versions stay.
+  const version = nextPrdVersion(m.artifacts, m.id);
   await d.store.insertArtifactOnce({
     missionId: m.id,
-    title: "Product Requirements Document (PRD)",
+    title: prdTitle(version),
     kind: "prd",
     content: output,
-    dedupeKey: `prd:${m.id}`,
+    dedupeKey: prdKey(m.id, version),
   });
   await enterExecuting(m, guard, d);
 }
@@ -659,6 +677,15 @@ async function stepTask(
   }
 
   if (task.stage === "Coding") {
+    // Every attempt's output is kept, so the task chat can show old attempts.
+    await d.store.insertArtifactOnce({
+      missionId: m.id,
+      taskId: task.id,
+      title: `Coding output: ${task.title}`,
+      kind: "coding_output",
+      content: output,
+      dedupeKey: `code:${task.id}:${task.retries}`,
+    });
     await d.store.updateTaskIf(task.id, guard, {
       stage: "QA check",
       resultOutput: output,
@@ -954,6 +981,30 @@ function workspaceLines(m: MissionDetailDTO, stage: "Coding" | "QA check" | "Rev
   return lines;
 }
 
+/**
+ * The QA or review report that rejected the task's previous attempt, or null
+ * on a first attempt (or when that attempt's coding run itself failed).
+ * Reports are keyed by the attempt (`qa:<task>:<retries>`); review only runs
+ * after QA passed, so a review report of that attempt is the rejection.
+ */
+export function lastRejection(m: MissionDetailDTO, task: MissionTask): MissionArtifact | null {
+  if (task.retries < 1) return null;
+  const attempt = task.retries - 1;
+  const byKey = (key: string) => m.artifacts.find((a) => a.dedupeKey === key) ?? null;
+  return byKey(`review:${task.id}:${attempt}`) ?? byKey(`qa:${task.id}:${attempt}`);
+}
+
+function rejectionLines(m: MissionDetailDTO, task: MissionTask): string[] {
+  const report = lastRejection(m, task);
+  if (!report) return [];
+  const gate = report.kind === "review_report" ? "Final review" : "QA";
+  return [
+    "",
+    `Your previous attempt was rejected by ${gate}. Fix every issue in this report:`,
+    truncateMiddle(report.content, MAX_PROMPT_CONTEXT_CHARS),
+  ];
+}
+
 function taskPrompt(m: MissionDetailDTO, task: MissionTask): string {
   const deliverable = truncateMiddle(task.resultOutput ?? "", MAX_PROMPT_CONTEXT_CHARS);
   switch (task.stage) {
@@ -963,6 +1014,7 @@ function taskPrompt(m: MissionDetailDTO, task: MissionTask): string {
         `Title: ${task.title}`,
         `Requirements: ${task.result || task.title}`,
         ...workspaceLines(m, "Coding"),
+        ...rejectionLines(m, task),
       ]
         .filter(Boolean)
         .join("\n");
@@ -1033,12 +1085,23 @@ async function startTaskRun(
     return;
   }
 
+  // One task = one Hermes session: a retry continues the earlier attempt.
   let sessionId: string | undefined;
   if (task.stage === "Coding") {
-    try {
-      sessionId = await d.hermes.createSession(agent, `Task: ${task.title}`);
-    } catch {
-      sessionId = undefined; // runs work without a session
+    sessionId = task.sessionId ?? undefined;
+    if (!sessionId) {
+      try {
+        sessionId = await d.hermes.createSession(agent, `Task: ${task.title}`);
+      } catch {
+        sessionId = undefined; // runs work without a session
+      }
+      if (sessionId) {
+        try {
+          await d.store.updateTaskIf(task.id, claimGuard, { sessionId });
+        } catch {
+          // session_id column not migrated yet: this attempt still runs in it.
+        }
+      }
     }
   }
 

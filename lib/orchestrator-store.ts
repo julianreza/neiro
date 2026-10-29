@@ -53,6 +53,7 @@ export type TaskPatch = Partial<
     tokens: number;
     retries: number;
     resultOutput: string | null;
+    sessionId: string | null;
   }
 >;
 
@@ -203,6 +204,7 @@ export function mapTaskRow(row: Row): MissionTask {
     runAgentId: str(row.run_agent_id),
     runStartedAt: str(row.run_started_at),
     resultOutput: str(row.result_output),
+    sessionId: str(row.session_id),
     ...mapRouting(row),
     createdAt: str(row.created_at) ?? undefined,
     updatedAt: str(row.updated_at) ?? undefined,
@@ -244,6 +246,7 @@ function taskPatchToRow(patch: TaskPatch): Row {
   if (patch.tokens !== undefined) row.tokens = patch.tokens;
   if (patch.retries !== undefined) row.retries = patch.retries;
   if (patch.resultOutput !== undefined) row.result_output = patch.resultOutput;
+  if (patch.sessionId !== undefined) row.session_id = patch.sessionId;
   if (patch.routingStatus !== undefined) row.routing_status = patch.routingStatus;
   if (patch.layaAgentId !== undefined) row.laya_agent_id = patch.layaAgentId;
   if (patch.humanAgentId !== undefined) row.human_agent_id = patch.humanAgentId;

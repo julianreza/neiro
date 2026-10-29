@@ -104,6 +104,7 @@ export class MemoryStore implements OrchestratorStore {
       runAgentId: null,
       runStartedAt: null,
       resultOutput: null,
+      sessionId: null,
       routingStatus: null,
       layaAgentId: null,
       humanAgentId: null,

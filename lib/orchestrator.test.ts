@@ -186,3 +186,123 @@ test("F5: max_parallel_workers caps concurrently running tasks", async () => {
   assert.equal(coding.length, 1);
   assert.equal(hermes.startsWithKeyPrefix("code-").length, 1);
 });
+
+test("one task = one Hermes session: a retry after failed QA reuses the coding session", async () => {
+  const { store, hermes, deps } = setup();
+  store.seedAgent("workers");
+  store.seedAgent("qa");
+  const mission = store.seedMission({ phase: "executing", maxRetries: 2 });
+  const task = store.seedTask(mission.id, { taskKey: "T1" });
+
+  await advanceMission(mission.id, deps);
+  const first = hermes.startsWithKeyPrefix("code-");
+  assert.equal(first.length, 1);
+  assert.equal(first[0].sessionId, "session-1");
+  assert.equal(store.tasks.get(task.id)!.sessionId, "session-1");
+
+  // Coding passes, QA fails: the task goes back to Queued for a retry.
+  hermes.setRun(first[0].runId, { status: "completed", output: "done" });
+  await advanceMission(mission.id, deps);
+  await advanceMission(mission.id, deps);
+  const qa = hermes.startsWithKeyPrefix("qa-");
+  assert.equal(qa.length, 1);
+  assert.equal(qa[0].sessionId, undefined);
+  hermes.setRun(qa[0].runId, { status: "completed", output: "Login button is missing.\nVERDICT: FAIL" });
+  await advanceMission(mission.id, deps);
+  assert.equal(store.tasks.get(task.id)!.retries, 1);
+  const saved = store.artifactsOf(mission.id, "coding_output");
+  assert.deepEqual(saved.map((a) => [a.dedupeKey, a.content, a.taskId]), [[`code:${task.id}:0`, "done", task.id]]);
+
+  await advanceMission(mission.id, deps);
+  const coding = hermes.startsWithKeyPrefix("code-");
+  assert.equal(coding.length, 2);
+  assert.equal(coding[1].sessionId, "session-1");
+  assert.equal(hermes.sessionsCreated, 1);
+
+  // The retry is told why QA rejected it; the first attempt was not.
+  assert.doesNotMatch(coding[0].prompt, /rejected/);
+  assert.match(coding[1].prompt, /rejected by QA/);
+  assert.match(coding[1].prompt, /Login button is missing\./);
+});
+
+test("a retry after CHANGES_REQUESTED sends the review report, not the passed QA report", async () => {
+  const { store, hermes, deps } = setup();
+  store.seedAgent("workers");
+  store.seedAgent("reviewer");
+  const mission = store.seedMission({ phase: "executing", maxRetries: 2 });
+  const task = store.seedTask(mission.id, {
+    taskKey: "T1",
+    stage: "Final review",
+    runId: "run-review",
+    runAgentId: "reviewer-agent",
+    resultOutput: "done",
+  });
+  store.artifacts.push({
+    id: "a-qa",
+    missionId: mission.id,
+    taskId: task.id,
+    title: "QA Report",
+    kind: "qa_report",
+    content: "All good.\nVERDICT: PASS",
+    dedupeKey: `qa:${task.id}:0`,
+  });
+  hermes.setRun("run-review", {
+    status: "completed",
+    output: "XSS in the search box.\nVERDICT: CHANGES_REQUESTED",
+  });
+
+  await advanceMission(mission.id, deps);
+  assert.equal(store.tasks.get(task.id)!.retries, 1);
+  await advanceMission(mission.id, deps);
+
+  const coding = hermes.startsWithKeyPrefix("code-");
+  assert.equal(coding.length, 1);
+  assert.match(coding[0].prompt, /rejected by Final review/);
+  assert.match(coding[0].prompt, /XSS in the search box\./);
+  assert.doesNotMatch(coding[0].prompt, /All good/);
+});
+
+test("PRD revision: notes on v1 make the spec run write v2 with the notes, then pause again", async () => {
+  const { store, hermes, deps } = setup();
+  store.seedAgent("spec");
+  const mission = store.seedMission({ phase: "spec", pauseAfterPlanning: true });
+  store.seedTask(mission.id, { taskKey: "T1", title: "Build API" });
+
+  // v1
+  await advanceMission(mission.id, deps);
+  const first = hermes.startsWithKeyPrefix("spec-");
+  assert.equal(first.length, 1);
+  assert.doesNotMatch(first[0].prompt, /Operator notes/);
+  hermes.setRun(first[0].runId, { status: "completed", output: "# PRD\nForm shows an error" });
+  await advanceMission(mission.id, deps);
+  assert.equal(store.missions.get(mission.id)!.status, "awaiting_plan_approval");
+  assert.deepEqual(store.artifactsOf(mission.id, "prd").map((a) => a.dedupeKey), [`prd:${mission.id}`]);
+
+  // The operator sends notes (what the revise_prd action writes).
+  store.artifacts.push({
+    id: "notes-1",
+    missionId: mission.id,
+    title: "PRD v1 review notes",
+    kind: "prd_notes",
+    content: '1. On "Form shows an error":\n   Say which text',
+    dedupeKey: `prd-notes:${mission.id}:v1`,
+  });
+  Object.assign(store.missions.get(mission.id)!, { status: "running", phase: "spec", runId: null });
+
+  await advanceMission(mission.id, deps);
+  const second = hermes.startsWithKeyPrefix("spec-");
+  assert.equal(second.length, 2);
+  assert.match(second[1].prompt, /complete PRD v2/);
+  assert.match(second[1].prompt, /Say which text/);
+  assert.match(second[1].prompt, /PRD v1:\n# PRD\nForm shows an error/);
+
+  hermes.setRun(second[1].runId, { status: "completed", output: "# PRD\nForm shows \"Wrong password\"" });
+  await Promise.all([advanceMission(mission.id, deps), advanceMission(mission.id, deps)]);
+  const prds = store.artifactsOf(mission.id, "prd");
+  assert.deepEqual(prds.map((a) => a.dedupeKey), [`prd:${mission.id}`, `prd:${mission.id}:v2`]);
+  assert.equal(prds[1].title, "Product Requirements Document (PRD) v2");
+  assert.equal(prds[0].content, "# PRD\nForm shows an error");
+  const after = store.missions.get(mission.id)!;
+  assert.equal(after.status, "awaiting_plan_approval");
+  assert.equal(after.phase, "executing");
+});

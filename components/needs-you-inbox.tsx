@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
 import { CheckCircle2, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Picker } from "@/components/ui/picker";
 import { Input } from "@/components/ui/input";
 import { useRole } from "@/hooks/use-role";
 import { missionHref, sendJson, timeAgo } from "@/lib/client-api";
@@ -238,22 +239,18 @@ function NeedsYouRow({
         )}
         {canAct && item.kind === "pick_agent" && (
           <>
-            <label className="sr-only" htmlFor={`agent-${item.taskId}`}>
-              Agent for {subject}
-            </label>
-            <select
+            <Picker
               id={`agent-${item.taskId}`}
-              className="h-8 rounded-lg border border-input bg-background px-2 text-sm"
+              size="sm"
+              aria-label={`Agent for ${subject}`}
               value={pickId}
-              onChange={(e) => setAgentId(e.target.value)}
-            >
-              {agents.map((a) => (
-                <option key={a.id} value={a.id}>
-                  {a.name}
-                  {a.id === item.suggestedAgentId ? " (Laya's pick)" : ""}
-                </option>
-              ))}
-            </select>
+              onChange={setAgentId}
+              options={agents.map((a) => ({
+                value: a.id,
+                label: a.name,
+                hint: a.id === item.suggestedAgentId ? "Laya's pick" : undefined,
+              }))}
+            />
             <Button size="sm" disabled={busy || !pickId} onClick={() => onAssign(pickId)}>
               Assign
             </Button>

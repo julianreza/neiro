@@ -101,7 +101,7 @@ async function bestEffort(label: string, write: PromiseLike<{ error: { message: 
   }
 }
 
-export function recordAskStart(
+export async function recordAskStart(
   supabase: SupabaseClient,
   row: {
     id: string;
@@ -110,20 +110,30 @@ export function recordAskStart(
     question: string;
     workspacePath: string;
     followUpOf?: string;
+    /** The chat's Hermes session. A new chat's session is its own run id. */
+    sessionId?: string;
   },
 ) {
-  return bestEffort(
-    "save question",
-    supabase.from(ASK_TABLE).upsert({
-      id: row.id,
-      agent_id: row.agentId,
-      agent_name: row.agentName,
-      question: row.question,
-      workspace_path: row.workspacePath,
-      follow_up_of: row.followUpOf ?? null,
-      status: "running",
-    }),
-  );
+  const base = {
+    id: row.id,
+    agent_id: row.agentId,
+    agent_name: row.agentName,
+    question: row.question,
+    workspace_path: row.workspacePath,
+    follow_up_of: row.followUpOf ?? null,
+    status: "running",
+  };
+  const first = await Promise.resolve(
+    supabase.from(ASK_TABLE).upsert({ ...base, session_id: row.sessionId ?? row.id }),
+  ).catch((err: unknown) => ({ error: { message: String(err) } }));
+  const { error } = first;
+  if (!error) return;
+  // Before 20261029000300_ask_session.sql is applied the column is missing:
+  // save the question without it rather than lose it.
+  if (error.message.includes("session_id")) {
+    return bestEffort("save question", supabase.from(ASK_TABLE).upsert(base));
+  }
+  console.warn("[ask-history] save question failed:", error.message);
 }
 
 /** Saves the answer once the run ends. Only a still-running row is changed. */
@@ -139,6 +149,55 @@ export async function recordAskResult(
     supabase.from(ASK_TABLE).update(update).eq("id", runId).eq("status", "running"),
   );
   return update;
+}
+
+/**
+ * Follows `followUpOf` links back to the chat's first question. `parentOf`
+ * gives a run's parent, or null at the root. Stops on a loop or after
+ * `maxHops`, returning the furthest run reached.
+ */
+export async function walkToRoot(
+  start: string,
+  parentOf: (id: string) => Promise<string | null>,
+  maxHops = 100,
+): Promise<string> {
+  const seen = new Set([start]);
+  let at = start;
+  for (let hop = 0; hop < maxHops; hop++) {
+    const parent = await parentOf(at);
+    if (!parent || seen.has(parent)) break;
+    seen.add(parent);
+    at = parent;
+  }
+  return at;
+}
+
+/**
+ * The Hermes session of a chat. A run started without a session gets a
+ * session named after its own run id, so a chat's session is the id of its
+ * first question. Every follow-up must send that id, not the latest run's,
+ * or Hermes opens a fresh session and forgets the chat.
+ *
+ * Reads the stored `session_id` first. Rows saved before that column existed
+ * fall back to walking `follow_up_of`.
+ */
+export async function chatSessionId(supabase: SupabaseClient, runId: string) {
+  const { data, error } = await supabase
+    .from(ASK_TABLE)
+    .select("session_id")
+    .eq("id", runId)
+    .maybeSingle();
+  if (!error && typeof data?.session_id === "string" && data.session_id) return data.session_id;
+
+  return walkToRoot(runId, async (id) => {
+    const { data, error } = await supabase
+      .from(ASK_TABLE)
+      .select("follow_up_of")
+      .eq("id", id)
+      .maybeSingle();
+    if (error || !data) return null;
+    return typeof data.follow_up_of === "string" ? data.follow_up_of : null;
+  });
 }
 
 export function recordAskStopped(supabase: SupabaseClient, runId: string) {

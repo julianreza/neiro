@@ -20,6 +20,7 @@ export type RecordedStart = {
   runId: string;
   idempotencyKey?: string;
   prompt: string;
+  sessionId?: string;
 };
 
 export class FakeHermes implements HermesClient {
@@ -40,7 +41,13 @@ export class FakeHermes implements HermesClient {
     const runId = `run-${++this.seq}`;
     if (key) this.byKey.set(key, runId);
     this.runs.set(runId, { run_id: runId, status: "running" });
-    this.starts.push({ agentId: agent.id, runId, idempotencyKey: key, prompt: input.prompt });
+    this.starts.push({
+      agentId: agent.id,
+      runId,
+      idempotencyKey: key,
+      prompt: input.prompt,
+      sessionId: input.sessionId,
+    });
     return { kind: "started", runId };
   };
 
@@ -51,9 +58,11 @@ export class FakeHermes implements HermesClient {
     );
   };
 
+  sessionsCreated = 0;
+
   createSession = async (): Promise<string> => {
     await yieldTick();
-    return "session-test";
+    return `session-${++this.sessionsCreated}`;
   };
 
   /** Create or update a run's status/output, e.g. to complete it. */

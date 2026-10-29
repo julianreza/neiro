@@ -42,6 +42,11 @@ export function projectHref(projectId: string, opts: { mission?: string; compose
   return `/projects/${encodeURIComponent(projectId)}${query ? `?${query}` : ""}`;
 }
 
+/** PRD review page of one mission. */
+export function prdHref(projectId: string, missionId: string): string {
+  return `/projects/${encodeURIComponent(projectId)}/missions/${encodeURIComponent(missionId)}/prd`;
+}
+
 /** "2 min ago", "3 h ago", "26 Oct". */
 export function timeAgo(iso: string | null | undefined, now = Date.now()): string {
   if (!iso) return "";

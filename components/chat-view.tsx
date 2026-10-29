@@ -6,6 +6,7 @@ import remarkGfm from "remark-gfm";
 import { ChevronRight, FolderGit2, Loader2, MessagesSquare, Plus, Send } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
+import { Picker } from "@/components/ui/picker";
 import { Textarea } from "@/components/ui/textarea";
 import { AgentBot, agentLook, roleForAgent } from "@/components/agent-bot";
 import { useRole } from "@/hooks/use-role";
@@ -252,19 +253,13 @@ export function ChatView() {
               />
               <div className="flex flex-wrap items-center justify-between gap-2">
                 {isNew ? (
-                  <select
-                    className="chat-project"
+                  <Picker
+                    size="sm"
                     value={newProject}
-                    onChange={(event) => setNewProject(event.target.value)}
+                    onChange={setNewProject}
                     aria-label="Project"
-                  >
-                    <option value="">No folder</option>
-                    {projects.map((p) => (
-                      <option key={p.id} value={p.id}>
-                        {p.name}
-                      </option>
-                    ))}
-                  </select>
+                    options={[{ value: "", label: "No folder" }, ...projects.map((p) => ({ value: p.id, label: p.name }))]}
+                  />
                 ) : (
                   <span className="text-xs text-muted-foreground">⌘ / Ctrl + Enter</span>
                 )}
