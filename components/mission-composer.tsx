@@ -12,6 +12,7 @@ import {
   Square,
   Timer,
   Wrench,
+  X,
   Zap,
   type LucideIcon,
 } from "lucide-react";
@@ -22,7 +23,7 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { FolderPicker, rememberFolder } from "@/components/folder-picker";
 import { BotRig, agentLook } from "@/components/agent-bot";
-import { splitAnswerFiles } from "@/lib/ask-history";
+import { askContextBrief, splitAnswerFiles, type AskTurn } from "@/lib/ask-history";
 
 export type ComposerMode = "ask" | "build" | "fix" | "plan";
 
@@ -148,7 +149,8 @@ export function MissionComposer({
   inputRef: RefObject<HTMLTextAreaElement | null>;
   isLive: boolean;
   launching: boolean;
-  onLaunch: (mode: Exclude<ComposerMode, "ask">) => void;
+  /** `context` is the Ask thread the mission came from, if any. */
+  onLaunch: (mode: Exclude<ComposerMode, "ask">, context?: string) => void;
   /** Mission-only options, shown behind "Advanced options". */
   advanced: ReactNode;
   /** The folder is the project's: show it, but don't let it change. */
@@ -158,6 +160,11 @@ export function MissionComposer({
 }) {
   const [mode, setMode] = useState<ComposerMode>("ask");
   const [ask, setAsk] = useState<AskState>({ phase: "idle" });
+  // Earlier turns of this Ask thread; the current one lives in `ask`.
+  const [thread, setThread] = useState<AskTurn[]>([]);
+  // Ask thread a mission was turned from; sent with the mission prompt.
+  const [carried, setCarried] = useState("");
+  const wasLaunching = useRef(false);
   const [startingAsk, setStartingAsk] = useState(false);
   const [now, setNow] = useState(0);
   const askRequest = useRef(false);
@@ -191,6 +198,12 @@ export function MissionComposer({
     // Only on first mount: later edits belong to the user.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // The parent empties the prompt once a mission is created: the context is used up.
+  useEffect(() => {
+    if (wasLaunching.current && !launching && !prompt.trim()) setCarried("");
+    wasLaunching.current = launching;
+  }, [launching, prompt]);
 
   // Elapsed time while a question runs.
   useEffect(() => {
@@ -282,6 +295,9 @@ export function MissionComposer({
         return;
       }
       rememberWorkspace(workspace);
+      setThread((turns) =>
+        followUp && ask.phase === "done" ? [...turns, { question: ask.question, answer: ask.output }] : [],
+      );
       setAsk({
         phase: "running",
         question: question.trim(),
@@ -325,7 +341,7 @@ export function MissionComposer({
       return;
     }
     rememberWorkspace(workspace);
-    onLaunch(mode);
+    onLaunch(mode, carried || undefined);
   }
 
   const blocked = !isLive
@@ -397,6 +413,23 @@ export function MissionComposer({
               className="resize-y text-base md:text-sm"
               maxLength={20000}
             />
+            {mode !== "ask" && carried && (
+              <p className="mt-3 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                <span className="folder-chip">
+                  <MessageCircleQuestionMark className="size-3.5 shrink-0" aria-hidden="true" />
+                  <span className="font-semibold">Q&amp;A attached</span>
+                  <button
+                    type="button"
+                    className="-mr-1 rounded-sm p-0.5 hover:text-foreground"
+                    aria-label="Remove the attached question and answer"
+                    onClick={() => setCarried("")}
+                  >
+                    <X className="size-3.5" aria-hidden="true" />
+                  </button>
+                </span>
+                The mission reads your question and answer above.
+              </p>
+            )}
             <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t pt-3">
               {folderLocked ? (
                 <span className="folder-chip" title={workspace}>
@@ -533,6 +566,9 @@ export function MissionComposer({
                       className="min-h-10"
                       onClick={() => {
                         setMode("build");
+                        setCarried(
+                          askContextBrief([...thread, { question: ask.question, answer: ask.output }]),
+                        );
                         onPromptChange(ask.question);
                         inputRef.current?.focus();
                       }}

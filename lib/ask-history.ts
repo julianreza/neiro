@@ -35,6 +35,36 @@ export function splitAnswerFiles(output: string): { body: string; files: string[
   return { body: output.slice(0, match.index).trim(), files };
 }
 
+/** One finished question and its answer, from the composer's Ask thread. */
+export type AskTurn = { question: string; answer: string };
+
+const CONTEXT_LIMIT = 12000;
+
+/**
+ * The Ask thread as a block a mission prompt can carry, so an objective like
+ * "do number 1" still knows what "number 1" was. Newest turns win the limit.
+ */
+export function askContextBrief(turns: AskTurn[]): string {
+  const blocks = turns
+    .map((t) => ({ q: t.question.trim(), a: splitAnswerFiles(t.answer).body }))
+    .filter((t) => t.q || t.a)
+    .map((t, i) => `Question ${i + 1}:\n${t.q}\n\nAnswer ${i + 1}:\n${t.a || "(no answer)"}`);
+  const kept: string[] = [];
+  let size = 0;
+  for (let i = blocks.length - 1; i >= 0; i--) {
+    if (kept.length && size + blocks[i].length > CONTEXT_LIMIT) break;
+    kept.unshift(blocks[i].slice(0, CONTEXT_LIMIT));
+    size += blocks[i].length;
+  }
+  if (!kept.length) return "";
+  return [
+    "Context: this mission comes from an earlier question in Ask mode.",
+    "Read it to understand the objective (for example, which numbered item it means).",
+    "",
+    kept.join("\n\n---\n\n"),
+  ].join("\n");
+}
+
 const ASK_STATUSES = new Set<AskStatus>(["running", "completed", "failed", "stopped"]);
 const FAILED_RUN = new Set(["failed", "cancelled", "canceled", "expired_404"]);
 

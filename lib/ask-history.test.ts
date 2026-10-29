@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  askContextBrief,
   askResultUpdate,
   askStatusFromRun,
   isMissingAskTable,
@@ -75,4 +76,19 @@ test("splits the Files read line off the answer", () => {
 
 test("drops a 'none' Files read line instead of showing it as a file", () => {
   assert.deepEqual(splitAnswerFiles("mantap\n\nFiles read: none"), { body: "mantap", files: [] });
+});
+
+test("the mission context carries every Ask turn, without the files line", () => {
+  const brief = askContextBrief([
+    { question: "What should we do next?", answer: "1. Add login\n2. Add search\n\nFiles read: app/page.tsx" },
+    { question: "Which is first?", answer: "Number 1." },
+  ]);
+  assert.match(brief, /Question 1:\nWhat should we do next\?/);
+  assert.match(brief, /1\. Add login/);
+  assert.match(brief, /Question 2:\nWhich is first\?/);
+  assert.doesNotMatch(brief, /Files read/);
+});
+
+test("no Ask turns means no mission context", () => {
+  assert.equal(askContextBrief([]), "");
 });

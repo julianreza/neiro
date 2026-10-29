@@ -40,19 +40,20 @@ export function ProjectComposer({
   const [tokenBudget, setTokenBudget] = useState("");
   const [launching, setLaunching] = useState(false);
 
-  async function launch(mode: "build" | "fix" | "plan" = "build") {
+  async function launch(mode: "build" | "fix" | "plan" = "build", context?: string) {
     if (!prompt.trim()) {
       input.current?.focus();
       toast.error("Describe the mission objective first");
       return;
     }
     const objective = prompt.trim();
-    const brief =
+    const task =
       mode === "fix"
         ? `Bug fix. First reproduce the problem and find the root cause, then fix it and prove the fix.\n\nBug report:\n${objective}`
         : mode === "plan"
           ? `Quick plan. Keep the plan and the spec short: the goal and a small task list.\n\nGoal:\n${objective}`
           : objective;
+    const brief = context ? `${task}\n\n${context}` : task;
     const pauseForPlan = mode === "plan" || pause;
     setLaunching(true);
     try {

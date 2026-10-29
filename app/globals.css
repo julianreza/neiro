@@ -4351,8 +4351,31 @@ a.story-bubble:focus-visible,
   background: var(--card);
   box-shadow: var(--neu-raise, 0 10px 30px -10px var(--surface-shadow));
 }
-.chat-list { display: grid; gap: 0.75rem; padding: 0.625rem; }
-.chat-list ul { display: grid; gap: 0.25rem; }
+/* minmax(0, 1fr) + min-width: 0 keep a long one-line chat title from widening
+   the column past the card (the title truncates with … instead). */
+.chat-layout { grid-template-columns: 17rem minmax(0, 1fr); }
+.chat-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  padding: 0.75rem;
+  overflow: hidden;
+  box-sizing: border-box;
+}
+.chat-list > *,
+.chat-list section,
+.chat-list ul,
+.chat-list li { min-width: 0; max-width: 100%; }
+.chat-list ul { display: flex; flex-direction: column; gap: 0.25rem; }
+.chat-list > [data-slot="button"] { width: 100%; max-width: 100%; flex: none; box-sizing: border-box; }
+.chat-item { overflow: hidden; max-width: 100%; box-sizing: border-box; }
+.chat-item > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-pane { min-width: 0; overflow: hidden; }
+.chat-pane-head { min-width: 0; }
+.chat-pane-head h2 { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .chat-group {
   border-radius: 16px;
   box-shadow: var(--neu-inset-sm);
