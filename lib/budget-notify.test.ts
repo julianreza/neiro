@@ -152,5 +152,5 @@ test("webhook payload carries a Slack-style text with a link", () => {
     { kind: "mission_completed", missionId: "m 1", title: "Done", body: "All good", dedupeKey: "k" },
     "https://neiro.example/"
   );
-  assert.equal(body.text, "Done\nAll good\nhttps://neiro.example/?mission=m%201");
+  assert.equal(body.text, "Done\nAll good\nhttps://neiro.example/missions/m%201");
 });

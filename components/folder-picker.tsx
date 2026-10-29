@@ -82,25 +82,34 @@ async function post<T>(url: string, body: unknown): Promise<{ ok: true; data: T 
   }
 }
 
-/** Project folder for a mission or question: recent folders, a folder browser, or a fresh clone. */
-export function FolderPicker({
-  value,
-  onChange,
+export type FolderSource = "folder" | "clone";
+
+/**
+ * The folder browser and git-clone dialog. `open(kind, from)` shows it;
+ * `element` must be rendered. `onPicked` may return an error message, which
+ * keeps the dialog open and shows the message.
+ */
+export function useFolderDialog({
+  onPicked,
+  folderAction = "Use this folder",
+  cloneAction = "Clone here",
+  folderTitle = "Choose a project folder",
 }: {
-  value: string;
-  onChange: (path: string) => void;
+  onPicked: (path: string, source: FolderSource) => void | string | Promise<void | string>;
+  folderAction?: string;
+  cloneAction?: string;
+  folderTitle?: string;
 }) {
-  const [recent, setRecent] = useState<string[]>([]);
   const [home, setHome] = useState<string | null>(null);
-  const [dialog, setDialog] = useState<"folder" | "clone" | null>(null);
+  const [dialog, setDialog] = useState<FolderSource | null>(null);
   const [listing, setListing] = useState<Listing | null>(null);
   const [loading, setLoading] = useState(false);
   const [browseError, setBrowseError] = useState("");
   const [url, setUrl] = useState("");
   const [name, setName] = useState("");
   const [nameTouched, setNameTouched] = useState(false);
-  const [cloning, setCloning] = useState(false);
-  const [cloneError, setCloneError] = useState("");
+  const [working, setWorking] = useState(false);
+  const [pickError, setPickError] = useState("");
 
   async function browse(path?: string, fallbackToHome = false) {
     setLoading(true);
@@ -118,39 +127,44 @@ export function FolderPicker({
     setHome(res.data.home);
   }
 
-  function open(kind: "folder" | "clone") {
+  function open(kind: FolderSource, from?: string) {
     setDialog(kind);
-    setCloneError("");
-    const start = kind === "clone" && value ? value.replace(/\/+$/, "").split("/").slice(0, -1).join("/") : value;
-    browse(start || undefined, true);
+    setPickError("");
+    browse(from || undefined, true);
   }
 
-  function pick(path: string) {
-    onChange(path);
-    rememberFolder(path);
-    setRecent(readRecentFolders());
+  async function finish(path: string, source: FolderSource) {
+    setWorking(true);
+    const error = await onPicked(path, source);
+    setWorking(false);
+    if (typeof error === "string" && error) {
+      setPickError(error);
+      return;
+    }
+    setDialog(null);
+    if (source === "clone") {
+      setUrl("");
+      setName("");
+      setNameTouched(false);
+    }
   }
 
   async function clone() {
     if (!listing) return;
-    setCloning(true);
-    setCloneError("");
+    setWorking(true);
+    setPickError("");
     const res = await post<{ path: string; name: string }>("/api/folders/clone", {
       url: url.trim(),
       parent: listing.path,
       name: name.trim() || undefined,
     });
-    setCloning(false);
+    setWorking(false);
     if (!res.ok) {
-      setCloneError(res.error);
+      setPickError(res.error);
       return;
     }
-    pick(res.data.path);
-    setDialog(null);
-    setUrl("");
-    setName("");
-    setNameTouched(false);
     toast.success(`Cloned ${res.data.name}`);
+    await finish(res.data.path, "clone");
   }
 
   const crumbs = listing
@@ -163,6 +177,168 @@ export function FolderPicker({
       })()
     : [];
   const cloneName = (nameTouched ? name : repoName(url)).trim();
+
+  const element = (
+    <Dialog open={dialog !== null} onOpenChange={(isOpen) => !isOpen && setDialog(null)}>
+      <DialogContent className="sm:max-w-lg">
+        <DialogHeader>
+          <DialogTitle>{dialog === "clone" ? "Clone a repo" : folderTitle}</DialogTitle>
+          <DialogDescription>
+            {dialog === "clone"
+              ? "Neiro runs git clone on this machine, into the folder you open below."
+              : "Open the folder of the project. Folders on the machine running Neiro."}
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="folder-tabs" role="tablist" aria-label="Folder source">
+          {(["folder", "clone"] as const).map((kind) => (
+            <button
+              key={kind}
+              type="button"
+              role="tab"
+              aria-selected={dialog === kind}
+              onClick={() => {
+                setDialog(kind);
+                setPickError("");
+              }}
+            >
+              {kind === "folder" ? <Folder className="size-3.5" /> : <GitBranch className="size-3.5" />}
+              {kind === "folder" ? "Choose folder" : "Clone a repo"}
+            </button>
+          ))}
+        </div>
+
+        {dialog === "clone" && (
+          <div className="space-y-2">
+            <Label htmlFor="clone-url">Repository URL</Label>
+            <Input
+              id="clone-url"
+              value={url}
+              onChange={(event) => setUrl(event.target.value)}
+              placeholder="https://github.com/owner/repo.git"
+              autoCapitalize="off"
+              autoCorrect="off"
+              spellCheck={false}
+              className="font-mono text-sm"
+            />
+            <Label htmlFor="clone-name" className="pt-1">
+              Folder name
+            </Label>
+            <Input
+              id="clone-name"
+              value={nameTouched ? name : repoName(url)}
+              onChange={(event) => {
+                setNameTouched(true);
+                setName(event.target.value);
+              }}
+              placeholder="repo"
+              autoCapitalize="off"
+              autoCorrect="off"
+              spellCheck={false}
+              className="font-mono text-sm"
+            />
+            <p className="pt-1 text-sm font-medium">Put it in</p>
+          </div>
+        )}
+
+        <div className="space-y-2">
+          <nav aria-label="Folder path" className="folder-crumbs">
+            {crumbs.map((crumb, i) => (
+              <span key={crumb.path} className="flex items-center gap-1">
+                {i > 0 && <ChevronRight className="size-3 opacity-60" aria-hidden="true" />}
+                <button
+                  type="button"
+                  onClick={() => browse(crumb.path)}
+                  aria-current={i === crumbs.length - 1 ? "location" : undefined}
+                >
+                  {crumb.label}
+                </button>
+              </span>
+            ))}
+            {loading && <Loader2 className="ml-1 size-3.5 animate-spin" aria-label="Loading" />}
+          </nav>
+          <ul className="folder-list" aria-label="Folders">
+            {listing?.entries.map((entry) => (
+              <li key={entry.path}>
+                <button type="button" onClick={() => browse(entry.path)}>
+                  <Folder className="size-4 shrink-0" aria-hidden="true" />
+                  <span className="truncate">{entry.name}</span>
+                  {entry.git && <span className="folder-git">git</span>}
+                  <ChevronRight className="ml-auto size-3.5 shrink-0 opacity-50" aria-hidden="true" />
+                </button>
+              </li>
+            ))}
+            {listing && listing.entries.length === 0 && (
+              <li className="px-3 py-4 text-sm text-muted-foreground">No folders here.</li>
+            )}
+          </ul>
+          {browseError && (
+            <p role="alert" className="text-sm text-destructive">
+              {browseError}
+            </p>
+          )}
+        </div>
+
+        {dialog === "clone" && listing && cloneName && (
+          <p className="folder-dest">→ {listing.path}/{cloneName}</p>
+        )}
+        {pickError && (
+          <p role="alert" className="text-sm text-destructive">
+            {pickError}
+          </p>
+        )}
+
+        <div className="flex flex-wrap items-center justify-between gap-2 border-t pt-4">
+          <span className="min-w-0 truncate font-mono text-xs text-muted-foreground">
+            {dialog === "folder" && listing
+              ? `${listing.path}${listing.git ? "  ·  git repo" : ""}`
+              : "Private repos use git's login on this machine."}
+          </span>
+          {dialog === "folder" ? (
+            <Button
+              disabled={!listing || loading || working}
+              onClick={() => listing && finish(listing.path, "folder")}
+            >
+              {working ? <Loader2 className="size-4 animate-spin" /> : <Check className="size-4" />}
+              {folderAction}
+            </Button>
+          ) : (
+            <Button disabled={!listing || !url.trim() || !cloneName || working} onClick={clone}>
+              {working ? <Loader2 className="size-4 animate-spin" /> : <GitBranch className="size-4" />}
+              {working ? "Cloning…" : cloneAction}
+            </Button>
+          )}
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+
+  return { open, home, element };
+}
+
+/** Project folder for a mission or question: recent folders, a folder browser, or a fresh clone. */
+export function FolderPicker({
+  value,
+  onChange,
+}: {
+  value: string;
+  onChange: (path: string) => void;
+}) {
+  const [recent, setRecent] = useState<string[]>([]);
+
+  function pick(path: string) {
+    onChange(path);
+    rememberFolder(path);
+    setRecent(readRecentFolders());
+  }
+
+  const folders = useFolderDialog({ onPicked: (path) => pick(path) });
+  const home = folders.home;
+
+  function open(kind: FolderSource) {
+    const start = kind === "clone" && value ? value.replace(/\/+$/, "").split("/").slice(0, -1).join("/") : value;
+    folders.open(kind, start);
+  }
 
   return (
     <>
@@ -208,139 +384,7 @@ export function FolderPicker({
         </DropdownMenuContent>
       </DropdownMenu>
 
-      <Dialog open={dialog !== null} onOpenChange={(isOpen) => !isOpen && setDialog(null)}>
-        <DialogContent className="sm:max-w-lg">
-          <DialogHeader>
-            <DialogTitle>{dialog === "clone" ? "Clone a repo" : "Choose a project folder"}</DialogTitle>
-            <DialogDescription>
-              {dialog === "clone"
-                ? "Neiro runs git clone on this machine, into the folder you open below."
-                : "Open the folder of the project. Folders on the machine running Neiro."}
-            </DialogDescription>
-          </DialogHeader>
-
-          <div className="folder-tabs" role="tablist" aria-label="Folder source">
-            {(["folder", "clone"] as const).map((kind) => (
-              <button
-                key={kind}
-                type="button"
-                role="tab"
-                aria-selected={dialog === kind}
-                onClick={() => setDialog(kind)}
-              >
-                {kind === "folder" ? <Folder className="size-3.5" /> : <GitBranch className="size-3.5" />}
-                {kind === "folder" ? "Choose folder" : "Clone a repo"}
-              </button>
-            ))}
-          </div>
-
-          {dialog === "clone" && (
-            <div className="space-y-2">
-              <Label htmlFor="clone-url">Repository URL</Label>
-              <Input
-                id="clone-url"
-                value={url}
-                onChange={(event) => setUrl(event.target.value)}
-                placeholder="https://github.com/owner/repo.git"
-                autoCapitalize="off"
-                autoCorrect="off"
-                spellCheck={false}
-                className="font-mono text-sm"
-              />
-              <Label htmlFor="clone-name" className="pt-1">
-                Folder name
-              </Label>
-              <Input
-                id="clone-name"
-                value={nameTouched ? name : repoName(url)}
-                onChange={(event) => {
-                  setNameTouched(true);
-                  setName(event.target.value);
-                }}
-                placeholder="repo"
-                autoCapitalize="off"
-                autoCorrect="off"
-                spellCheck={false}
-                className="font-mono text-sm"
-              />
-              <p className="pt-1 text-sm font-medium">Put it in</p>
-            </div>
-          )}
-
-          <div className="space-y-2">
-            <nav aria-label="Folder path" className="folder-crumbs">
-              {crumbs.map((crumb, i) => (
-                <span key={crumb.path} className="flex items-center gap-1">
-                  {i > 0 && <ChevronRight className="size-3 opacity-60" aria-hidden="true" />}
-                  <button
-                    type="button"
-                    onClick={() => browse(crumb.path)}
-                    aria-current={i === crumbs.length - 1 ? "location" : undefined}
-                  >
-                    {crumb.label}
-                  </button>
-                </span>
-              ))}
-              {loading && <Loader2 className="ml-1 size-3.5 animate-spin" aria-label="Loading" />}
-            </nav>
-            <ul className="folder-list" aria-label="Folders">
-              {listing?.entries.map((entry) => (
-                <li key={entry.path}>
-                  <button type="button" onClick={() => browse(entry.path)}>
-                    <Folder className="size-4 shrink-0" aria-hidden="true" />
-                    <span className="truncate">{entry.name}</span>
-                    {entry.git && <span className="folder-git">git</span>}
-                    <ChevronRight className="ml-auto size-3.5 shrink-0 opacity-50" aria-hidden="true" />
-                  </button>
-                </li>
-              ))}
-              {listing && listing.entries.length === 0 && (
-                <li className="px-3 py-4 text-sm text-muted-foreground">No folders here.</li>
-              )}
-            </ul>
-            {browseError && (
-              <p role="alert" className="text-sm text-destructive">
-                {browseError}
-              </p>
-            )}
-          </div>
-
-          {dialog === "clone" && listing && cloneName && (
-            <p className="folder-dest">→ {listing.path}/{cloneName}</p>
-          )}
-          {cloneError && (
-            <p role="alert" className="text-sm text-destructive">
-              {cloneError}
-            </p>
-          )}
-
-          <div className="flex flex-wrap items-center justify-between gap-2 border-t pt-4">
-            <span className="min-w-0 truncate font-mono text-xs text-muted-foreground">
-              {dialog === "folder" && listing
-                ? `${listing.path}${listing.git ? "  ·  git repo" : ""}`
-                : "Private repos use git's login on this machine."}
-            </span>
-            {dialog === "folder" ? (
-              <Button
-                disabled={!listing || loading}
-                onClick={() => {
-                  if (!listing) return;
-                  pick(listing.path);
-                  setDialog(null);
-                }}
-              >
-                <Check className="size-4" />
-                Use this folder
-              </Button>
-            ) : (
-              <Button disabled={!listing || !url.trim() || !cloneName || cloning} onClick={clone}>
-                {cloning ? <Loader2 className="size-4 animate-spin" /> : <GitBranch className="size-4" />}
-                {cloning ? "Cloning…" : "Clone here"}
-              </Button>
-            )}
-          </div>
-        </DialogContent>
-      </Dialog>
+      {folders.element}
     </>
   );
 }

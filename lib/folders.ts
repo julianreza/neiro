@@ -50,7 +50,7 @@ export async function resolveFolder(input: string | undefined | null): Promise<s
   return real;
 }
 
-async function isGitRepo(path: string) {
+export async function isGitRepo(path: string) {
   return stat(join(path, ".git")).then(() => true, () => false);
 }
 

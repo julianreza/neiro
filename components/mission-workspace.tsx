@@ -1,17 +1,16 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import Link from "next/link";
+import { useState } from "react";
 import {
-  ArrowDown,
-  ArrowRight,
   Check,
-  ChevronDown,
+  ChevronRight,
   Clock3,
   FileText,
-  GitBranch,
   Layers3,
   Play,
   Plus,
+  RefreshCw,
   Square,
   Zap,
 } from "lucide-react";
@@ -36,23 +35,27 @@ import {
   resetPointer,
   roleForAgent,
 } from "@/components/agent-bot";
-import { MiniRocket, StatObject, statLook, type StatKind } from "@/components/stat-object";
+import { StatObject, statLook, type StatKind } from "@/components/stat-object";
+import { StoryPill } from "@/components/history-story";
+import type { StoryTone } from "@/components/history-story";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { RunInspectorSheet } from "@/components/run-inspector-sheet";
 import { WorktreeBar } from "@/components/worktree-bar";
-import { MissionComposer } from "@/components/mission-composer";
 import {
   MarkdownArtifactViewer,
   type ArtifactFile,
 } from "@/components/markdown-artifact-viewer";
 
-const PHASES = ["Plan DAG", "Write PRD", "Execute & verify", "Summary"] as const;
+/** Status label next to the mission title, in History's colours. */
+const MISSION_PILL: Record<MissionView["status"], { tone: StoryTone; label: string }> = {
+  running: { tone: "live", label: "Running" },
+  awaiting_plan_approval: { tone: "wait", label: "Needs you" },
+  completed: { tone: "done", label: "Done" },
+  cancelled: { tone: "off", label: "Cancelled" },
+};
 
 /** Lane pill gradients, one per stage. */
 const stageLook = Object.fromEntries(
@@ -73,6 +76,9 @@ const stageLook = Object.fromEntries(
   ]),
 ) as Record<TaskStage, React.CSSProperties>;
 
+/** Stages where the task's agent is busy, so its bot works. */
+const WORKING_STAGES = new Set<TaskStage>(["Coding", "QA check", "Final review"]);
+
 /** A task as the board renders it; `rowId` is the database id (live mode only). */
 type TaskView = DemoTask & { rowId?: string };
 
@@ -84,15 +90,10 @@ type MissionView = Omit<DemoMission, "tasks"> & {
   /** Mission branch when it runs in a git worktree (live missions only). */
   workBranch?: string | null;
   baseBranch?: string | null;
+  /** Auto-fix retries this mission allows per task (live missions only). */
+  maxRetries?: number;
 };
 
-const PHASE_STEP: Record<MissionPhase, number> = {
-  planning: 0,
-  spec: 1,
-  executing: 2,
-  summarizing: 3,
-  done: 4,
-};
 
 function parseMissionList(json: unknown): MissionView[] {
   const list = (json as { missions?: MissionSummaryDTO[] } | null)?.missions;
@@ -104,6 +105,7 @@ function parseMissionList(json: unknown): MissionView[] {
     status: m.status,
     phase: m.phase,
     lastError: m.lastError,
+    maxRetries: m.maxRetries,
     tasks: [],
   }));
 }
@@ -120,6 +122,7 @@ function parseMissionDetail(json: unknown): MissionView | null {
     lastError: m.lastError,
     workBranch: m.workBranch,
     baseBranch: m.baseBranch,
+    maxRetries: m.maxRetries,
     tasks: m.tasks.map((t) => ({
       id: t.taskKey ?? t.id.slice(0, 8),
       rowId: t.id,
@@ -145,11 +148,6 @@ function parseMissionDetail(json: unknown): MissionView | null {
       content: a.content,
     })),
   };
-}
-
-function parseIntOr(value: string, fallback: number): number {
-  const n = Number.parseInt(value, 10);
-  return Number.isFinite(n) ? n : fallback;
 }
 
 /** Enabled agents from GET /api/agents, for the routing gate's "Ganti agen". */
@@ -183,8 +181,15 @@ async function postJson(url: string, body: unknown): Promise<{ ok: boolean; data
   }
 }
 
-export function MissionWorkspace() {
-  const list = useLiveData<MissionView[]>("/api/missions", initialMissions, parseMissionList);
+export type WorkspaceProject = { id: string; path: string; name: string };
+
+/** Mission control of one project: its missions, and new ones start in its folder. */
+export function MissionWorkspace({ project }: { project: WorkspaceProject }) {
+  const list = useLiveData<MissionView[]>(
+    `/api/missions?project=${encodeURIComponent(project.id)}`,
+    initialMissions,
+    parseMissionList,
+  );
   const isLive = list.source === "live";
   const isDemo = list.source === "demo";
   const [demoMissions, setDemoMissions] = useState<MissionView[]>(initialMissions);
@@ -201,15 +206,6 @@ export function MissionWorkspace() {
     null,
     parseMissionDetail,
   );
-  const [prompt, setPrompt] = useState("");
-  const [pause, setPause] = useState(false);
-  const [workspace, setWorkspace] = useState("");
-  const [baseBranch, setBaseBranch] = useState("");
-  const [isolate, setIsolate] = useState(true);
-  const [workers, setWorkers] = useState("3");
-  const [retries, setRetries] = useState("2");
-  const [tokenBudget, setTokenBudget] = useState("");
-  const [launching, setLaunching] = useState(false);
   const [inspected, setInspected] = useState<string | null>(null);
   const agentList = useLiveData<RouteAgentOption[]>("/api/agents", demoRouteAgents, parseRouteAgents);
   // Live missions only offer live agents: demo agents could not be assigned for real.
@@ -219,7 +215,6 @@ export function MissionWorkspace() {
       : []
     : demoRouteAgents;
   const [routingBusy, setRoutingBusy] = useState<Set<string>>(() => new Set());
-  const input = useRef<HTMLTextAreaElement>(null);
   const mission: MissionView | null | undefined = isLive
     ? detail.source === "live"
       ? detail.data
@@ -230,62 +225,13 @@ export function MissionWorkspace() {
   const tasks = mission?.tasks ?? [];
   const done = tasks.filter((task) => task.stage === "Done").length;
   const tokens = tasks.reduce((sum, task) => sum + task.tokens, 0);
-  const activeStep = isLive && mission?.phase ? PHASE_STEP[mission.phase] : 2;
-  const maxRetriesShown = parseIntOr(retries, 2);
+  // The mission's own retry cap; demo missions use the orchestrator default.
+  const maxRetriesShown = mission?.maxRetries ?? 2;
   const assignedAgents = new Set(tasks.map((t) => t.agent).filter((a) => a && a !== "Unassigned")).size;
-
-  useEffect(() => {
-    if (new URLSearchParams(window.location.search).has("compose"))
-      input.current?.focus();
-  }, []);
 
   function refresh() {
     list.reload();
     detail.reload();
-  }
-
-  async function launch(mode: "build" | "fix" | "plan" = "build") {
-    if (!prompt.trim()) {
-      input.current?.focus();
-      toast.error("Describe the mission objective first");
-      return;
-    }
-    if (!isLive) {
-      toast.error("Demo mode: connect Supabase to launch missions.");
-      return;
-    }
-    const objective = prompt.trim();
-    const brief =
-      mode === "fix"
-        ? `Bug fix. First reproduce the problem and find the root cause, then fix it and prove the fix.\n\nBug report:\n${objective}`
-        : mode === "plan"
-          ? `Quick plan. Keep the plan and the spec short: the goal and a small task list.\n\nGoal:\n${objective}`
-          : objective;
-    const pauseForPlan = mode === "plan" || pause;
-    setLaunching(true);
-    const { ok, data } = await postJson("/api/missions", {
-      title: objective.split("\n")[0].slice(0, 80),
-      prompt: brief,
-      pause_after_planning: pauseForPlan,
-      workspace_path: workspace.trim() || undefined,
-      base_branch: baseBranch.trim() || undefined,
-      isolate_workspace: isolate,
-      max_parallel_workers: parseIntOr(workers, 3),
-      max_retries: parseIntOr(retries, 2),
-      token_budget: parseIntOr(tokenBudget, 0) || undefined,
-    });
-    setLaunching(false);
-    if (!ok) {
-      toast.error(String(data.error));
-      return;
-    }
-    const created = data.mission as { id?: string } | undefined;
-    if (created?.id) setSelectedId(created.id);
-    setPrompt("");
-    toast.success(
-      pauseForPlan ? "Mission launched. It will pause for plan approval." : "Mission launched.",
-    );
-    refresh();
   }
 
   async function missionControl(action: "approve_plan" | "cancel") {
@@ -398,31 +344,55 @@ export function MissionWorkspace() {
   return (
     <div className="space-y-8 p-4 md:p-8">
       <div className="flex flex-wrap items-end justify-between gap-4">
-        <div>
-          <h1 className="text-3xl font-semibold tracking-tight">
-            Mission control
+        <div className="min-w-0">
+          <nav aria-label="Breadcrumb" className="mb-1 text-sm text-muted-foreground">
+            <Link href="/projects" className="hover:text-foreground hover:underline">
+              Projects
+            </Link>
+            <span aria-hidden="true"> / </span>
+            <Link href={`/projects?project=${encodeURIComponent(project.id)}`} className="hover:text-foreground hover:underline">
+              {project.name}
+            </Link>
+          </nav>
+          <h1 className="flex flex-wrap items-center gap-3 text-3xl font-semibold tracking-tight">
+            <span className="min-w-0 break-words">{mission?.title ?? "Mission control"}</span>
+            {mission && (
+              <StoryPill tone={MISSION_PILL[mission.status].tone}>{MISSION_PILL[mission.status].label}</StoryPill>
+            )}
           </h1>
           <p className="mt-2 flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
-            One objective. A team built to move it forward.
+            <span className="code-chip" title={project.path}>{project.path}</span>
             <DataSourceBadge
               source={list.source}
               reason={list.source === "demo" ? list.reason : undefined}
             />
           </p>
         </div>
-        <Button
-          variant="outline"
-          onClick={() => {
-            input.current?.focus();
-            input.current?.scrollIntoView({
-              behavior: "smooth",
-              block: "center",
-            });
-          }}
-        >
-          <Plus className="size-4" />
-          New mission
-        </Button>
+        <div className="flex flex-wrap items-center gap-2">
+          {isLive && (
+            <Button variant="ghost" onClick={refresh}>
+              <RefreshCw className="size-4" aria-hidden="true" />
+              Refresh
+            </Button>
+          )}
+          {isDemo && effectiveId && (
+            <Button
+              variant="ghost"
+              onClick={() => {
+                setDemoMissions((items) => items.filter((item) => item.id !== effectiveId));
+                setSelectedId(null);
+              }}
+            >
+              Remove from preview
+            </Button>
+          )}
+          <Button asChild variant="outline">
+            <Link href={`/projects?project=${encodeURIComponent(project.id)}&compose=1`}>
+              <Plus className="size-4" />
+              New mission
+            </Link>
+          </Button>
+        </div>
       </div>
       <section
         className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4"
@@ -491,193 +461,7 @@ export function MissionWorkspace() {
           </div>
         ))}
       </section>
-      <MissionComposer
-        prompt={prompt}
-        onPromptChange={setPrompt}
-        workspace={workspace}
-        onWorkspaceChange={setWorkspace}
-        inputRef={input}
-        isLive={isLive}
-        launching={launching}
-        onLaunch={launch}
-        advanced={
-          <>
-      <div className="grid gap-5 p-5 sm:grid-cols-2 lg:grid-cols-3">
-        <div className="space-y-2">
-          <Label htmlFor="base-branch">Base branch</Label>
-          <Input
-            id="base-branch"
-            value={baseBranch}
-            onChange={(event) => setBaseBranch(event.target.value)}
-            placeholder="Current branch"
-            disabled={!isolate}
-            maxLength={200}
-            autoCapitalize="off"
-            autoCorrect="off"
-            spellCheck={false}
-            aria-describedby="base-branch-help"
-          />
-          <p id="base-branch-help" className="text-xs text-muted-foreground">
-            The new mission branch starts here.
-          </p>
-        </div>
-        <div className="space-y-2">
-          <Label htmlFor="worker-limit">Parallel workers</Label>
-          <Input
-            id="worker-limit"
-            type="number"
-            min="1"
-            max="10"
-            value={workers}
-            onChange={(event) => setWorkers(event.target.value)}
-          />
-        </div>
-        <div className="space-y-2">
-          <Label htmlFor="retry-limit">Max auto-fix retries</Label>
-          <Input
-            id="retry-limit"
-            type="number"
-            min="0"
-            max="5"
-            value={retries}
-            onChange={(event) => setRetries(event.target.value)}
-          />
-        </div>
-        <div className="space-y-2">
-          <Label htmlFor="token-budget">Token budget</Label>
-          <Input
-            id="token-budget"
-            type="number"
-            min="0"
-            step="1000"
-            inputMode="numeric"
-            placeholder="No limit"
-            value={tokenBudget}
-            onChange={(event) => setTokenBudget(event.target.value)}
-            aria-describedby="token-budget-help"
-          />
-          <p id="token-budget-help" className="text-xs text-muted-foreground">
-            Tasks stop at Needs you when the mission uses this many tokens. Empty or 0 means no limit.
-          </p>
-        </div>
-        <div className="flex items-center gap-3">
-          <Switch
-            id="pause-plan"
-            checked={pause}
-            onCheckedChange={setPause}
-          />
-          <Label htmlFor="pause-plan">Pause after PRD review</Label>
-        </div>
-        <div className="flex items-center gap-3">
-          <Switch
-            id="isolate-workspace"
-            checked={isolate}
-            onCheckedChange={setIsolate}
-            aria-describedby="isolate-workspace-help"
-          />
-          <div>
-            <Label htmlFor="isolate-workspace">Work on a new branch</Label>
-            <p id="isolate-workspace-help" className="text-xs text-muted-foreground">
-              Git worktree on neiro/&lt;mission&gt;. Your checkout stays untouched.
-            </p>
-          </div>
-        </div>
-      </div>
-      <p className="border-t px-5 py-3 text-xs text-muted-foreground">
-        {isLive
-          ? "Applied to this mission: the orchestrator enforces the pause, worker cap and retry cap."
-          : "Demo mode: these options are saved only when Supabase is connected."}
-      </p>
-          </>
-        }
-      />
       <section className="space-y-5">
-        <div className="mission-pass">
-          <div className="pass-main">
-            <label htmlFor="mission-picker" className="pass-label">
-              Current mission
-            </label>
-            <span className="pass-key" data-status={mission?.status ?? "none"}>
-              <i className="pass-key-dot" aria-hidden="true" />
-              <select
-                id="mission-picker"
-                className="pass-select"
-                value={effectiveId ?? ""}
-                onChange={(event) => {
-                  setSelectedId(event.target.value);
-                  setInspected(null);
-                }}
-              >
-                {missions.map((item) => (
-                  <option key={item.id} value={item.id}>
-                    {item.title}
-                  </option>
-                ))}
-              </select>
-              <span className="pass-key-status" aria-hidden="true">
-                {mission?.status === "running"
-                  ? "Running"
-                  : mission?.status === "completed"
-                    ? "Done"
-                    : mission?.status === "cancelled"
-                      ? "Cancelled"
-                      : mission?.status === "awaiting_plan_approval"
-                        ? "Waiting for you"
-                        : ""}
-              </span>
-              <ChevronDown className="pass-key-chevron size-4" aria-hidden="true" />
-            </span>
-            <ol className="pass-route" aria-label="Mission phases">
-              {PHASES.map((step, index) => (
-                <li
-                  key={step}
-                  aria-current={index === activeStep ? "step" : undefined}
-                  data-state={
-                    index < activeStep ? "done" : index === activeStep ? "now" : "next"
-                  }
-                >
-                  <span className="pass-stop" aria-hidden="true">
-                    {index === activeStep && <MiniRocket active={mission?.status === "running"} />}
-                  </span>
-                  <span className="pass-name">{step}</span>
-                </li>
-              ))}
-            </ol>
-          </div>
-          <div className="pass-stub">
-            <span className="pass-label">Phase</span>
-            <span className="pass-count">
-              {Math.min(activeStep + 1, PHASES.length)}
-              <small>/{PHASES.length}</small>
-            </span>
-            <span className="pass-label">{PHASES[Math.min(activeStep, PHASES.length - 1)]}</span>
-            <span className="pass-live">
-              <i aria-hidden="true" />
-              {isLive ? "Live" : isDemo ? "Demo" : "Loading"}
-            </span>
-            <div className="flex flex-wrap justify-center gap-1">
-            {isLive && (
-              <Button size="sm" variant="ghost" onClick={refresh}>
-                Refresh
-              </Button>
-            )}
-            {isDemo && (
-              <Button
-                size="sm"
-                variant="ghost"
-                onClick={() => {
-                  setDemoMissions((items) =>
-                    items.filter((item) => item.id !== effectiveId),
-                  );
-                  setSelectedId(null);
-                }}
-              >
-                Remove from preview
-              </Button>
-            )}
-            </div>
-          </div>
-        </div>
         {isLive && mission?.workBranch && (
           <WorktreeBar
             missionId={mission.id}
@@ -842,99 +626,116 @@ export function MissionWorkspace() {
                     </div>
                   </section>
                 )}
-                <div className="overflow-x-auto pb-4">
-                  <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
-                    {stages.map((stage) => (
-                      <div
-                        key={stage}
-                        className="console-lane board-lane min-w-0"
-                        data-stage={stage}
-                        style={stageLook[stage]}
-                      >
-                        <h3 className="board-pill">
-                          {stage}
-                          <span>{laneTasks(stage).length}</span>
-                        </h3>
-                        <div className={`console-tray space-y-3 rounded-lg p-2 ${tasks.length === 0 ? "min-h-24 border-dashed" : "min-h-60"}`}>
-                          {laneTasks(stage).map((task) => (
+                {tasks.length === 0 ? (
+                  <div className="lane-empty board-empty" style={agentLook("PM")}>
+                    <span inert aria-hidden="true">
+                      <AgentBot name="Idle agent" role="PM" asleep working={false} />
+                    </span>
+                    Tasks show up here once the PM plans the mission.
+                  </div>
+                ) : (
+                  <div className="board-strip">
+                    {stages.map((stage) => {
+                      const lane = laneTasks(stage);
+                      if (lane.length === 0) {
+                        return (
+                          <div
+                            key={stage}
+                            className="board-lane board-lane-thin"
+                            data-stage={stage}
+                            style={stageLook[stage]}
+                            title={`${stage}: no tasks`}
+                          >
+                            <span className="board-thin-count" aria-hidden="true">
+                              0
+                            </span>
+                            <h3 className="board-thin-label">
+                              {stage}
+                              <span className="sr-only">, no tasks</span>
+                            </h3>
+                            <span className="board-thin-bot" style={agentLook("PM")} inert aria-hidden="true">
+                              <AgentBot name="Idle agent" role="PM" asleep working={false} />
+                            </span>
+                          </div>
+                        );
+                      }
+                      return (
+                        <div
+                          key={stage}
+                          className="console-lane board-lane board-lane-wide"
+                          data-stage={stage}
+                          style={stageLook[stage]}
+                        >
+                          <h3 className="board-pill">
+                            {stage}
+                            <span>{lane.length}</span>
+                          </h3>
+                          <div className="console-tray">
+                            {lane.map((task) => (
                               <article
                                 key={task.id}
                                 className="console-task board-task"
+                                data-stage={task.stage}
                                 style={agentLook(roleForAgent(task.agent))}
                               >
-                                <span className="board-bot">
-                                  <AgentBot
-                                    name={task.agent}
-                                    role={roleForAgent(task.agent)}
-                                    asleep={false}
-                                    working={task.stage === "Coding"}
-                                  />
-                                </span>
-                                <div className="flex items-center justify-between text-[10px]">
-                                  <span className="font-mono text-muted-foreground">
-                                    {task.id}
+                                <div className="board-task-head">
+                                  <span className="board-task-bot">
+                                    <AgentBot
+                                      name={task.agent}
+                                      role={roleForAgent(task.agent)}
+                                      asleep={false}
+                                      working={WORKING_STAGES.has(task.stage)}
+                                    />
+                                    {task.stage === "Done" && (
+                                      <span className="board-task-done" aria-hidden="true">
+                                        <Check className="size-2.5" strokeWidth={3.5} />
+                                      </span>
+                                    )}
                                   </span>
+                                  <span className="code-chip">{task.id}</span>
                                   {task.retries > 0 && (
-                                    <span className="text-status-warning">
+                                    <span className="ml-auto text-[11px] font-semibold text-status-warning">
                                       Retry {task.retries}/{maxRetriesShown}
                                     </span>
                                   )}
                                 </div>
-                                <h4
-                                  className="mt-3 text-xs leading-5 font-medium"
-                                  title={task.title}
-                                >
+                                <h4 className="board-task-title" title={task.title}>
                                   {task.title}
                                 </h4>
                                 {task.depends.length > 0 && (
-                                  <p className="mt-3 flex items-center gap-1 font-mono text-[9px] text-muted-foreground">
-                                    <GitBranch className="size-3" />
-                                    {task.depends.join(" · ")}
+                                  <p className="board-task-needs">
+                                    Needs
+                                    {task.depends.map((dep) => (
+                                      <span key={dep} className="code-chip">
+                                        {dep}
+                                      </span>
+                                    ))}
                                   </p>
                                 )}
                                 <TaskRouteFlow task={task} agents={routeAgents} />
-                                <div className="mt-4 flex items-center gap-2 border-t pt-3">
-                                  <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-secondary text-[8px]">
-                                    {task.agent
-                                      .split(" ")
-                                      .map((word) => word[0])
-                                      .join("")}
-                                  </span>
-                                  <span className="truncate text-[10px] text-muted-foreground">
-                                    {task.agent}
-                                  </span>
-                                </div>
-                                <p className="mt-2 truncate font-mono text-[9px] text-muted-foreground">
-                                  {task.model} ·{" "}
-                                  {formatCompactTokens(task.tokens)} tokens
-                                </p>
                                 <button
-                                  className="mt-3 flex w-full items-center justify-between border-t pt-3 text-[10px] text-muted-foreground hover:text-foreground"
+                                  type="button"
+                                  className="board-task-foot"
+                                  title={task.model}
                                   onClick={() => setInspected(task.id)}
                                 >
-                                  Inspect run
-                                  <ArrowRight className="size-3" />
+                                  <span className="sr-only">Inspect run: </span>
+                                  <span className="truncate font-medium text-foreground">
+                                    {task.agent}
+                                  </span>
+                                  <span className="shrink-0 tabular-nums">
+                                    {formatCompactTokens(task.tokens)} tokens
+                                  </span>
+                                  <ChevronRight className="ml-auto size-3.5 shrink-0" aria-hidden="true" />
                                 </button>
                               </article>
                             ))}
-                          {laneTasks(stage).length === 0 && (
-                            <div className="lane-empty" style={agentLook("PM")}>
-                              <span inert aria-hidden="true">
-                                <AgentBot
-                                  name="Idle agent"
-                                  role="PM"
-                                  asleep
-                                  working={false}
-                                />
-                              </span>
-                              Nothing here yet
-                            </div>
-                          )}
+                          </div>
                         </div>
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
-                </div>
+                )}
               </TabsContent>
               <TabsContent value="artifacts" className="mt-5">
                 <MarkdownArtifactViewer
@@ -951,27 +752,14 @@ export function MissionWorkspace() {
               A clear objective is all it takes.
             </h2>
             <p className="mt-2 text-sm text-muted-foreground">
-              Plan a DAG, write requirements, execute, then verify.
+              Write a mission on Projects. It shows up here as it runs.
             </p>
-            <div className="mt-5 flex flex-wrap justify-center gap-2">
-              {[
-                "Build a customer portal",
-                "Audit API security",
-                "Create a public roadmap",
-              ].map((idea) => (
-                <Button
-                  key={idea}
-                  variant="outline"
-                  onClick={() => {
-                    setPrompt(idea);
-                    input.current?.focus();
-                  }}
-                >
-                  {idea}
-                  <ArrowDown className="size-3" />
-                </Button>
-              ))}
-            </div>
+            <Button asChild className="mt-5">
+              <Link href={`/projects?project=${encodeURIComponent(project.id)}&compose=1`}>
+                <Plus className="size-4" />
+                New mission
+              </Link>
+            </Button>
           </div>
         )}
       </section>

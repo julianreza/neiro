@@ -7,6 +7,7 @@ import { getSupabaseAdmin } from "@/lib/supabase";
 import { startHermesRun } from "@/lib/hermes";
 import { mapAgentRow } from "@/lib/orchestrator-store";
 import { recordAskStart } from "@/lib/ask-history";
+import { linkToProject } from "@/lib/projects-store";
 import { AppConfigError } from "@/lib/types";
 
 const MAX_QUESTION = 20000;
@@ -21,7 +22,12 @@ const ASK_RULES = [
   'End with one line that starts with "Files read:" followed by the paths you opened, comma separated.',
 ].join("\n");
 
-/** Default project folder for the composer: the folder Neiro runs from. */
+/** Rules for a chat with no project: no folder, so no files at all. */
+const CHAT_RULES = [
+  "You are answering one question in a chat. There is no project folder.",
+  "Do not open, create, edit, move, or delete any file, and do not run commands.",
+  "Reply in the language of the question. Start with the direct answer, then at most 5 short points.",
+].join("\n");
 export async function GET() {
   await connection();
   return NextResponse.json({ workspace: process.cwd() });
@@ -45,16 +51,16 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: `A question can be at most ${MAX_QUESTION} characters.` }, { status: 400 });
     }
 
+    // No folder = a chat with no project: the agent answers without files.
     const workspace = typeof body?.workspace_path === "string" ? body.workspace_path.trim() : "";
-    if (!workspace) {
-      return NextResponse.json({ error: "Pick the project folder to ask about." }, { status: 400 });
-    }
-    if (workspace.length > MAX_PATH || !isAbsolute(workspace)) {
-      return NextResponse.json({ error: "The project folder must be a full path, like /Users/you/project." }, { status: 400 });
-    }
-    const info = await stat(workspace).catch(() => null);
-    if (!info?.isDirectory()) {
-      return NextResponse.json({ error: `Folder not found: ${workspace}` }, { status: 400 });
+    if (workspace) {
+      if (workspace.length > MAX_PATH || !isAbsolute(workspace)) {
+        return NextResponse.json({ error: "The project folder must be a full path, like /Users/you/project." }, { status: 400 });
+      }
+      const info = await stat(workspace).catch(() => null);
+      if (!info?.isDirectory()) {
+        return NextResponse.json({ error: `Folder not found: ${workspace}` }, { status: 400 });
+      }
     }
 
     const sessionId =
@@ -81,8 +87,8 @@ export async function POST(request: NextRequest) {
     const agent = mapAgentRow(data);
 
     const started = await startHermesRun(agent, {
-      prompt: `Question: ${question}\n\nWorkspace: ${workspace}`,
-      instructions: [agent.prompt, ASK_RULES].filter(Boolean).join("\n\n"),
+      prompt: workspace ? `Question: ${question}\n\nWorkspace: ${workspace}` : `Question: ${question}`,
+      instructions: [agent.prompt, workspace ? ASK_RULES : CHAT_RULES].filter(Boolean).join("\n\n"),
       sessionId,
     });
     if (started.kind === "deferred") {
@@ -98,6 +104,7 @@ export async function POST(request: NextRequest) {
       workspacePath: workspace,
       followUpOf: sessionId,
     });
+    await linkToProject(supabase, "ask_questions", started.runId, workspace);
 
     return NextResponse.json(
       { runId: started.runId, agentId: agent.id, agentName: agent.name },

@@ -8,9 +8,9 @@ import {
   Bot,
   Clock3,
   Command,
-  History,
+  FolderGit2,
+  MessagesSquare,
   Inbox,
-  Layers3,
   Network,
   Radio,
   Users,
@@ -41,10 +41,10 @@ import {
 } from "@/components/ui/tooltip";
 
 const navigation: NavItem[] = [
-  { href: "/", label: "Mission control", icon: Layers3 },
+  { href: "/projects", label: "Projects", icon: FolderGit2 },
   { href: "/needs-you", label: "Needs you", icon: Inbox },
   { href: "/live", label: "Live log", icon: Radio },
-  { href: "/history", label: "History", icon: History },
+  { href: "/chat", label: "Chat", icon: MessagesSquare },
   { href: "/agents", label: "AI team", icon: Bot },
   { href: "/schedules", label: "Time AI", icon: Clock3 },
   { href: "/gateway", label: "Gateway", icon: Network },
@@ -140,12 +140,12 @@ function DashboardSession({
   }, []);
   function navigate(href: string) {
     setCommandOpen(false);
-    if (href === "/?compose=1" && pathname === "/") {
-      requestAnimationFrame(() =>
-        document.getElementById("mission-prompt")?.focus(),
-      );
+    // "New mission" inside a project's Mission control just focuses its prompt.
+    const prompt = href === "new-mission" ? document.getElementById("mission-prompt") : null;
+    if (prompt) {
+      requestAnimationFrame(() => prompt.focus());
     } else {
-      router.push(href);
+      router.push(href === "new-mission" ? "/projects" : href);
     }
   }
   async function signOut() {
@@ -166,7 +166,9 @@ function DashboardSession({
   }
   // Viewers cannot manage users, so the Users page is hidden from them.
   const items = role === "viewer" ? navigation.filter((item) => item.href !== "/users") : navigation;
-  const current = items.find((item) => item.href === pathname);
+  // A sub-page (e.g. /projects/<id>) lights up its section's menu item.
+  const current = items.find((item) => item.href === pathname || pathname.startsWith(`${item.href}/`));
+  const section = current?.href ?? pathname;
 
   return (
     <TooltipProvider delayDuration={150}>
@@ -184,7 +186,7 @@ function DashboardSession({
         <aside className="sticky top-5 hidden h-[calc(100svh-2.5rem)] shrink-0 py-5 pl-5 md:flex">
           <DesktopRail
             items={items}
-            pathname={pathname}
+            pathname={section}
             memory={railMemory}
             onSignOut={() => void signOut()}
             expanded={railExpanded}
@@ -227,7 +229,7 @@ function DashboardSession({
         {/* Mobile: same rail, laid out as a floating bottom bar. */}
         <MobileRail
           items={items}
-          pathname={pathname}
+          pathname={section}
           memory={railMemory}
           onSignOut={() => void signOut()}
           badges={{ "/needs-you": needsYou }}
@@ -252,7 +254,7 @@ function DashboardSession({
                   {label}
                 </CommandItem>
               ))}
-              <CommandItem onSelect={() => navigate("/?compose=1")}>
+              <CommandItem onSelect={() => navigate("new-mission")}>
                 New mission
               </CommandItem>
               <CommandItem onSelect={() => navigate("/agents")}>

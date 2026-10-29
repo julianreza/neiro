@@ -5,6 +5,7 @@ import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
   ChevronDown,
+  FolderOpen,
   MessageCircleQuestionMark,
   Play,
   Sparkles,
@@ -137,6 +138,8 @@ export function MissionComposer({
   launching,
   onLaunch,
   advanced,
+  folderLocked = false,
+  compact = false,
 }: {
   prompt: string;
   onPromptChange: (value: string) => void;
@@ -148,6 +151,10 @@ export function MissionComposer({
   onLaunch: (mode: Exclude<ComposerMode, "ask">) => void;
   /** Mission-only options, shown behind "Advanced options". */
   advanced: ReactNode;
+  /** The folder is the project's: show it, but don't let it change. */
+  folderLocked?: boolean;
+  /** One row of mode pills and no "What happens next" side panel. */
+  compact?: boolean;
 }) {
   const [mode, setMode] = useState<ComposerMode>("ask");
   const [ask, setAsk] = useState<AskState>({ phase: "idle" });
@@ -162,7 +169,7 @@ export function MissionComposer({
 
   // Fill the project folder: last one used, else the folder Neiro runs from.
   useEffect(() => {
-    if (workspace) return;
+    if (workspace || folderLocked) return;
     let cancelled = false;
     fetch("/api/ask")
       .then((res) => (res.ok ? res.json() : null))
@@ -334,7 +341,7 @@ export function MissionComposer({
   const answer = ask.phase === "idle" ? null : splitAnswerFiles(ask.output);
 
   return (
-    <section className="composer" aria-labelledby="composer-title">
+    <section className="composer" data-compact={compact || undefined} aria-labelledby="composer-title">
       <div className="composer-grid">
         <form
           className="min-w-0 space-y-4"
@@ -364,11 +371,12 @@ export function MissionComposer({
                     {item.name}
                     {item.id === "ask" && <span className="composer-new">New</span>}
                   </span>
-                  <span className="mt-1 block text-xs text-muted-foreground">{item.detail}</span>
+                  <span className="composer-mode-detail mt-1 block text-xs text-muted-foreground">{item.detail}</span>
                 </button>
               );
             })}
           </div>
+          {compact && <p className="composer-hint">{info.detail}</p>}
 
           <div className="composer-input">
             <Label htmlFor="mission-prompt" className="sr-only">
@@ -390,7 +398,15 @@ export function MissionComposer({
               maxLength={20000}
             />
             <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t pt-3">
-              <FolderPicker value={workspace} onChange={onWorkspaceChange} />
+              {folderLocked ? (
+                <span className="folder-chip" title={workspace}>
+                  <FolderOpen className="size-3.5 shrink-0" aria-hidden="true" />
+                  <span className="font-semibold">{workspace.replace(/\/+$/, "").split("/").pop() || workspace}</span>
+                  <span className="folder-chip-path">project folder</span>
+                </span>
+              ) : (
+                <FolderPicker value={workspace} onChange={onWorkspaceChange} />
+              )}
               <div className="flex flex-wrap items-center gap-3">
                 <span id="launch-disabled-reason" className="text-xs text-muted-foreground">
                   {blocked ?? "⌘ / Ctrl + Enter"}

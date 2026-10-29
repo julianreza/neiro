@@ -6,6 +6,7 @@ import { advanceMission, reportAdvanceError } from "@/lib/orchestrator";
 import { mapMissionRow } from "@/lib/orchestrator-store";
 import { parseMissionCreateBody } from "@/lib/mission-input";
 import { prepareMissionWorkspace } from "@/lib/worktree";
+import { linkToProject } from "@/lib/projects-store";
 import { AppConfigError } from "@/lib/types";
 import type { MissionSummaryDTO } from "@/lib/types";
 
@@ -13,7 +14,7 @@ const HISTORY_STATUSES = new Set(["running", "awaiting_plan_approval", "complete
 
 /**
  * Missions, newest first. Optional history filters:
- * `?status=completed,cancelled` `&q=text` (title search) `&limit=1-200`
+ * `?status=completed,cancelled` `&q=text` (title search) `&project=<project id>` `&limit=1-200`
  * `&before=<created_at ISO>|<id>` (next page; treat nextBefore as opaque).
  * Timestamp-only boundaries remain supported. No params = every mission, as before.
  */
@@ -36,6 +37,14 @@ export async function GET(request: NextRequest) {
 
     const q = (params.get("q") ?? "").trim().slice(0, 100);
     if (q) query = query.ilike("title", `%${q.replace(/[\\%_]/g, (c) => `\\${c}`)}%`);
+
+    const project = (params.get("project") ?? "").trim();
+    if (project) {
+      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(project)) {
+        return NextResponse.json({ error: "project must be a project id" }, { status: 400 });
+      }
+      query = query.eq("project_id", project);
+    }
 
     const before = params.get("before");
     if (before) {
@@ -200,6 +209,9 @@ export async function POST(request: NextRequest) {
         : "";
       return NextResponse.json({ error: createErr.message + hint }, { status: 500 });
     }
+
+    // Link the mission to its project; a new folder becomes a project.
+    await linkToProject(supabase, "missions", missionId, workspaceColumns.repo_root ?? input.workspacePath ?? null);
 
     // Start planning eagerly; on failure the next tick retries.
     try {

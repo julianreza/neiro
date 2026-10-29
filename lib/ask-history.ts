@@ -9,6 +9,8 @@ export type AskQuestionDTO = {
   agentName: string;
   question: string;
   workspacePath: string;
+  /** Project (row in `projects`) the question was about; null before linking. */
+  projectId: string | null;
   followUpOf: string | null;
   status: AskStatus;
   answer: string;
@@ -67,6 +69,7 @@ export function mapAskRow(row: Record<string, unknown>): AskQuestionDTO {
     agentName: typeof row.agent_name === "string" ? row.agent_name : "",
     question: String(row.question ?? ""),
     workspacePath: String(row.workspace_path ?? ""),
+    projectId: typeof row.project_id === "string" ? row.project_id : null,
     followUpOf: typeof row.follow_up_of === "string" ? row.follow_up_of : null,
     status: ASK_STATUSES.has(status) ? status : "failed",
     answer: typeof row.answer === "string" ? row.answer : "",

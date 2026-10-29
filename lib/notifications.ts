@@ -52,7 +52,7 @@ export function shortHash(text: string): string {
  * /slack-compatible URLs) and most chat incoming-webhooks.
  */
 export function webhookPayload(event: NotificationEvent, baseUrl: string | undefined) {
-  const link = baseUrl ? `${baseUrl.replace(/\/+$/, "")}/?mission=${encodeURIComponent(event.missionId)}` : null;
+  const link = baseUrl ? `${baseUrl.replace(/\/+$/, "")}/missions/${encodeURIComponent(event.missionId)}` : null;
   return {
     text: `${event.title}\n${event.body}${link ? `\n${link}` : ""}`,
     kind: event.kind,

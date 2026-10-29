@@ -6,7 +6,7 @@ import { Bell } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { useRole } from "@/hooks/use-role";
-import { sendJson, timeAgo } from "@/lib/client-api";
+import { missionHref, sendJson, timeAgo } from "@/lib/client-api";
 import type { NotificationKind } from "@/lib/notifications";
 import type { NotificationDTO } from "@/lib/notifications-store";
 
@@ -103,8 +103,8 @@ export function NotificationBell() {
           <ul className="max-h-96 divide-y overflow-y-auto">
             {items.map((n) => (
               <li key={n.id}>
-                <Link
-                  href={n.missionId ? `/?mission=${encodeURIComponent(n.missionId)}` : "/needs-you"}
+                <a
+                  href={n.missionId ? missionHref(n.missionId) : "/needs-you"}
                   className="flex gap-2.5 px-3 py-2.5 hover:bg-secondary/50"
                 >
                   <span
@@ -117,7 +117,7 @@ export function NotificationBell() {
                       {n.body} · {timeAgo(n.createdAt)}
                     </span>
                   </span>
-                </Link>
+                </a>
               </li>
             ))}
           </ul>

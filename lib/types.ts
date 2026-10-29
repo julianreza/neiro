@@ -75,6 +75,8 @@ export type Mission = {
   workBranch: string | null;
   worktreePath: string | null;
   repoRoot: string | null;
+  /** Project (row in `projects`) this mission ran in; null before linking. */
+  projectId?: string | null;
   /** Active Hermes run id, or a `claim:<uuid>` token while a run is being started. */
   runId: string | null;
   runAgentId: string | null;

@@ -28,6 +28,20 @@ export function formatTokens(n: number): string {
   return n.toLocaleString("en-US");
 }
 
+/** Stable link to one mission; it opens in its project's Mission control. */
+export function missionHref(id: string): string {
+  return `/missions/${encodeURIComponent(id)}`;
+}
+
+/** Mission control of one project; `mission` opens that mission, `compose` focuses the prompt. */
+export function projectHref(projectId: string, opts: { mission?: string; compose?: boolean } = {}): string {
+  const params = new URLSearchParams();
+  if (opts.mission) params.set("mission", opts.mission);
+  if (opts.compose) params.set("compose", "1");
+  const query = params.toString();
+  return `/projects/${encodeURIComponent(projectId)}${query ? `?${query}` : ""}`;
+}
+
 /** "2 min ago", "3 h ago", "26 Oct". */
 export function timeAgo(iso: string | null | undefined, now = Date.now()): string {
   if (!iso) return "";

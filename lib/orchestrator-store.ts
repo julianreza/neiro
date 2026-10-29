@@ -171,6 +171,7 @@ export function mapMissionRow(row: Row): Mission {
     workBranch: str(row.work_branch),
     worktreePath: str(row.worktree_path),
     repoRoot: str(row.repo_root),
+    projectId: str(row.project_id),
     runId: str(row.run_id),
     runAgentId: str(row.run_agent_id),
     runStartedAt: str(row.run_started_at),

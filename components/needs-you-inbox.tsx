@@ -1,13 +1,12 @@
 "use client";
 
-import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
 import { CheckCircle2, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useRole } from "@/hooks/use-role";
-import { sendJson, timeAgo } from "@/lib/client-api";
+import { missionHref, sendJson, timeAgo } from "@/lib/client-api";
 import type { NeedsYouItem, NeedsYouKind } from "@/lib/needs-you";
 
 type AgentOption = { id: string; name: string };
@@ -229,7 +228,8 @@ function NeedsYouRow({
 
       <div className="flex flex-wrap items-center gap-2">
         <Button asChild variant="ghost" size="sm">
-          <Link href={`/?mission=${encodeURIComponent(item.missionId)}`}>Open mission</Link>
+          {/* Plain link: /missions/<id> is a redirect, not a page. */}
+          <a href={missionHref(item.missionId)}>Open mission</a>
         </Button>
         {canAct && item.kind === "plan_approval" && (
           <Button size="sm" disabled={busy} onClick={onApprovePlan}>

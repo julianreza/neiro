@@ -1,13 +1,12 @@
 "use client";
 
-import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { Copy, Loader2, RotateCw } from "lucide-react";
 import { BotRig, agentLook, roleForAgent } from "@/components/agent-bot";
 import { Button } from "@/components/ui/button";
 import { useRole } from "@/hooks/use-role";
-import { formatTokens, sendJson, timeAgo } from "@/lib/client-api";
+import { formatTokens, missionHref, sendJson, timeAgo } from "@/lib/client-api";
 import { appendStep, parseRunEvent } from "@/lib/run-events";
 import type { LogStep } from "@/lib/run-events";
 import type { ActiveRunDTO } from "@/app/api/runs/active/route";
@@ -302,7 +301,8 @@ function RunInspector({
             Hermes no longer has this run, so there is nothing live to show. It used {formatTokens(run.tokens)} tokens.
           </p>
           <Button asChild size="sm" variant="outline" className="mt-4">
-            <Link href={`/?mission=${encodeURIComponent(run.missionId)}`}>Open mission</Link>
+            {/* Plain link: /missions/<id> is a redirect, not a page. */}
+            <a href={missionHref(run.missionId)}>Open mission</a>
           </Button>
         </div>
       </section>
