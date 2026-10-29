@@ -1,89 +1,220 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+<div align="center">
 
-## Getting Started
+# 🤖 Neiro
 
-First, run the development server:
+**Mission control for your AI dev team.**
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+Give Neiro a goal. A team of AI agents plans it, writes the spec, codes it, tests it, reviews it, and reports back.
+
+[![CI](https://github.com/julianreza/neiro/actions/workflows/ci.yml/badge.svg)](https://github.com/julianreza/neiro/actions/workflows/ci.yml)
+![Next.js](https://img.shields.io/badge/Next.js-16.4-000?logo=nextdotjs)
+![React](https://img.shields.io/badge/React-19.3-149eca?logo=react&logoColor=white)
+![TypeScript](https://img.shields.io/badge/TypeScript-5-3178c6?logo=typescript&logoColor=white)
+![Tailwind](https://img.shields.io/badge/Tailwind-v4-38bdf8?logo=tailwindcss&logoColor=white)
+![Bun](https://img.shields.io/badge/Bun-1.4-f9f1e1?logo=bun&logoColor=black)
+![Supabase](https://img.shields.io/badge/Supabase-Postgres-3ecf8e?logo=supabase&logoColor=white)
+
+[Features](#-features) · [How it works](#-how-it-works) · [Quick start](#-quick-start) · [Configuration](#%EF%B8%8F-configuration) · [Architecture](#-architecture) · [Development](#-development)
+
+</div>
+
+---
+
+## ✨ Features
+
+| | |
+| --- | --- |
+| 🚀 **Missions** | Launch work in **Plan**, **Build** or **Fix** mode. Neiro breaks it into tasks and runs them to done. |
+| 💬 **Ask mode** | Quick questions answered by the Q&A agent, saved to history. |
+| 🏢 **AI team office** | A 3D virtual office. Each agent is a robot, and its motion shows its status. |
+| 📄 **PRD review** | Read, approve or revise the spec before any code is written. |
+| 🔍 **Live log** | Inspect every run step by step, copy output, allow or deny actions. |
+| 🙋 **Needs you** | One inbox for everything waiting on a human. |
+| 🌿 **Safe worktrees** | Agents work on their own git branch. Your checkout is never touched. |
+| ⏰ **Schedules** | See the Hermes cron jobs that run your agents. |
+| 💰 **Budgets** | Token budgets with notifications before you overspend. |
+| 👥 **Users & roles** | Admin and viewer roles behind a signed session login. |
+| 🎨 **Neumorphic UI** | Soft-depth surfaces, light and dark themes, reduced-motion aware. |
+
+## 🧠 How it works
+
+Every mission walks the same track:
+
+```mermaid
+flowchart LR
+    A([🎯 Goal]) --> P[📋 Planning<br/><sub>Neiro PM</sub>]
+    P --> S[📄 Spec<br/><sub>Scribe PRD</sub>]
+    S --> E[⚙️ Executing]
+    E --> M[📝 Summarizing]
+    M --> D([✅ Done])
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Inside **Executing**, each task moves through its own stages:
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+```mermaid
+flowchart LR
+    Q[Queued] --> C[💻 Coding<br/><sub>Forge Backend</sub>]
+    C --> T[🧪 QA check<br/><sub>Sentinel QA</sub>]
+    T -->|FAIL| C
+    T -->|PASS| R[👀 Final review<br/><sub>Lens Reviewer</sub>]
+    R -->|Changes requested| C
+    R -->|Approved| D([Done])
+```
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+### Meet the team
 
-## Design system
+| Agent | Stage | Job |
+| --- | --- | --- |
+| 🧭 **Neiro PM** | Planning | Splits the goal into a task plan |
+| ✍️ **Scribe PRD** | Spec | Writes the PRD, with versioned revisions |
+| 🔨 **Forge Backend** | Coding | Writes the code in the mission worktree |
+| 🛡️ **Sentinel QA** | QA check | Tests each task, PASS or FAIL |
+| 🔎 **Lens Reviewer** | Final review | Approves or asks for changes |
+| 📚 **Oracle Q&A** | Ask | Answers quick questions |
 
-Phase 1 provides shadcn/ui `radix-nova` primitives in `components/ui/`, semantic Tailwind v4 tokens in `app/globals.css`, and Geist fonts. The existing `@tailwindcss/turbopack` integration remains unchanged.
+Agents are rows in the `agents` table. Add, edit, disable or swap their model from the **AI team** page. Changes apply on the next run, no restart needed.
 
-The root layout installs the theme, tooltip, and toast providers. Dark mode is the default; `ThemeToggle` supports light, dark, and system preferences persisted by `next-themes`.
+## 🚀 Quick start
 
-Neiro uses a pitch-obsidian operations palette with radiant solar amber for primary actions and accents, balanced by neutral slate and glowing status indicators (sky for execution, amber for warning/review, emerald for success, and rose for blockers). Light mode uses clean slate-paper surfaces with high-contrast amber accents.
-
-Card surfaces feature modern 3D floating depth: specular top rim lights, ambient diffused shadows, subtle hover elevation, and standalone metric containers. Buttons feature a tactile gradient sheen with press feedback. Tables and trays provide subtle frosted backgrounds for scanning. Visual dials: ENERGY 2 / RHYTHM 2 / MOTION 1.
-
-## Backend
-
-- **Database & schema**: `supabase/migrations/` creates `agents`, `missions`, `mission_tasks`, `mission_artifacts` and `app_state`, with RLS enabled and no public policies, so only the server-side service-role client can read or write them. Every migration is idempotent: re-run it to apply the latest migration block on an existing database.
-- **Authentication**: `proxy.ts` gates every route except `/login`, `/api/auth` and the static SVGs listed in `PUBLIC_SVGS`. Sessions are HMAC-SHA256 tokens (`lib/auth.ts`).
-- **Orchestrator**: `lib/orchestrator.ts` is a poll-driven state machine (mission phases `planning → spec → executing → summarizing → done`; task stages `Queued → Coding → QA check → Final review → Done`). Each tick does at most one guarded step per mission and task, starts Hermes runs and reads them on a later tick, resolves dependencies by `task_key`, and honours `pause_after_planning`, `max_retries` and `max_parallel_workers`. Overlapping ticks are safe. Errors are logged and stored in `missions.last_error`.
-- **Integrations**: `lib/hermes.ts` (Hermes VPS client), `lib/ninerouter.ts` (9Router gateway client).
-- **Ticks**: `POST /api/orchestrator/tick`, driven by the VPS cron in `deploy/neiro-tick.cron` in production. Under `bun run dev` the server ticks itself every 15s (`instrumentation.ts` → `lib/local-ticker.ts`); set `NEIRO_LOCAL_TICK=off` to stop that, or `on` to keep it under `next start`.
-- **Workspaces**: a mission's workspace folder must exist on the machine running Neiro and Hermes. When it is a git repo, Neiro creates a worktree on a new branch `neiro/<mission>` under `~/.neiro/worktrees/` (override with `NEIRO_WORKTREE_ROOT`), and Coding, QA and Review all work there. Your own checkout and branches are never edited. To roll back, cancel the mission and `POST /api/missions/:id/control` with `{"action":"discard_worktree"}`; that deletes the worktree and its branch.
-
-### Live vs demo data
-
-Every surface loads from its API first. If the API is unavailable, it shows labelled sample data with a visible "Demo data — reason" badge.
-
-| Surface | Live source | Writes when live | Demo fallback |
-| --- | --- | --- | --- |
-| Mission control | `/api/missions`, `/api/missions/:id` | Launch, approve plan, cancel, task controls | Sample missions; launch disabled |
-| AI team | `/api/agents` | Create, edit, enable/disable, delete, restore starters | Sample agents; all edits disabled |
-| Schedules (Time AI) | `/api/schedules` (Hermes jobs) | None (read-only; manage jobs on Hermes) | Sample schedules |
-| 9Router & VPS | `/api/gateway/status`, `/api/gateway/models` | None | Sample model catalog; health shown as unknown |
-
-The "Sample agent capabilities" table and the cron snippet on the gateway page are always documentation samples.
-
-### Database migrations
-
-Schema changes live in `supabase/migrations/`, applied in file-name order. With the Supabase CLI (`bunx supabase`):
+**Needs:** [Bun](https://bun.sh) 1.4+, a [Supabase](https://supabase.com) project, and a running Hermes agent server.
 
 ```bash
+# 1. Install
+bun install
+
+# 2. Configure
+cp .env.example .env.local   # then fill in the values
+
+# 3. Create the database
 bunx supabase login
 bunx supabase link --project-ref <your-project-ref>
 bun run db:push
+
+# 4. Run
+bun run dev
 ```
 
-Without the CLI, paste each file from `supabase/migrations/` into the Supabase SQL Editor, oldest first. Every file is idempotent, so re-running one is safe. Add a change as a new timestamped file (`bun run db:new <name>`); never edit a migration that has already been applied.
+Open [http://localhost:3000](http://localhost:3000) and sign in with your `DASHBOARD_SECRET`.
 
-### Environment
+> [!TIP]
+> No Supabase CLI? Paste each file from `supabase/migrations/` into the Supabase SQL Editor, oldest first. Every migration is idempotent, so re-running one is safe.
 
-Copy `.env.example` to `.env.local`. The server-side Supabase client reads only `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY`. Never set a `NEXT_PUBLIC_*` service-role key: Next.js inlines `NEXT_PUBLIC_*` values into browser JavaScript, and the app refuses to start the admin client if `NEXT_PUBLIC_SUPABASE_SERVICE_ROLE_KEY` is present.
+## ⚙️ Configuration
 
-Validate the application with:
-`bun run test && bunx next typegen && bunx tsc --noEmit && bun run lint && bun run build`
+All settings live in `.env.local`. See `.env.example` for the full list.
 
-`bun run test` runs `bun test --conditions=react-server`, which lets server-only modules load in tests.
+| Variable | Required | What it does |
+| --- | :---: | --- |
+| `DASHBOARD_SECRET` | ✅ | Login password and Bearer token for the tick endpoint. Min 8 chars (`openssl rand -hex 24`). |
+| `SUPABASE_URL` | ✅ | Your Supabase project URL. |
+| `SUPABASE_SERVICE_ROLE_KEY` | ✅ | Server-only service-role key. |
+| `HERMES_DEFAULT_URL` | ✅ | Hermes agent server, e.g. `http://127.0.0.1:8642`. |
+| `HERMES_DEFAULT_KEY` | ✅ | Hermes API key. |
+| `HERMES_PROVIDER_SLUG` | | Force one provider. Empty uses each Hermes profile's own. |
+| `NEIRO_ROUTER` | | `on` lets Laya pick the agent per task. `off` claims tasks directly. |
+| `NEIRO_LAYA_MODEL_PATH` | | Local Laya model dir or Hugging Face repo id. Empty turns the router off. |
+| `NEIRO_ROUTER_TIMEOUT_MS` | | Max time per routing decision. Default `5000`. |
+| `NEIRO_LOCAL_TICK` | | `on` / `off`. Unset means on under `bun run dev`, off under `next start`. |
+| `NEIRO_LOCAL_TICK_MS` | | Local tick interval. Default `15000`, minimum `5000`. |
+| `NEIRO_WORKTREE_ROOT` | | Where mission worktrees go. Default `~/.neiro/worktrees`. |
+| `NEIRO_TRUSTED_PROXY_HOPS` | | Trusted reverse proxies for the login limiter. Default `0`. |
 
-## Learn More
+> [!CAUTION]
+> Never put the service-role key in a `NEXT_PUBLIC_*` variable. Next.js ships those to the browser. Neiro refuses to start the admin client if `NEXT_PUBLIC_SUPABASE_SERVICE_ROLE_KEY` is set.
 
-To learn more about Next.js, take a look at the following resources:
+## 🏗 Architecture
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+```mermaid
+flowchart LR
+    U[👤 You] -->|browser| N[Neiro<br/>Next.js]
+    Cron[⏱ VPS cron<br/>every minute] -->|POST /api/orchestrator/tick| N
+    N <-->|service role| DB[(Supabase<br/>Postgres)]
+    N -->|start / read runs| H[Hermes<br/>agent server]
+    H --> LLM[9Router / model<br/>providers]
+    H --> W[📂 git worktree<br/>neiro/&lt;mission&gt;]
+```
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+- **Orchestrator** (`lib/orchestrator.ts`): a poll-driven state machine. Each tick does at most one guarded step per mission and task. It starts Hermes runs and reads them on a later tick, resolves dependencies by `task_key`, and honours `pause_after_planning`, `max_retries` and `max_parallel_workers`. Overlapping ticks are safe. Errors land in `missions.last_error`.
+- **Ticks**: in production, the cron in `deploy/neiro-tick.cron` calls `POST /api/orchestrator/tick`. Under `bun run dev` the server ticks itself every 15s (`instrumentation.ts` → `lib/local-ticker.ts`).
+- **Task router** (`lib/task-router.ts`): Laya picks the best agent for each queued task. On timeout the default worker is used.
+- **Auth** (`proxy.ts`, `lib/auth.ts`): every route is gated except `/login`, `/api/auth` and the public SVGs. Sessions are HMAC-SHA256 tokens. Failed logins are rate limited.
+- **Database** (`supabase/migrations/`): RLS on, no public policies. Only the server-side service-role client reads or writes.
+- **Integrations**: `lib/hermes.ts` is the Hermes client. Models, including 9Router ones, are listed through Hermes.
 
-## Deploy on Vercel
+### 🌿 Worktrees
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+A mission's workspace folder must exist on the machine running Neiro and Hermes. If it is a git repo, Neiro creates a worktree on a new branch `neiro/<mission>` under `~/.neiro/worktrees/`. Coding, QA and Review all happen there.
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+To roll back, cancel the mission, then:
+
+```bash
+curl -X POST "$NEIRO_URL/api/missions/<id>/control" \
+  -H "Content-Type: application/json" \
+  -d '{"action":"discard_worktree"}'
+```
+
+This deletes the worktree and its branch.
+
+### 🧪 Live vs demo data
+
+Every page loads from its API first. If the API is down, it shows sample data with a visible **"Demo data — reason"** badge.
+
+| Page | Live source | Writes when live | Demo fallback |
+| --- | --- | --- | --- |
+| Mission control | `/api/missions`, `/api/missions/:id` | Launch, approve plan, cancel, task controls | Sample missions, launch disabled |
+| AI team | `/api/agents` | Create, edit, enable/disable, delete, restore starters | Sample agents, edits disabled |
+| Schedules | `/api/schedules` (Hermes jobs) | None (manage jobs on Hermes) | Sample schedules |
+| 9Router & VPS | `/api/gateway/status`, `/api/gateway/models` | None | Sample model catalog, health unknown |
+
+## 📁 Project layout
+
+```text
+neiro/
+├── app/
+│   ├── (dashboard)/     # projects, missions, agents, chat, live, needs-you,
+│   │                    # schedules, gateway, users
+│   ├── api/             # route handlers (missions, agents, ask, orchestrator, …)
+│   ├── login/           # neumorphic login page
+│   └── globals.css      # Tailwind v4 theme tokens + neumorphism
+├── components/          # UI (team-office, mission-workspace, live-log, …)
+│   └── ui/              # shadcn/ui primitives
+├── lib/                 # orchestrator, hermes, auth, router + *.test.ts
+├── supabase/migrations/ # timestamped, idempotent SQL
+├── deploy/              # production tick cron
+├── vendor/laya-ts/      # bundled Laya task router
+└── proxy.ts             # auth gate (Next.js 16 replaces middleware)
+```
+
+## 🛠 Development
+
+| Command | What it does |
+| --- | --- |
+| `bun run dev` | Dev server with Turbopack on `localhost:3000` |
+| `bun run build` | Production build |
+| `bun run start` | Serve the production build |
+| `bun run lint` | ESLint 9 |
+| `bunx next typegen && bunx tsc --noEmit` | Typecheck |
+| `bun run test` | Tests (`bun test --conditions=react-server`) |
+| `bun run db:new <name>` | New migration file |
+| `bun run db:push` | Apply migrations |
+
+Run the full check before you push (CI runs the same steps):
+
+```bash
+bun run test && bunx next typegen && bunx tsc --noEmit && bun run lint && bun run build
+```
+
+> [!NOTE]
+> Add schema changes as a new timestamped file. Never edit a migration that is already applied.
+
+## 🚢 Deploy
+
+1. Deploy the Next.js app (Vercel or any Node host) with the env vars above.
+2. Apply the migrations to your Supabase project.
+3. On your VPS, add `deploy/neiro-tick.cron` to `crontab -e`, with `NEIRO_URL` and `DASHBOARD_SECRET` set.
+
+---
+
+<div align="center">
+<sub>Built with Next.js, Supabase and a crew of very busy robots 🤖</sub>
+</div>

@@ -29,10 +29,6 @@ HERMES_DEFAULT_URL=https://hermes-vps.example.com
 HERMES_DEFAULT_KEY=hermes-api-server-key-min-16-chars
 # Optional provider slug if Hermes config.yaml requires explicit provider override; leave blank to use profile default pointing at 9Router
 HERMES_PROVIDER_SLUG=
-
-# Single LLM Gateway: 9Router
-NINEROUTER_URL=https://9router.example.com
-NINEROUTER_KEY=sk-optional-9router-key
 ```
 
 Create `supabase/schema.sql` containing idempotent DDL (`CREATE TABLE IF NOT EXISTS`, indexes, `updated_at` trigger) and `ON CONFLICT (slug) DO NOTHING` seed rows for the 6 default Paperclip-style agents:
@@ -142,7 +138,6 @@ All VPS and 9Router calls run exclusively on the Next.js server so API keys neve
     - `resolveHermesUnknownRun(agent, runId: string, payload: { admission_id: string; execution_generation: number })` → `POST ${profilePrefix}/v1/runs/${encodeURIComponent(runId)}/resolve-unknown`.
     - `hermesJobsRequest(agent, method, subpath, body?)` → wraps `/api/jobs`, `/api/jobs/${id}`, `/api/jobs/${id}/pause`, `/resume`, and `/run`.
 - Create `lib/ninerouter.ts`:
-  - Reads `NINEROUTER_URL` (required for gateway calls) and optional `NINEROUTER_KEY` (attaches `Authorization: Bearer ${key}` only when non-empty).
   - `getNineRouterStatus()` → calls `GET ${url}/api/health` + `GET ${url}/v1/models`, returning `{ ok, latencyMs, models: Array<{ id: string; owned_by: string; kind?: string }>, error?: string }`.
   - `listNineRouterModelsByKind(kind?: "image" | "tts" | "embedding" | "web" | "stt" | "image-to-text")` → `GET ${url}/v1/models${kind ? `/${kind}` : ""}`.
 
@@ -287,7 +282,7 @@ The pipeline must advance with every device closed and before Hermes expires ter
    - Request `GET http://localhost:3000/` without cookies → expected `307` redirect to `/login?next=%2F`; request `GET http://localhost:3000/api/agents` without cookies → expected `401 {"error":"Unauthorized"}`.
    - `POST http://localhost:3000/api/auth` with `{"passcode":"test-secret-12345"}` → expected `200 {"ok":true}` with `Set-Cookie: neiro_session=...; HttpOnly`.
 3. **End-to-End Autonomous Multi-Agent Pipeline Smoke Proof (Mocked or Live Hermes + 9Router)**:
-   - Create `scripts/mock-hermes.ts` (Bun.serve on `:8642`, deleted after verification) implementing Hermes `/health/detailed`, `/v1/capabilities`, `/v1/skills`, `/v1/toolsets`, `POST /api/sessions`, `PATCH /api/sessions/:id`, `GET /api/sessions/:id/messages`, `POST /v1/runs` (stores run, completes after 2 s), `GET /v1/runs/:id`, `GET /v1/runs/:id/events` (emits `tool.started`, `message.delta`, `tool.completed`, `run.completed`), `/api/jobs` CRUD, plus 9Router `/api/health` and `/v1/models`. Canned outputs: orchestrator input → JSON plan with `T1`,`T2` (no deps) and `T3` (dependsOn `T1`,`T2`); QA input → `VERDICT: FAIL` on the first QA call for `T1`, `VERDICT: PASS` otherwise; reviewer input → `VERDICT: APPROVED`. Run with `HERMES_DEFAULT_URL=http://localhost:8642 NINEROUTER_URL=http://localhost:8642` against a real Supabase project with `supabase/schema.sql` applied (or the live VPS instead of the mock).
+   - Create `scripts/mock-hermes.ts` (Bun.serve on `:8642`, deleted after verification) implementing Hermes `/health/detailed`, `/v1/capabilities`, `/v1/skills`, `/v1/toolsets`, `POST /api/sessions`, `PATCH /api/sessions/:id`, `GET /api/sessions/:id/messages`, `POST /v1/runs` (stores run, completes after 2 s), `GET /v1/runs/:id`, `GET /v1/runs/:id/events` (emits `tool.started`, `message.delta`, `tool.completed`, `run.completed`), `/api/jobs` CRUD, plus 9Router `/api/health` and `/v1/models`. Canned outputs: orchestrator input → JSON plan with `T1`,`T2` (no deps) and `T3` (dependsOn `T1`,`T2`); QA input → `VERDICT: FAIL` on the first QA call for `T1`, `VERDICT: PASS` otherwise; reviewer input → `VERDICT: APPROVED`. Run with `HERMES_DEFAULT_URL=http://localhost:8642` against a real Supabase project with `supabase/schema.sql` applied (or the live VPS instead of the mock).
    - Parser self-check: `lib/orchestrator-parsers.test.ts` run via `bun test` asserting (a) fenced JSON plan parses, (b) cycle `T1→T2→T1` is broken, (c) garbage output yields single fallback `T1`, (d) missing verdict line → fail token.
    - Open `http://localhost:3000` in browser:
      1. Verify `/agents` renders the 6 seeded agents, creates a 7th custom agent (`devops-worker`) selecting a model from `/api/gateway/models`, edits its prompt, probes connection, and deletes a test clone.
