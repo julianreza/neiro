@@ -162,6 +162,37 @@ test("flooding limiter keys cannot evict active IP or username lockouts", () => 
   assert.equal(limiter.check(locked).ok, true);
 });
 
+test("a full limiter blocks new clients until capacity expires, then tracks their failures", () => {
+  let now = 0;
+  const limiter = new LoginLimiter(() => now, 5, 60_000);
+  const savedWarn = console.warn;
+  console.warn = () => {};
+  try {
+    for (let i = 0; i < 5_000; i++) {
+      if (i === 4_999) now = 1_000;
+      const keys = limiterKeys(`client-${i}`, "reza");
+      for (let attempt = 0; attempt < 5; attempt++) limiter.recordFailure(keys);
+    }
+    const fresh = limiterKeys("fresh-client", "reza");
+    assert.deepEqual(limiter.check(fresh), { ok: false, retryAfterSec: 59 });
+    // Failures from sign-ins already in flight cannot exceed capacity.
+    for (let attempt = 0; attempt < 5; attempt++) limiter.recordFailure(fresh);
+    assert.deepEqual(limiter.check(fresh), { ok: false, retryAfterSec: 59 });
+    assert.deepEqual(limiter.check(limiterKeys("client-0", "reza")), { ok: false, retryAfterSec: 59 });
+
+    now = 60_000;
+    assert.deepEqual(limiter.check(fresh), { ok: true });
+    assert.deepEqual(limiter.check(limiterKeys("client-4999", "reza")), { ok: false, retryAfterSec: 1 });
+    for (let attempt = 0; attempt < 5; attempt++) {
+      assert.deepEqual(limiter.check(fresh), { ok: true });
+      limiter.recordFailure(fresh);
+    }
+    assert.deepEqual(limiter.check(fresh), { ok: false, retryAfterSec: 60 });
+  } finally {
+    console.warn = savedWarn;
+  }
+});
+
 test("limiter logs only lockout transitions with key kinds and no key values", () => {
   const saved = console.warn;
   const logs: unknown[][] = [];

@@ -24,10 +24,16 @@ export class LoginLimiter {
     private readonly windowMs = WINDOW_MS
   ) {}
 
-  /** Blocked when ANY of the keys is locked; reports the longest wait. */
+  /** Blocked when any key is locked or a new key cannot be tracked. */
   check(keys: string[]): LimitCheck {
     const now = this.now();
     let wait = 0;
+    if (this.entries.size >= MAX_KEYS) {
+      const nextExpiry = this.prune(now);
+      if (this.entries.size >= MAX_KEYS && keys.some((key) => !this.entries.has(key))) {
+        wait = nextExpiry - now;
+      }
+    }
     for (const key of keys) {
       const entry = this.entries.get(key);
       if (entry && entry.lockedUntil > now) wait = Math.max(wait, entry.lockedUntil - now);
@@ -37,8 +43,12 @@ export class LoginLimiter {
 
   recordFailure(keys: string[]): void {
     const now = this.now();
+    if (this.entries.size >= MAX_KEYS) this.prune(now);
     for (const key of keys) {
       let entry = this.entries.get(key);
+      // In-flight sign-ins can finish after the last slot was taken.
+      // check() blocks untracked keys until a slot becomes available.
+      if (!entry && this.entries.size >= MAX_KEYS) continue;
       if (entry && entry.lockedUntil > now) continue;
       if (!entry || now - entry.windowStart >= this.windowMs) {
         entry = { failures: 0, windowStart: now, lockedUntil: 0 };
@@ -55,21 +65,20 @@ export class LoginLimiter {
       this.entries.delete(key); // re-insert so Map order stays oldest-first
       this.entries.set(key, entry);
     }
-    this.prune(now);
   }
 
   recordSuccess(keys: string[]): void {
     for (const key of keys) this.entries.delete(key);
   }
 
-  private prune(now: number): void {
+  private prune(now: number): number {
+    let nextExpiry = Infinity;
     for (const [key, entry] of this.entries) {
-      const stale = entry.lockedUntil <= now && now - entry.windowStart >= this.windowMs;
-      // Key churn must not erase the passcode defense or any active lockout.
-      const evictable = key !== PASSCODE_KEY && entry.lockedUntil <= now;
-      if (stale || (this.entries.size > MAX_KEYS && evictable)) this.entries.delete(key);
-      else if (this.entries.size <= MAX_KEYS) break;
+      const expiresAt = Math.max(entry.lockedUntil, entry.windowStart + this.windowMs);
+      if (expiresAt <= now) this.entries.delete(key);
+      else nextExpiry = Math.min(nextExpiry, expiresAt);
     }
+    return nextExpiry;
   }
 }
 
