@@ -443,3 +443,63 @@ export async function projectRepos(
   );
   return found.filter((r): r is ProjectRepo => r !== null);
 }
+
+/* ------------------------------------------------------------------ */
+/* Open pull requests of a repo                                        */
+/* ------------------------------------------------------------------ */
+
+export type OpenPull = {
+  repo: string;
+  number: number;
+  url: string;
+  title: string;
+  author: string;
+  headRef: string;
+  isDraft: boolean;
+  updatedAt: string;
+};
+
+/** `owner/repo` that is safe to hand to gh, else null. */
+export function parseRepoSlug(raw: unknown): string | null {
+  if (typeof raw !== "string") return null;
+  const [owner, repo, extra] = raw.trim().split("/");
+  if (extra !== undefined || !owner || !repo) return null;
+  if (!OWNER.test(owner) || !REPO.test(repo) || repo === "." || repo === "..") return null;
+  return `${owner}/${repo}`;
+}
+
+/** The repo's open PRs, newest activity first (at most `limit`). */
+export async function listOpenPulls(repo: string, exec: Exec = defaultExec, limit = 30): Promise<OpenPull[]> {
+  const slug = parseRepoSlug(repo);
+  if (!slug) throw new PrError("pr_unreadable", `Not a GitHub repository: ${repo}`);
+  let rows: Record<string, unknown>[];
+  try {
+    const { stdout } = await exec("gh", [
+      "pr", "list", "--repo", slug, "--state", "open", "--limit", String(Math.min(Math.max(limit, 1), 100)),
+      "--json", "number,title,url,author,headRefName,isDraft,updatedAt",
+    ]);
+    rows = JSON.parse(stdout || "[]");
+  } catch (err) {
+    if (err instanceof SyntaxError) throw new PrError("command_failed", "gh pr list returned text that is not JSON.");
+    throw ghError(err, `Listing the open PRs of ${slug}`);
+  }
+  return rows
+    .flatMap((r) => {
+      const number = Number(r.number);
+      if (!Number.isInteger(number) || number <= 0) return [];
+      const author = (r.author ?? {}) as Record<string, unknown>;
+      return [
+        {
+          repo: slug,
+          number,
+          url: typeof r.url === "string" ? r.url : `https://github.com/${slug}/pull/${number}`,
+          title: typeof r.title === "string" ? r.title : "",
+          author: typeof author.login === "string" ? author.login : "",
+          headRef: typeof r.headRefName === "string" ? r.headRefName : "",
+          isDraft: r.isDraft === true,
+          updatedAt: typeof r.updatedAt === "string" ? r.updatedAt : "",
+        },
+      ];
+    })
+    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+}

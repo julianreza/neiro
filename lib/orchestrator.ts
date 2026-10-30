@@ -66,6 +66,8 @@ import {
   type PrData,
 } from "@/lib/github-pr";
 import { hasPrProblem, prProblem } from "@/lib/needs-you";
+import { readRepoRules, type RepoRules } from "@/lib/repo-rules";
+import { loadReviewRulesText } from "@/lib/review-rules-store";
 import { missionNeedsPr } from "@/lib/types";
 
 /* ------------------------------------------------------------------ */
@@ -102,6 +104,8 @@ export type OrchestratorDeps = {
   reviews?: CodeReviewStore | null;
   /** git + gh steps that give a Build / Fix mission its PR. */
   github?: MissionGitHub;
+  /** The admin's edited review rules (null = default). Omit for the stored ones. */
+  reviewRules?: () => Promise<string | null>;
 };
 
 export type MissionGitHub = {
@@ -127,6 +131,7 @@ function resolveDeps(deps?: Partial<OrchestratorDeps>): OrchestratorDeps {
     notify: deps?.notify ?? (deps?.store ? undefined : supabaseNotifier),
     reviews: deps?.reviews !== undefined ? deps.reviews : deps?.store ? null : createCodeReviewStore(),
     github: deps?.github ?? { ensureMissionPr: realEnsureMissionPr, fetchPr: realFetchPr },
+    reviewRules: deps?.reviewRules ?? (deps?.store ? async () => null : loadReviewRulesText),
   };
 }
 
@@ -1231,7 +1236,15 @@ export type MissionReviewRun = { prompt: string; reviewId: string | null };
 
 const PR_DELIVERABLE_CHARS = 4000;
 
-export function missionReviewPrompt(m: MissionDetailDTO, task: MissionTask, pr: MissionPr, data: PrData): string {
+export function missionReviewPrompt(
+  m: MissionDetailDTO,
+  task: MissionTask,
+  pr: MissionPr,
+  data: PrData,
+  repoRules: RepoRules | null = null,
+  rules: string | null = null,
+): string {
+  const checkout = m.agentWorkspacePath || m.worktreePath;
   return buildReviewPrompt(
     {
       repo: prSlug(pr.ref),
@@ -1244,6 +1257,9 @@ export function missionReviewPrompt(m: MissionDetailDTO, task: MissionTask, pr: 
       files: data.files,
       diff: data.diff,
       diffTruncated: data.diffTruncated,
+      checkout: checkout ? { path: checkout, onHead: true } : null,
+      repoRules,
+      rules,
     },
     [
       `This is the Final review of task "${task.title}" in the neiro mission "${m.title}".`,
@@ -1342,7 +1358,9 @@ async function openMissionPr(
     }
   }
 
-  return { prompt: missionReviewPrompt(m, task, pr, data), reviewId };
+  const rules = await readRepoRules(m.worktreePath || m.agentWorkspacePath).catch(() => null);
+  const reviewRules = d.reviewRules ? await d.reviewRules().catch(() => null) : null;
+  return { prompt: missionReviewPrompt(m, task, pr, data, rules, reviewRules), reviewId };
 }
 
 type ReviewRowPatch = Parameters<CodeReviewStore["updateReview"]>[1];

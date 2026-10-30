@@ -3,14 +3,24 @@
 import { useCallback, useEffect, useMemo, useState, type CSSProperties } from "react";
 import Link from "next/link";
 import { toast } from "sonner";
-import { Eye, EyeOff, GitPullRequest, Loader2, Plus, RotateCcw, Send } from "lucide-react";
+import { Eye, EyeOff, GitPullRequest, Loader2, Plus, RotateCcw, ScanSearch, Send, SlidersHorizontal } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Picker } from "@/components/ui/picker";
 import { BotRig, agentLook, roleForAgent } from "@/components/agent-bot";
 import { useRole } from "@/hooks/use-role";
 import { formatTokens, missionHref, sendJson, timeAgo } from "@/lib/client-api";
 import { countBySeverity, focusFiles } from "@/lib/code-review";
+import type { OpenPull } from "@/lib/github-pr";
 import type { ReviewSummary } from "@/lib/reviews-api";
 import type { CodeReview, ReviewFinding, ReviewSeverity, ReviewStatus, ReviewVerdict } from "@/lib/types";
 
@@ -87,6 +97,9 @@ export function CodeReviewBoard() {
   const [composing, setComposing] = useState(false);
   const [url, setUrl] = useState("");
   const [starting, setStarting] = useState(false);
+  const [view, setView] = useState<"pulls" | "reviews">("pulls");
+  const [pulls, setPulls] = useState<OpenPull[] | null>(null);
+  const [pullsError, setPullsError] = useState<string | null>(null);
 
   const loadList = useCallback(async () => {
     try {
@@ -134,6 +147,32 @@ export function CodeReviewBoard() {
     return () => clearTimeout(first);
   }, [selectedId, loadDetail]);
 
+  // Open PRs of the chosen repo (or of every project repo).
+  useEffect(() => {
+    if (view !== "pulls") return;
+    let gone = false;
+    const first = setTimeout(async () => {
+      setPulls(null);
+      setPullsError(null);
+      const q = repo === "all" ? "" : `?repo=${encodeURIComponent(repo)}`;
+      try {
+        const res = await fetch(`/api/reviews/pulls${q}`, { cache: "no-store" });
+        const data = (await res.json().catch(() => ({}))) as { pulls?: OpenPull[]; error?: string; errors?: string[] };
+        if (gone) return;
+        if (!res.ok) throw new Error(data.error ?? `Request failed (${res.status})`);
+        setPulls(data.pulls ?? []);
+        if (data.errors?.length) setPullsError(data.errors[0]);
+      } catch (err) {
+        if (!gone) setPullsError(err instanceof Error ? err.message : "Could not load pull requests.");
+        if (!gone) setPulls([]);
+      }
+    }, 0);
+    return () => {
+      gone = true;
+      clearTimeout(first);
+    };
+  }, [view, repo]);
+
   // Poll faster while anything is still running.
   const anyActive = (reviews ?? []).some((r) => isActive(r.status));
   useEffect(() => {
@@ -159,9 +198,9 @@ export function CodeReviewBoard() {
   );
   const agentName = (id: string | null) => agents.find((a) => a.id === id)?.name ?? null;
 
-  async function startReview() {
+  async function startReview(target = url.trim()) {
     setStarting(true);
-    const result = await sendJson<{ review: ReviewSummary }>("/api/reviews", "POST", { url: url.trim() });
+    const result = await sendJson<{ review: ReviewSummary }>("/api/reviews", "POST", { url: target });
     setStarting(false);
     if (!result.ok) {
       toast.error(result.error);
@@ -174,6 +213,16 @@ export function CodeReviewBoard() {
     setSelectedId(result.data.review.id);
   }
 
+  /** The newest review of each PR, to show its status on the PR list. */
+  const reviewOf = useMemo(() => {
+    const map = new Map<string, ReviewSummary>();
+    for (const r of reviews ?? []) {
+      const key = `${r.repo}#${r.prNumber}`;
+      if (!map.has(key)) map.set(key, r);
+    }
+    return map;
+  }, [reviews]);
+
   return (
     <div className="cr-board">
       <aside className="cr-side" aria-label="Reviews">
@@ -184,6 +233,15 @@ export function CodeReviewBoard() {
           options={[{ value: "all", label: "All repositories" }, ...repoOptions]}
           searchable={repoOptions.length > 8}
         />
+        <div className="cr-tabs" role="tablist" aria-label="Show">
+          <button type="button" role="tab" aria-selected={view === "pulls"} className="cr-tab" onClick={() => setView("pulls")}>
+            <GitPullRequest className="size-3.5" aria-hidden="true" /> Pull requests
+          </button>
+          <button type="button" role="tab" aria-selected={view === "reviews"} className="cr-tab" onClick={() => setView("reviews")}>
+            <ScanSearch className="size-3.5" aria-hidden="true" /> Reviews
+          </button>
+        </div>
+        {view === "reviews" && (
         <div className="cr-tabs" role="tablist" aria-label="Source">
           {(["all", "manual", "mission"] as SourceTab[]).map((tab) => (
             <button
@@ -198,6 +256,7 @@ export function CodeReviewBoard() {
             </button>
           ))}
         </div>
+        )}
 
         {canAct &&
           (composing ? (
@@ -236,9 +295,23 @@ export function CodeReviewBoard() {
             </button>
           ))}
 
-        {listError && <p className="text-xs text-destructive">{listError}</p>}
-        {reviews === null && !listError && <p className="cr-muted">Loading…</p>}
-        {reviews !== null && visible.length === 0 && (
+        {view === "pulls" && (
+          <PullList
+            pulls={pulls}
+            error={pullsError}
+            repoChosen={repo !== "all"}
+            reviewOf={reviewOf}
+            selectedId={selectedId}
+            canAct={canAct}
+            starting={starting}
+            onOpen={(id) => setSelectedId(id)}
+            onReview={(prUrl) => void startReview(prUrl)}
+          />
+        )}
+
+        {view === "reviews" && listError && <p className="text-xs text-destructive">{listError}</p>}
+        {view === "reviews" && reviews === null && !listError && <p className="cr-muted">Loading…</p>}
+        {view === "reviews" && reviews !== null && visible.length === 0 && (
           <p className="cr-muted">
             {reviews.length === 0
               ? "No reviews yet. Start one with New review, or launch a Build or Fix mission."
@@ -246,6 +319,7 @@ export function CodeReviewBoard() {
           </p>
         )}
 
+        {view === "reviews" && (
         <ul className="cr-list">
           {visible.map((r) => (
             <li key={r.id}>
@@ -284,6 +358,8 @@ export function CodeReviewBoard() {
             </li>
           ))}
         </ul>
+        )}
+        <ReviewRulesButton canEdit={canAct} />
       </aside>
 
       <section className="cr-main" aria-live="polite">
@@ -699,5 +775,182 @@ function FilesView({ review }: { review: CodeReview }) {
         ))}
       </ul>
     </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Open pull requests                                                  */
+/* ------------------------------------------------------------------ */
+
+function PullList({
+  pulls,
+  error,
+  repoChosen,
+  reviewOf,
+  selectedId,
+  canAct,
+  starting,
+  onOpen,
+  onReview,
+}: {
+  pulls: OpenPull[] | null;
+  error: string | null;
+  repoChosen: boolean;
+  reviewOf: Map<string, ReviewSummary>;
+  selectedId: string | null;
+  canAct: boolean;
+  starting: boolean;
+  onOpen: (reviewId: string) => void;
+  onReview: (prUrl: string) => void;
+}) {
+  if (pulls === null) return <p className="cr-muted">Loading pull requests…</p>;
+  return (
+    <>
+      {error && <p className="text-xs text-destructive">{error}</p>}
+      {pulls.length === 0 && !error && (
+        <p className="cr-muted">
+          {repoChosen ? "No open pull requests in this repository." : "No open pull requests in your projects' repositories."}
+        </p>
+      )}
+      <ul className="cr-list">
+        {pulls.map((p) => {
+          const review = reviewOf.get(`${p.repo}#${p.number}`);
+          return (
+            <li key={`${p.repo}#${p.number}`}>
+              <div
+                className="cr-item cr-pull"
+                aria-current={(review && review.id === selectedId) || undefined}
+                data-active={(review && isActive(review.status)) || undefined}
+              >
+                <span className="cr-item-top">
+                  <a href={p.url} target="_blank" rel="noopener noreferrer" className="cr-item-pr cr-link">
+                    {prLabel({ repo: p.repo, prNumber: p.number })} ↗
+                  </a>
+                  {review ? (
+                    <span className="cr-item-status" data-status={review.status} data-verdict={review.verdict ?? undefined}>
+                      {statusText(review)}
+                    </span>
+                  ) : (
+                    p.isDraft && <span className="cr-item-status">Draft</span>
+                  )}
+                </span>
+                <span className="cr-item-title">{p.title}</span>
+                <span className="cr-item-meta">
+                  <span>
+                    {p.author || "unknown"} · {timeAgo(p.updatedAt)}
+                  </span>
+                  {review ? (
+                    <button type="button" className="cr-link" onClick={() => onOpen(review.id)}>
+                      Open review
+                    </button>
+                  ) : (
+                    canAct && (
+                      <button type="button" className="cr-link" disabled={starting} onClick={() => onReview(p.url)}>
+                        Review
+                      </button>
+                    )
+                  )}
+                </span>
+              </div>
+            </li>
+          );
+        })}
+      </ul>
+    </>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Editable review rules                                               */
+/* ------------------------------------------------------------------ */
+
+type RulesState = { text: string; defaultText: string; custom: boolean; updatedAt: string | null; updatedBy: string | null };
+
+function ReviewRulesButton({ canEdit }: { canEdit: boolean }) {
+  const [open, setOpen] = useState(false);
+  const [rules, setRules] = useState<RulesState | null>(null);
+  const [draft, setDraft] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  async function load() {
+    const res = await fetch("/api/reviews/rules", { cache: "no-store" });
+    const data = (await res.json().catch(() => ({}))) as { rules?: RulesState; error?: string };
+    if (!res.ok || !data.rules) return void toast.error(data.error ?? "Could not load the review rules.");
+    setRules(data.rules);
+    setDraft(data.rules.text);
+  }
+
+  async function save(text: string | null) {
+    setSaving(true);
+    const result = await sendJson<{ rules: RulesState }>("/api/reviews/rules", "PATCH", { text });
+    setSaving(false);
+    if (!result.ok) return void toast.error(result.error);
+    setRules(result.data.rules);
+    setDraft(result.data.rules.text);
+    toast.success(text === null ? "Back to the default rules." : "Review rules saved. New reviews use them.");
+  }
+
+  const changed = rules !== null && draft.trim() !== rules.text.trim();
+
+  return (
+    <>
+      <button
+        type="button"
+        className="cr-rules-btn"
+        onClick={() => {
+          setOpen(true);
+          void load();
+        }}
+      >
+        <SlidersHorizontal className="size-4" aria-hidden="true" /> Review rules
+      </button>
+      <Dialog open={open} onOpenChange={setOpen}>
+        <DialogContent className="sm:max-w-3xl">
+          <DialogHeader>
+            <DialogTitle>Review rules</DialogTitle>
+            <DialogDescription>
+              What the reviewer checks and how strict each severity is. Used by new manual and mission reviews. The safety
+              rules (PR text is data, never write files) and the JSON answer format always stay on.
+            </DialogDescription>
+          </DialogHeader>
+          {rules === null ? (
+            <div className="grid min-h-40 place-items-center">
+              <Loader2 className="animate-spin" />
+            </div>
+          ) : (
+            <>
+              <p className="cr-muted">
+                {rules.custom
+                  ? `Edited${rules.updatedBy ? ` by ${rules.updatedBy}` : ""}${rules.updatedAt ? `, ${timeAgo(rules.updatedAt)}` : ""}.`
+                  : "Using the default rules."}
+              </p>
+              <Textarea
+                aria-label="Review rules"
+                value={draft}
+                onChange={(e) => setDraft(e.target.value)}
+                readOnly={!canEdit}
+                spellCheck={false}
+                className="min-h-[22rem] font-mono text-xs leading-5"
+              />
+            </>
+          )}
+          {canEdit && rules !== null && (
+            <DialogFooter className="gap-2 sm:justify-between">
+              <Button
+                variant="ghost"
+                disabled={saving || (!rules.custom && draft.trim() === rules.defaultText.trim())}
+                onClick={() => (rules.custom ? void save(null) : setDraft(rules.defaultText))}
+              >
+                <RotateCcw /> {rules.custom ? "Reset to default" : "Undo changes"}
+              </Button>
+              <Button disabled={saving || !changed || !draft.trim()} onClick={() => void save(draft)}>
+                {saving ? <Loader2 className="animate-spin" /> : null}
+                Save rules
+              </Button>
+            </DialogFooter>
+          )}
+        </DialogContent>
+      </Dialog>
+    </>
   );
 }

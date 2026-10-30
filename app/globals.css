@@ -5892,6 +5892,15 @@ button.project-row { width: 100%; text-align: left; }
   font-size: 0.8125rem;
 }
 .cr-item[aria-current="true"] { box-shadow: var(--neu-inset); }
+.cr-pull button.cr-link { background: none; padding: 0; font-size: 0.75rem; }
+.cr-rules-btn {
+  margin-top: auto; display: inline-flex; align-items: center; justify-content: center; gap: 0.375rem;
+  padding: 0.5rem; border-radius: 0.875rem; font-size: 0.8125rem; color: var(--muted-foreground);
+  background: var(--background); box-shadow: var(--neu-raise-sm);
+}
+.cr-rules-btn:hover { color: var(--foreground); }
+.cr-rules-btn:active { box-shadow: var(--neu-inset-sm); }
+.cr-pull button.cr-link:disabled { opacity: 0.5; }
 .cr-item[data-active]::after {
   content: ""; position: absolute; inset: 0; pointer-events: none;
   background: linear-gradient(90deg, transparent, color-mix(in oklch, var(--primary) 22%, transparent), transparent);

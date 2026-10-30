@@ -3,6 +3,7 @@ import type { CodeReviewStore, ReviewPatch } from "@/lib/code-reviews-store";
 import { fetchPr as realFetchPr, parsePrUrl, PrError, prSlug } from "@/lib/github-pr";
 import { classifyRun, pickStageAgent, type HermesClient } from "@/lib/orchestrator";
 import type { OrchestratorStore } from "@/lib/orchestrator-store";
+import { readRepoRules as realReadRepoRules } from "@/lib/repo-rules";
 import type { Agent, CodeReview } from "@/lib/types";
 
 /**
@@ -20,6 +21,11 @@ export type ReviewRunnerDeps = {
   store: Pick<OrchestratorStore, "listEnabledAgents" | "listAllEnabledAgents" | "recordTokenUsage">;
   hermes: Pick<HermesClient, "startRun" | "getRun">;
   fetchPr: typeof realFetchPr;
+  /** A local checkout of `owner/repo` among the saved projects, or null. */
+  findLocalCheckout: (repo: string) => Promise<string | null>;
+  readRules: typeof realReadRepoRules;
+  /** The admin's edited review rules, or null for the default. */
+  loadRules: () => Promise<string | null>;
   now: () => Date;
 };
 
@@ -40,6 +46,13 @@ async function resolveDeps(deps?: Partial<ReviewRunnerDeps>): Promise<ReviewRunn
     store,
     hermes,
     fetchPr: deps?.fetchPr ?? realFetchPr,
+    findLocalCheckout:
+      deps?.findLocalCheckout ??
+      (deps?.reviews ? async () => null : (await import("@/lib/project-repos")).findLocalCheckout),
+    readRules: deps?.readRules ?? realReadRepoRules,
+    loadRules:
+      deps?.loadRules ??
+      (deps?.reviews ? async () => null : (await import("@/lib/review-rules-store")).loadReviewRulesText),
     now: deps?.now ?? (() => new Date()),
   };
 }
@@ -117,6 +130,11 @@ async function startReview(review: CodeReview, d: ReviewRunnerDeps): Promise<boo
     files: pr.files,
   });
 
+  // A saved project with this repo gives the reviewer the code around the
+  // diff and the repo's own rules. Best effort: the diff alone still works.
+  const checkout = await d.findLocalCheckout(prSlug(ref)).catch(() => null);
+  const repoRules = checkout ? await d.readRules(checkout).catch(() => null) : null;
+
   const prompt = buildReviewPrompt({
     repo: prSlug(ref),
     number: ref.number,
@@ -128,12 +146,16 @@ async function startReview(review: CodeReview, d: ReviewRunnerDeps): Promise<boo
     files: pr.files,
     diff: pr.diff,
     diffTruncated: pr.diffTruncated,
+    checkout: checkout ? { path: checkout, onHead: false } : null,
+    repoRules,
+    rules: await d.loadRules().catch(() => null),
   });
 
   const started = await d.hermes.startRun(agent, {
     prompt,
-    // No cwd: a CLI agent then runs in an empty folder, and "deny" refuses
-    // any write, so a review never touches a checkout.
+    // The checkout (if any) is only read: "deny" refuses every write a CLI
+    // agent asks for. Without one it runs in an empty folder.
+    cwd: checkout ?? undefined,
     approvals: "deny",
     idempotencyKey: `review-${review.id}`,
   });

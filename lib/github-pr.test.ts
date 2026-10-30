@@ -6,7 +6,9 @@ import {
   ensureMissionPr,
   fetchPr,
   isPushableBranch,
+  listOpenPulls,
   parsePrUrl,
+  parseRepoSlug,
   postReviewComments,
   projectRepos,
   repoFromRemote,
@@ -277,4 +279,23 @@ test("projectRepos keeps only projects with a GitHub origin", async () => {
     exec,
   );
   assert.deepEqual(out, [{ repo: "o/a", projectId: "1", projectName: "A", path: "/a" }]);
+});
+
+test("listOpenPulls reads gh pr list, newest first", async () => {
+  const { exec, calls } = fakeExec([
+    [
+      "gh pr list",
+      JSON.stringify([
+        { number: 3, title: "Old", url: "https://github.com/o/r/pull/3", author: { login: "a" }, headRefName: "x", isDraft: false, updatedAt: "2026-10-01T00:00:00Z" },
+        { number: 18, title: "Code review", url: "https://github.com/o/r/pull/18", author: { login: "julianreza" }, headRefName: "feat/code-review-page", isDraft: true, updatedAt: "2026-10-30T14:00:00Z" },
+        { number: "bad" },
+      ]),
+    ],
+  ]);
+  const pulls = await listOpenPulls("o/r", exec);
+  assert.deepEqual(pulls.map((p) => [p.number, p.author, p.isDraft]), [[18, "julianreza", true], [3, "a", false]]);
+  assert.deepEqual(calls[0].args.slice(0, 7), ["pr", "list", "--repo", "o/r", "--state", "open", "--limit"]);
+  await assert.rejects(listOpenPulls("o/r/x", exec), (e: PrError) => e.reason === "pr_unreadable");
+  assert.equal(parseRepoSlug("julianreza/neiro"), "julianreza/neiro");
+  assert.equal(parseRepoSlug("-x/r"), null);
 });
