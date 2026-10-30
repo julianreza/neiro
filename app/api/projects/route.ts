@@ -19,6 +19,19 @@ function failure(err: unknown, fallback: string) {
   return NextResponse.json({ error: err instanceof Error ? err.message : fallback }, { status: 500 });
 }
 
+/** Missions and chats in `path` with no project (e.g. after the project was removed) get `projectId`. */
+async function relinkOrphans(projectId: string, path: string) {
+  const supabase = getSupabaseAdmin();
+  for (const table of ["missions", "ask_questions"] as const) {
+    const { error } = await supabase
+      .from(table)
+      .update({ project_id: projectId })
+      .is("project_id", null)
+      .eq("workspace_path", path);
+    if (error) console.warn(`[projects] could not relink ${table}:`, error.message);
+  }
+}
+
 /** Folders added by hand on the Projects page, newest first. */
 export async function GET() {
   await connection();
@@ -59,6 +72,8 @@ export async function POST(request: NextRequest) {
       }
       return NextResponse.json({ error: error.message }, { status: 500 });
     }
+    // Re-adding a removed project picks its old missions and chats back up.
+    await relinkOrphans(String(data.id), path);
     return NextResponse.json({ project: await withGit(data) }, { status: 201 });
   } catch (err: unknown) {
     return failure(err, "Could not add the project");

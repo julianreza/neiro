@@ -711,6 +711,22 @@ async function stepTask(
 
   const verdict = isQa
     ? extractGateVerdict(output, "PASS", "FAIL")
+  // Credit this run's tokens to the agent that ran it. Before the task
+  // moves on, so a failed write is retried by the next tick.
+  if ((run.tokens ?? 0) > 0) {
+    await d.store.recordTokenUsage({
+      runId: task.runId,
+      missionId: m.id,
+      taskId: task.id,
+      agentId: agent.id,
+      agentName: agent.name,
+      stage: task.stage,
+      tokens: run.tokens ?? 0,
+      model: agent.model || null,
+      runtime: agent.runtime ?? "hermes",
+    });
+  }
+
     : extractGateVerdict(output, "APPROVED", "CHANGES_REQUESTED");
   const passed = verdict.verdict === (isQa ? "PASS" : "APPROVED");
 
@@ -1067,7 +1083,9 @@ async function startTaskRun(
     return;
   }
 
-  const overBudget = budgetBlock(m, agent);
+  // Only an agent with a budget needs its spend looked up.
+  const agentUsed = agent.tokenBudget ? await d.store.agentMissionTokens(m.id, agent.id) : null;
+  const overBudget = budgetBlock(m, agent, agentUsed);
   if (overBudget) {
     const parked = await d.store.updateTaskIf(task.id, claimGuard, {
       stage: "Needs you",

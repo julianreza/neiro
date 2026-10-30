@@ -145,6 +145,8 @@ export function MissionComposer({
   advanced,
   folderLocked = false,
   compact = false,
+  onAskChange,
+  answerElsewhere = false,
 }: {
   prompt: string;
   onPromptChange: (value: string) => void;
@@ -161,7 +163,16 @@ export function MissionComposer({
   folderLocked?: boolean;
   /** One row of mode pills and no "What happens next" side panel. */
   compact?: boolean;
+  /** Called when a question starts (with its run id) or ends, so a parent list can refresh. */
+  onAskChange?: (runId?: string) => void;
+  /** The parent shows answers: start the question, hand over its id, show no answer card. */
+  answerElsewhere?: boolean;
 }) {
+  // Kept in a ref so a new callback does not restart the answer poll.
+  const askChanged = useRef(onAskChange);
+  useEffect(() => {
+    askChanged.current = onAskChange;
+  }, [onAskChange]);
   const [mode, setMode] = useState<ComposerMode>("ask");
   const [ask, setAsk] = useState<AskState>({ phase: "idle" });
   // Tool calls the answering agent waits on; shown as Allow / Deny in its bubble.
@@ -260,6 +271,7 @@ export function MissionComposer({
         setAskApprovals(DONE.has(status) ? null : { runId, list: normalizeApprovals(data.approvals) });
         if (DONE.has(status)) {
           const ok = status === "completed";
+          askChanged.current?.();
           setAsk((state) =>
             state.phase !== "running" || state.runId !== runId
               ? state
@@ -326,6 +338,12 @@ export function MissionComposer({
         return;
       }
       rememberWorkspace(workspace);
+      if (answerElsewhere) {
+        // The parent shows the answer (Projects page chat panel); the composer stays free.
+        onPromptChange("");
+        askChanged.current?.(data.runId);
+        return;
+      }
       setThread((turns) =>
         retry ? turns : followUp && ask.phase === "done" ? [...turns, { question: ask.question, answer: ask.output }] : [],
       );
@@ -339,6 +357,7 @@ export function MissionComposer({
         output: "",
       });
       onPromptChange("");
+      askChanged.current?.();
     } catch {
       toast.error("Network error");
     } finally {
@@ -368,7 +387,7 @@ export function MissionComposer({
   function submit() {
     if (busy || blocked) return;
     if (mode === "ask") {
-      startAsk(prompt, ask.phase === "done");
+      startAsk(prompt, !answerElsewhere && ask.phase === "done");
       return;
     }
     rememberWorkspace(workspace);

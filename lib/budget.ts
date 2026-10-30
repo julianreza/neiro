@@ -11,6 +11,11 @@ export function missionTokensUsed(m: MissionDetailDTO): number {
   return m.tasks.reduce((sum, t) => sum + (Number(t.tokens) || 0), 0);
 }
 
+/**
+ * Fallback for when the per-run usage table cannot be read: a task's
+ * agent_id is only its latest stage's agent, so this over-counts that
+ * agent and misses the others. Prefer the `agentUsed` from the store.
+ */
 export function agentTokensUsed(m: MissionDetailDTO, agentId: string): number {
   return m.tasks
     .filter((t) => t.agentId === agentId)
@@ -23,8 +28,16 @@ function limitOf(value: number | null | undefined): number | null {
   return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : null;
 }
 
-/** Why this agent may not start another run in this mission, or null. */
-export function budgetBlock(m: MissionDetailDTO, agent: Pick<Agent, "id" | "name" | "tokenBudget">): BudgetBlock | null {
+/**
+ * Why this agent may not start another run in this mission, or null.
+ * `agentUsed` is what the agent's own runs spent here (agent_token_usage);
+ * null or omitted falls back to the task-based count.
+ */
+export function budgetBlock(
+  m: MissionDetailDTO,
+  agent: Pick<Agent, "id" | "name" | "tokenBudget">,
+  agentUsed?: number | null,
+): BudgetBlock | null {
   const missionLimit = limitOf(m.tokenBudget);
   if (missionLimit !== null) {
     const used = missionTokensUsed(m);
@@ -40,7 +53,7 @@ export function budgetBlock(m: MissionDetailDTO, agent: Pick<Agent, "id" | "name
 
   const agentLimit = limitOf(agent.tokenBudget);
   if (agentLimit !== null) {
-    const used = agentTokensUsed(m, agent.id);
+    const used = typeof agentUsed === "number" ? agentUsed : agentTokensUsed(m, agent.id);
     if (used >= agentLimit) {
       return {
         scope: "agent",

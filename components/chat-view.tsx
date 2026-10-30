@@ -10,6 +10,7 @@ import { Picker } from "@/components/ui/picker";
 import { Textarea } from "@/components/ui/textarea";
 import { AgentBot, agentLook, roleForAgent } from "@/components/agent-bot";
 import { ApprovalAsk, AskHand } from "@/components/approval-ask";
+import { DeleteButton } from "@/components/delete-button";
 import { useRole } from "@/hooks/use-role";
 import { useRunSteps } from "@/hooks/use-run-steps";
 import { normalizeApprovals, type PendingApproval } from "@/lib/approvals";
@@ -252,6 +253,24 @@ export function ChatView() {
           <header className="chat-pane-head">
             <h2 className="min-w-0 truncate text-base font-semibold">{chat ? chat.title : "New chat"}</h2>
             {chatProject && <span className="project-git">{chatProject.name}</span>}
+            {chat && canSend && (
+              <DeleteButton
+                url={`/api/chats/${encodeURIComponent(chat.id)}`}
+                what="Chat"
+                title="Delete this chat?"
+                disabledReason={running ? "The robot is still answering. Wait for it, or stop it, then delete." : undefined}
+                body={
+                  <p>
+                    All {chat.messages.length} message{chat.messages.length === 1 ? "" : "s"} of this chat are deleted.
+                    This can&apos;t be undone.
+                  </p>
+                }
+                onDeleted={() => {
+                  setChats((list) => (list ?? []).filter((c) => c.id !== chat.id));
+                  setSelected(null);
+                }}
+              />
+            )}
           </header>
 
           <div className="chat-messages" aria-live="polite">
@@ -319,7 +338,7 @@ export function ChatView() {
 }
 
 /** One question and its answer: the question on the right, the robot's reply on the left. */
-function ChatTurn({
+export function ChatTurn({
   row,
   approvals,
   canAnswer,

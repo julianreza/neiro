@@ -81,6 +81,20 @@ export type NewArtifactRow = {
 export interface OrchestratorStore {
   getMissionDetail(missionId: string): Promise<MissionDetailDTO>;
   /** Missions the tick should advance: status 'running' only. */
+/** Tokens one finished run spent, credited to the agent that ran it. */
+export type TokenUsageRow = {
+  runId: string;
+  /** Null for runs outside a mission (a manual code review). */
+  missionId: string | null;
+  taskId: string | null;
+  agentId: string | null;
+  agentName: string;
+  stage: string;
+  tokens: number;
+  model?: string | null;
+  runtime?: string | null;
+};
+
   listActiveMissionIds(): Promise<string[]>;
   listEnabledAgents(stage: AgentStage): Promise<Agent[]>;
   /** Every enabled agent, any stage (the router's candidate set). */
@@ -101,6 +115,13 @@ export interface OrchestratorStore {
   /** Record (message) or clear (null) the mission's last orchestration error. */
   setMissionError(id: string, message: string | null): Promise<void>;
 }
+  /** Record a finished run's tokens; a run id already recorded is ignored. */
+  recordTokenUsage(row: TokenUsageRow): Promise<void>;
+  /**
+   * Tokens this agent's own runs spent in this mission, from
+   * agent_token_usage; null when that table cannot be read.
+   */
+  agentMissionTokens(missionId: string, agentId: string): Promise<number | null>;
 
 /* ------------------------------------------------------------------ */
 /* Row mappers                                                         */
@@ -410,6 +431,35 @@ export function createSupabaseStore(client?: SupabaseClient): OrchestratorStore 
           last_error_at: message === null ? null : new Date().toISOString(),
         })
         .eq("id", id);
+    async recordTokenUsage(row) {
+      const base = {
+        run_id: row.runId,
+        mission_id: row.missionId,
+        task_id: row.taskId,
+        agent_id: row.agentId,
+        agent_name: row.agentName,
+        stage: row.stage,
+        tokens: Math.max(0, Math.round(row.tokens)),
+      };
+      const write = (values: Row) =>
+        db().from("agent_token_usage").upsert(values, { onConflict: "run_id", ignoreDuplicates: true });
+      let { error } = await write({ ...base, model: row.model ?? null, runtime: row.runtime ?? null });
+      // Before the model/runtime migration those columns are missing; still record the tokens.
+      if (error && (error.code === "PGRST204" || error.code === "42703")) ({ error } = await write(base));
+      if (error) throw new Error(error.message);
+    },
+
+    async agentMissionTokens(missionId, agentId) {
+      const { data, error } = await db()
+        .from("agent_token_usage")
+        .select("tokens")
+        .eq("mission_id", missionId)
+        .eq("agent_id", agentId)
+        .limit(10_000);
+      if (error) return null;
+      return (data ?? []).reduce((sum, r) => sum + (Number((r as Row).tokens) || 0), 0);
+    },
+
       if (error) throw new Error(error.message);
     },
   };
