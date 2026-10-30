@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 import { isAuthorizedRequest } from "@/lib/auth";
 import { getSupabaseAdmin } from "@/lib/supabase";
-import { stopHermesRun, submitHermesRunApproval, submitHermesRunClarify } from "@/lib/hermes";
+import { stopRun, submitRunApproval, submitRunClarify } from "@/lib/agent-runtime";
 import {
   advanceMission,
   approveRoute,
@@ -23,6 +23,7 @@ export async function POST(request: NextRequest, context: RouteContext) {
     const body = await request.json();
     const action = body?.action;
     const { reply, approved } = body || {};
+    const requestId = typeof body?.requestId === "string" && body.requestId.length <= 200 ? body.requestId : undefined;
 
     const validActions = [
       "retry",
@@ -175,7 +176,7 @@ export async function POST(request: NextRequest, context: RouteContext) {
     if (action === "stop") {
       if (agent && activeRunId) {
         try {
-          await stopHermesRun(agent, activeRunId);
+          await stopRun(agent, activeRunId);
         } catch (err: unknown) {
           // Best effort: the task is parked in "Needs you" either way.
           console.error("[orchestrator] stop run failed", {
@@ -210,11 +211,15 @@ export async function POST(request: NextRequest, context: RouteContext) {
     if (action === "approve_tool" || action === "deny_tool") {
       const isApproved = action === "approve_tool" || Boolean(approved);
       if (agent && activeRunId) {
+        let answered: boolean;
         try {
-          await submitHermesRunApproval(agent, activeRunId, isApproved);
+          answered = await submitRunApproval(agent, activeRunId, isApproved, requestId ? { requestId } : undefined);
         } catch (err: unknown) {
           const message = err instanceof Error ? err.message : String(err);
           return NextResponse.json({ error: message }, { status: 500 });
+        }
+        if (!answered) {
+          return NextResponse.json({ error: "The agent did not take the answer. It may have stopped waiting." }, { status: 409 });
         }
       }
 
@@ -242,7 +247,7 @@ export async function POST(request: NextRequest, context: RouteContext) {
 
       if (agent && activeRunId) {
         try {
-          await submitHermesRunClarify(agent, activeRunId, reply);
+          await submitRunClarify(agent, activeRunId, reply);
         } catch (err: unknown) {
           const message = err instanceof Error ? err.message : String(err);
           return NextResponse.json({ error: message }, { status: 500 });

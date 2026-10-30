@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { connection } from "next/server";
 import type { NextRequest } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
-import { AppConfigError } from "@/lib/types";
+import { AppConfigError, isMissingRuntimeColumn, parseRuntimeFields, RUNTIME_MIGRATION_HINT } from "@/lib/types";
 import { parseTokenBudget } from "@/lib/budget";
 import type { Agent, AgentPublic } from "@/lib/types";
 
@@ -96,7 +96,14 @@ export async function POST(request: NextRequest) {
     // Only sent when set, so a database without the budget migration still works.
     const budget = parseTokenBudget(body?.tokenBudget, "tokenBudget");
     if (!budget.ok) return NextResponse.json({ error: budget.error }, { status: 400 });
-    const row = budget.value !== null ? { ...newAgent, token_budget: budget.value } : newAgent;
+    const row: Record<string, unknown> = budget.value !== null ? { ...newAgent, token_budget: budget.value } : { ...newAgent };
+
+    // Sent only when not the default, so a database without the runtime
+    // migration still saves Hermes agents.
+    const runtimeFields = parseRuntimeFields(body);
+    if (!runtimeFields.ok) return NextResponse.json({ error: runtimeFields.error }, { status: 400 });
+    if (runtimeFields.runtime && runtimeFields.runtime !== "hermes") row.runtime = runtimeFields.runtime;
+    if (runtimeFields.effort) row.effort = runtimeFields.effort;
 
     const { data, error } = await supabase
       .from("agents")
@@ -105,7 +112,8 @@ export async function POST(request: NextRequest) {
       .single();
 
     if (error) {
-      return NextResponse.json({ error: error.message }, { status: 500 });
+      const message = isMissingRuntimeColumn(error) ? RUNTIME_MIGRATION_HINT : error.message;
+      return NextResponse.json({ error: message }, { status: 500 });
     }
 
     const publicAgent = { ...data };

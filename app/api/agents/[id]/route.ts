@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { connection } from "next/server";
 import type { NextRequest } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
-import { AppConfigError } from "@/lib/types";
+import { AppConfigError, isMissingRuntimeColumn, parseRuntimeFields, RUNTIME_MIGRATION_HINT } from "@/lib/types";
 import { parseTokenBudget } from "@/lib/budget";
 import type { Agent } from "@/lib/types";
 
@@ -81,18 +81,32 @@ export async function PATCH(request: NextRequest, context: RouteContext) {
       }
     }
 
+    const runtimeFields = parseRuntimeFields(body);
+    if (!runtimeFields.ok) return NextResponse.json({ error: runtimeFields.error }, { status: 400 });
+    if (runtimeFields.runtime !== undefined) updates.runtime = runtimeFields.runtime;
+    if (runtimeFields.effort !== undefined) updates.effort = runtimeFields.effort;
+
     if (Object.keys(updates).length === 0) {
       return NextResponse.json({ error: "No valid fields provided for update" }, { status: 400 });
     }
 
     updates.updated_at = new Date().toISOString();
 
-    const { data, error } = await supabase
-      .from("agents")
-      .update(updates)
-      .eq("id", id)
-      .select()
-      .maybeSingle();
+    const save = (fields: Record<string, unknown>) =>
+      supabase.from("agents").update(fields).eq("id", id).select().maybeSingle();
+    let { data, error } = await save(updates);
+
+    // No runtime migration yet: a Hermes agent with no effort loses nothing
+    // by saving without those columns.
+    if (isMissingRuntimeColumn(error)) {
+      if ((updates.runtime ?? "hermes") !== "hermes" || updates.effort) {
+        return NextResponse.json({ error: RUNTIME_MIGRATION_HINT }, { status: 409 });
+      }
+      const rest = { ...updates };
+      delete rest.runtime;
+      delete rest.effort;
+      ({ data, error } = await save(rest));
+    }
 
     if (error) {
       return NextResponse.json({ error: error.message }, { status: 500 });

@@ -1,13 +1,12 @@
 "use client";
 
 import { useEffect, useRef, useState, type ReactNode, type RefObject } from "react";
-import Markdown from "react-markdown";
-import remarkGfm from "remark-gfm";
 import {
   ChevronDown,
   FolderOpen,
   MessageCircleQuestionMark,
   Play,
+  RotateCcw,
   Sparkles,
   Square,
   Timer,
@@ -23,6 +22,11 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { FolderPicker, rememberFolder } from "@/components/folder-picker";
 import { BotRig, agentLook } from "@/components/agent-bot";
+import { AgentMarkdown, CopyButton } from "@/components/agent-markdown";
+import { FilesRead } from "@/components/reply-parts";
+import { ApprovalAsk, AskHand } from "@/components/approval-ask";
+import { useRole } from "@/hooks/use-role";
+import { normalizeApprovals, type PendingApproval } from "@/lib/approvals";
 import { askContextBrief, splitAnswerFiles, type AskTurn } from "@/lib/ask-history";
 
 export type ComposerMode = "ask" | "build" | "fix" | "plan";
@@ -160,6 +164,8 @@ export function MissionComposer({
 }) {
   const [mode, setMode] = useState<ComposerMode>("ask");
   const [ask, setAsk] = useState<AskState>({ phase: "idle" });
+  // Tool calls the answering agent waits on; shown as Allow / Deny in its bubble.
+  const [askApprovals, setAskApprovals] = useState<{ runId: string; list: PendingApproval[] } | null>(null);
   // Earlier turns of this Ask thread; the current one lives in `ask`.
   const [thread, setThread] = useState<AskTurn[]>([]);
   // Ask thread a mission was turned from; sent with the mission prompt.
@@ -173,6 +179,28 @@ export function MissionComposer({
   const busy = mode === "ask" ? asking || startingAsk : launching;
   const runId = asking ? ask.runId : null;
   const agentId = asking ? ask.agentId : null;
+  const role = useRole();
+  const waiting = runId && askApprovals?.runId === runId ? askApprovals.list : [];
+
+  async function answerAsk(approval: PendingApproval, approve: boolean): Promise<string | null> {
+    if (!runId || !agentId) return "The question has ended.";
+    try {
+      const res = await fetch(`/api/ask/${encodeURIComponent(runId)}?agentId=${encodeURIComponent(agentId)}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ approve, requestId: approval.requestId }),
+      });
+      if (!res.ok) {
+        const data = (await res.json().catch(() => ({}))) as { error?: string };
+        return data.error ?? `Request failed (${res.status})`;
+      }
+      // Hide it now; the next poll shows any request that follows.
+      setAskApprovals((cur) => (cur ? { ...cur, list: cur.list.filter((a) => a !== approval) } : cur));
+      return null;
+    } catch {
+      return "Network error";
+    }
+  }
 
   // Fill the project folder: last one used, else the folder Neiro runs from.
   useEffect(() => {
@@ -224,10 +252,12 @@ export function MissionComposer({
           status?: string;
           output?: string;
           error?: string | null;
+          approvals?: unknown;
         };
         if (cancelled) return;
         if (!res.ok) throw new Error(data.error ?? `Request failed (${res.status})`);
         const status = data.status ?? "running";
+        setAskApprovals(DONE.has(status) ? null : { runId, list: normalizeApprovals(data.approvals) });
         if (DONE.has(status)) {
           const ok = status === "completed";
           setAsk((state) =>
@@ -259,7 +289,8 @@ export function MissionComposer({
     };
   }, [runId, agentId]);
 
-  async function startAsk(question: string, followUp: boolean) {
+  /** Start a question; `retry` asks a failed question again and keeps the earlier turns. */
+  async function startAsk(question: string, followUp: boolean, retry = false) {
     if (askRequest.current || asking) return;
     if (!question.trim()) {
       inputRef.current?.focus();
@@ -281,7 +312,7 @@ export function MissionComposer({
         body: JSON.stringify({
           question: question.trim(),
           workspace_path: workspace.trim(),
-          session_id: followUp && ask.phase !== "idle" ? ask.runId : undefined,
+          session_id: followUp && !retry && ask.phase !== "idle" ? ask.runId : undefined,
         }),
       });
       const data = (await res.json().catch(() => ({}))) as {
@@ -296,7 +327,7 @@ export function MissionComposer({
       }
       rememberWorkspace(workspace);
       setThread((turns) =>
-        followUp && ask.phase === "done" ? [...turns, { question: ask.question, answer: ask.output }] : [],
+        retry ? turns : followUp && ask.phase === "done" ? [...turns, { question: ask.question, answer: ask.output }] : [],
       );
       setAsk({
         phase: "running",
@@ -496,16 +527,17 @@ export function MissionComposer({
             <span className="sr-only">You asked: </span>
             {ask.question}
           </p>
-          <div className="answer-row">
-            <span className="answer-avatar" aria-hidden="true">
+          <div className="answer-row" style={agentLook("PM")}>
+            <span className="answer-avatar" aria-hidden="true" data-asks={waiting.length > 0 || undefined}>
               <span
                 className="agent-bot answer-bot"
-                data-state={ask.phase === "running" ? "working" : undefined}
+                data-state={ask.phase === "running" && waiting.length === 0 ? "working" : undefined}
                 data-hop={ask.phase === "done" ? "" : undefined}
                 style={agentLook("PM")}
               >
                 <BotRig role="PM" />
               </span>
+              {waiting.length > 0 && <AskHand />}
             </span>
             <div className="answer-bubble">
               <p className="answer-meta tabular-nums">
@@ -520,10 +552,10 @@ export function MissionComposer({
               </p>
               {answer.body ? (
                 <div className="composer-markdown">
-                  <Markdown remarkPlugins={[remarkGfm]}>{answer.body}</Markdown>
+                  <AgentMarkdown text={answer.body} />
                 </div>
               ) : (
-                ask.phase === "running" && (
+                ask.phase === "running" && waiting.length === 0 && (
                   <p className="composer-thinking">
                     <i />
                     <i />
@@ -532,14 +564,19 @@ export function MissionComposer({
                   </p>
                 )
               )}
-              {answer.files.length > 0 && (
-                <ul className="flex flex-wrap gap-1.5" aria-label="Files read">
-                  {answer.files.map((file) => (
-                    <li key={file}>
-                      <code className="code-chip">{file}</code>
-                    </li>
-                  ))}
-                </ul>
+              {waiting.length > 0 && (
+                <ApprovalAsk
+                  agentName={ask.agentName}
+                  approvals={waiting}
+                  readOnly={role === "viewer"}
+                  send={answerAsk}
+                />
+              )}
+              <FilesRead files={answer.files} />
+              {ask.phase === "done" && answer.body && (
+                <div className="chat-foot">
+                  <CopyButton text={answer.body} label="Copy answer" />
+                </div>
               )}
               <div className="flex flex-wrap gap-2">
                 {ask.phase === "running" ? (
@@ -549,6 +586,17 @@ export function MissionComposer({
                   </Button>
                 ) : (
                   <>
+                    {ask.phase === "failed" && (
+                      <Button
+                        variant="outline"
+                        className="min-h-10"
+                        disabled={startingAsk}
+                        onClick={() => void startAsk(ask.question, false, true)}
+                      >
+                        <RotateCcw className="size-3.5" aria-hidden="true" />
+                        Try again
+                      </Button>
+                    )}
                     {ask.phase === "done" && (
                       <Button
                         variant="outline"

@@ -22,6 +22,51 @@ export type AgentStage =
   | "scheduled"
   | "ask";
 
+export const AGENT_RUNTIMES = ["hermes", "ohmypi"] as const;
+export type AgentRuntime = (typeof AGENT_RUNTIMES)[number];
+
+export const OHMYPI_EFFORTS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+
+export function asRuntime(value: unknown): AgentRuntime {
+  return AGENT_RUNTIMES.includes(value as AgentRuntime) ? (value as AgentRuntime) : "hermes";
+}
+
+export const RUNTIME_MIGRATION_HINT =
+  "Run supabase/migrations/20261029000500_agent_runtime.sql in Supabase first, then save again.";
+
+/** Reads `runtime` and `effort` from an agent API body. Absent keys stay undefined. */
+export function parseRuntimeFields(
+  body: Record<string, unknown> | null | undefined,
+):
+  | { ok: true; runtime?: AgentRuntime; effort?: string | null }
+  | { ok: false; error: string } {
+  const out: { runtime?: AgentRuntime; effort?: string | null } = {};
+  if (body && "runtime" in body) {
+    if (!AGENT_RUNTIMES.includes(body.runtime as AgentRuntime)) {
+      return { ok: false, error: `runtime must be one of: ${AGENT_RUNTIMES.join(", ")}` };
+    }
+    out.runtime = body.runtime as AgentRuntime;
+  }
+  if (body && "effort" in body) {
+    const effort = typeof body.effort === "string" ? body.effort.trim() : body.effort;
+    if (effort === "" || effort === null || effort === undefined) {
+      out.effort = null;
+    } else if (OHMYPI_EFFORTS.includes(effort as (typeof OHMYPI_EFFORTS)[number])) {
+      out.effort = effort as string;
+    } else {
+      return { ok: false, error: `effort must be one of: ${OHMYPI_EFFORTS.join(", ")}` };
+    }
+  }
+  return { ok: true, ...out };
+}
+
+/** True when Supabase refused a write because the runtime migration is missing. */
+export function isMissingRuntimeColumn(error: { code?: string; message?: string } | null): boolean {
+  if (!error) return false;
+  const msg = error.message ?? "";
+  return (error.code === "PGRST204" || error.code === "42703") && /\b(runtime|effort)\b/.test(msg);
+}
+
 export type Agent = {
   id: string;
   name: string;
@@ -37,6 +82,10 @@ export type Agent = {
   activeRun: boolean;
   /** Max tokens this agent may spend in one mission; null = no limit. */
   tokenBudget?: number | null;
+  /** What runs the agent: the Hermes server or a local CLI. Missing = hermes. */
+  runtime?: AgentRuntime;
+  /** Oh My Pi thinking level (off … max); empty = the CLI's own default. */
+  effort?: string;
   createdAt?: string;
   updatedAt?: string;
 };

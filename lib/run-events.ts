@@ -41,6 +41,10 @@ export function parseRunEvent(raw: string, eventName?: string): LogStep | null {
     s(data.tool) ?? s(data.tool_name) ?? s((data.tool_call as Record<string, unknown> | undefined)?.name) ?? s(data.name);
   const text = s(data.text) ?? s(data.delta) ?? s(data.content) ?? s(data.message) ?? s(data.output);
 
+  // A CLI run's Allow / Deny answer: its own row, not merged into the reply.
+  if (type === "decision" && text) {
+    return { kind: "info", text: short(text), at };
+  }
   if (type.includes("approval") || data.requires_approval === true) {
     return {
       kind: "approval",

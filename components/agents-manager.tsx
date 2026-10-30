@@ -38,7 +38,8 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
-import { ModelPicker } from "@/components/model-picker";
+import { ModelPicker, type RuntimeModels } from "@/components/model-picker";
+import { asRuntime, OHMYPI_EFFORTS, type AgentRuntime } from "@/lib/types";
 import { Label } from "@/components/ui/label";
 import { Picker } from "@/components/ui/picker";
 import { Switch } from "@/components/ui/switch";
@@ -69,7 +70,40 @@ type Agent = {
   activeRun: boolean;
   /** Max tokens per mission; null = no limit. */
   tokenBudget?: number | null;
+  /** What runs it: Hermes, or the local omp CLI. */
+  runtime: AgentRuntime;
+  /** Oh My Pi thinking level; empty = the CLI default. */
+  effort: string;
 };
+
+const RUNTIME_LABEL: Record<AgentRuntime, { name: string; hint: string }> = {
+  hermes: { name: "Hermes", hint: "server" },
+  ohmypi: { name: "Oh My Pi", hint: "CLI omp" },
+};
+
+type CliInfo = { installed: boolean; models: { id: string; name: string; group: string }[]; reason?: string };
+type CliRuntimes = { ohmypi: CliInfo };
+const noCliRuntimes: CliRuntimes = {
+  ohmypi: { installed: false, models: [] },
+};
+
+function parseCliRuntimes(json: unknown): CliRuntimes {
+  const read = (raw: unknown): CliInfo => {
+    const r = (raw ?? {}) as { installed?: unknown; models?: unknown; reason?: unknown };
+    const models = Array.isArray(r.models)
+      ? r.models.flatMap((m) => {
+          const x = m as { id?: unknown; name?: unknown; group?: unknown };
+          return typeof x.id === "string"
+            ? [{ id: x.id, name: typeof x.name === "string" ? x.name : x.id, group: typeof x.group === "string" ? x.group : "" }]
+            : [];
+        })
+      : [];
+    return { installed: r.installed === true, models, reason: typeof r.reason === "string" ? r.reason : undefined };
+  };
+  const data = json as { ohmypi?: unknown } | null;
+  if (!data || typeof data !== "object") throw new Error("Malformed /api/agents/runtimes response");
+  return { ohmypi: read(data.ohmypi) };
+}
 
 const presets = [
   {
@@ -181,6 +215,8 @@ const starters: Agent[] = [
     prompt: preset.prompt,
     url: "",
     enabled: true,
+    runtime: "hermes" as const,
+    effort: "",
   };
 });
 
@@ -197,6 +233,8 @@ function blankAgent(): Agent {
     url: "",
     enabled: true,
     activeRun: false,
+    runtime: "hermes",
+    effort: "",
   };
 }
 
@@ -219,6 +257,8 @@ function parseAgents(json: unknown): Agent[] {
     enabled: Boolean(row.enabled ?? true),
     activeRun: Boolean(row.activeRun ?? row.active_run ?? false),
     tokenBudget: Number(row.token_budget ?? row.tokenBudget) > 0 ? Number(row.token_budget ?? row.tokenBudget) : null,
+    runtime: asRuntime(row.runtime),
+    effort: typeof row.effort === "string" ? row.effort : "",
   }));
 }
 
@@ -254,6 +294,28 @@ export function AgentsManager() {
     parseHermesModels,
   );
   const modelOptions = hermesModels.source === "live" ? hermesModels.data : [];
+  // The local omp CLI and its models, read when the form opens.
+  const cli = useLiveData<CliRuntimes>(draft ? "/api/agents/runtimes" : null, noCliRuntimes, parseCliRuntimes);
+  const cliStatus = (info: CliInfo): RuntimeModels["status"] =>
+    cli.source === "loading" ? "loading" : cli.source === "live" && info.installed ? "ready" : "unavailable";
+  const ompInfo = cli.source === "live" ? cli.data.ohmypi : noCliRuntimes.ohmypi;
+  const runtimeModels: RuntimeModels[] = [
+    {
+      runtime: "hermes",
+      ...RUNTIME_LABEL.hermes,
+      status:
+        hermesModels.source === "live" ? "ready" : hermesModels.source === "loading" && !unsavedEndpoint ? "loading" : "unavailable",
+      models: modelOptions,
+    },
+    {
+      runtime: "ohmypi",
+      ...RUNTIME_LABEL.ohmypi,
+      status: cliStatus(ompInfo),
+      models: ompInfo.models.map((m) => ({ id: m.id, providerName: m.group.replace(/^.*· /, "") })),
+    },
+  ];
+  const draftRuntime = draft ? runtimeModels.find((r) => r.runtime === draft.runtime) : undefined;
+  const draftCli = draft && draft.runtime === "ohmypi" && cli.source === "live" ? cli.data.ohmypi : null;
   const [deleting, setDeleting] = useState<Agent | null>(null);
   const [preview, setPreview] = useState<Agent | null>(null);
   const [probeShown, setProbeShown] = useState(false);
@@ -313,13 +375,12 @@ export function AgentsManager() {
       ![
         draft.name,
         draft.specialty,
-        draft.model,
-        draft.profile,
+        draft.runtime === "hermes" ? draft.profile : "default",
         draft.prompt,
       ].every((value) => value.trim())
     ) {
       setFormError(
-        "Name, specialty, model, profile, and system prompt cannot be blank.",
+        "Name, specialty, profile, and system prompt cannot be blank.",
       );
       return;
     }
@@ -330,9 +391,10 @@ export function AgentsManager() {
       name: draft.name.trim(),
       specialty: draft.specialty.trim(),
       model: draft.model.trim(),
-      profile: draft.profile.trim(),
+      profile: draft.profile.trim() || "default",
       prompt: draft.prompt.trim(),
-      url: draft.url.trim(),
+      url: draft.runtime === "hermes" ? draft.url.trim() : "",
+      effort: draft.runtime === "ohmypi" ? draft.effort : "",
     };
 
     const error = isNew
@@ -631,7 +693,7 @@ export function AgentsManager() {
                   <li key={agent.id}>
                     <button
                       type="button"
-                      className="flex min-h-10 w-full items-center gap-2 rounded-lg px-3 text-left text-sm hover:bg-muted aria-pressed:bg-muted aria-pressed:font-medium"
+                      className="flex min-h-10 w-full items-center gap-2 rounded-lg px-3 text-left text-sm hover:bg-muted aria-pressed:bg-primary aria-pressed:text-primary-foreground aria-pressed:font-medium"
                       aria-pressed={agent.id === selected?.id}
                       onClick={() => setSelectedId(agent.id)}
                     >
@@ -716,18 +778,35 @@ export function AgentsManager() {
                     onChange={(stage) => setDraft({ ...draft, stage: stage as Stage })}
                   />
                 </div>
-                <div className="space-y-2">
-                  <Label htmlFor="agent-profile">Hermes profile</Label>
-                  <Input
-                    id="agent-profile"
-                    required
-                    maxLength={100}
-                    value={draft.profile}
-                    onChange={(event) =>
-                      setDraft({ ...draft, profile: event.target.value })
-                    }
-                  />
-                </div>
+                {draft.runtime === "hermes" && (
+                  <div className="space-y-2">
+                    <Label htmlFor="agent-profile">Hermes profile</Label>
+                    <Input
+                      id="agent-profile"
+                      required
+                      maxLength={100}
+                      value={draft.profile}
+                      onChange={(event) =>
+                        setDraft({ ...draft, profile: event.target.value })
+                      }
+                    />
+                  </div>
+                )}
+                {draft.runtime === "ohmypi" && (
+                  <div className="space-y-2">
+                    <Label htmlFor="agent-effort">Thinking effort</Label>
+                    <Picker
+                      id="agent-effort"
+                      value={draft.effort}
+                      placeholder="Oh My Pi default"
+                      options={[
+                        { value: "", label: "Oh My Pi default" },
+                        ...OHMYPI_EFFORTS.map((effort) => ({ value: effort })),
+                      ]}
+                      onChange={(effort) => setDraft({ ...draft, effort })}
+                    />
+                  </div>
+                )}
               </div>
               <div className="space-y-2">
                 <Label htmlFor="agent-specialty">Specialty</Label>
@@ -745,30 +824,41 @@ export function AgentsManager() {
                 <Label htmlFor="agent-model">Model</Label>
                 <ModelPicker
                   id="agent-model"
+                  runtime={draft.runtime}
                   value={draft.model}
-                  options={modelOptions}
-                  status={
-                    hermesModels.source === "live"
-                      ? "ready"
-                      : hermesModels.source === "loading" && !unsavedEndpoint
-                        ? "loading"
-                        : "unavailable"
+                  runtimes={runtimeModels}
+                  onChange={({ runtime, model }) =>
+                    setDraft({
+                      ...draft,
+                      runtime,
+                      model: model.slice(0, 160),
+                      effort: runtime === "ohmypi" ? draft.effort : "",
+                    })
                   }
-                  onChange={(model) => setDraft({ ...draft, model: model.slice(0, 160) })}
                   describedBy="agent-model-help"
                 />
                 <p
                   id="agent-model-help"
                   className="text-xs text-muted-foreground"
                 >
-                  Leave empty to use the model of the Hermes profile.{" "}
-                  {unsavedEndpoint
-                    ? "Save the provider URL to load its models."
-                    : hermesModels.source === "loading"
-                    ? "Loading models from Hermes…"
-                    : hermesModels.source === "live"
-                      ? `${modelOptions.length} models available in Hermes.`
-                      : `Hermes models unavailable: ${hermesModels.reason}.`}
+                  Runs on{" "}
+                  <span className="font-medium text-foreground">
+                    {RUNTIME_LABEL[draft.runtime].name}
+                  </span>{" "}
+                  ({RUNTIME_LABEL[draft.runtime].hint}). The runtime follows the model you pick.{" "}
+                  {draft.runtime === "hermes"
+                    ? unsavedEndpoint
+                      ? "Save the provider URL to load its models."
+                      : hermesModels.source === "loading"
+                        ? "Loading models from Hermes…"
+                        : hermesModels.source === "live"
+                          ? `${modelOptions.length} models available in Hermes.`
+                          : `Hermes models unavailable: ${hermesModels.reason}.`
+                    : draftRuntime?.status === "loading"
+                      ? "Checking the CLI…"
+                      : draftCli && !draftCli.installed
+                        ? `${RUNTIME_LABEL[draft.runtime].hint} is not installed on this computer.`
+                        : "Works in the mission's project folder and asks Allow / Deny in the chat before it writes or runs a command."}
                 </p>
               </div>
               <div className="space-y-2">
@@ -808,6 +898,7 @@ export function AgentsManager() {
                   prompt.
                 </p>
               </div>
+              {draft.runtime === "hermes" && (
               <div className="grid gap-4 sm:grid-cols-2">
                 <div className="space-y-2">
                   <Label htmlFor="agent-url">Provider URL (optional)</Label>
@@ -840,6 +931,7 @@ export function AgentsManager() {
                   </p>
                 </div>
               </div>
+              )}
               <div className="flex min-h-11 items-center gap-3">
                 <Switch
                   id="agent-form-enabled"

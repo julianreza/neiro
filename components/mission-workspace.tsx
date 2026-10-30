@@ -3,15 +3,12 @@
 import Link from "next/link";
 import { useState } from "react";
 import {
-  Check,
-  Clock3,
   FileText,
   Layers3,
   Play,
   Plus,
   RefreshCw,
   Square,
-  Zap,
 } from "lucide-react";
 import { toast } from "sonner";
 import {
@@ -23,7 +20,6 @@ import {
 import type { DemoMission, DemoTask, RouteAgentOption, TaskStage } from "@/lib/demo-missions";
 import { RoutingGateCard } from "@/components/task-routing";
 import type { MissionArtifact, MissionDetailDTO, MissionPhase, MissionSummaryDTO } from "@/lib/types";
-import { formatCompactTokens } from "@/lib/utils";
 import { useLiveData } from "@/hooks/use-live-data";
 import { DataSourceBadge } from "@/components/data-source-badge";
 import {
@@ -33,7 +29,6 @@ import {
   resetPointer,
   roleForAgent,
 } from "@/components/agent-bot";
-import { StatObject, statLook, type StatKind } from "@/components/stat-object";
 import { StoryPill } from "@/components/history-story";
 import type { StoryTone } from "@/components/history-story";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -78,7 +73,14 @@ const stageLook = Object.fromEntries(
 
 
 /** A task as the board renders it; `rowId` is the database id (live mode only). */
-type TaskView = DemoTask & { rowId?: string; brief?: string | null; resultOutput?: string | null };
+type TaskView = DemoTask & {
+  rowId?: string;
+  brief?: string | null;
+  resultOutput?: string | null;
+  /** The live run (not a `claim:` token) and the agent running it. */
+  runId?: string | null;
+  runAgentId?: string | null;
+};
 
 type MissionView = Omit<DemoMission, "tasks"> & {
   tasks: TaskView[];
@@ -126,6 +128,8 @@ function parseMissionDetail(json: unknown): MissionView | null {
     tasks: m.tasks.map((t) => ({
       id: t.taskKey ?? t.id.slice(0, 8),
       rowId: t.id,
+      runId: t.runId && !t.runId.startsWith("claim:") ? t.runId : null,
+      runAgentId: t.runAgentId ?? t.agentId ?? null,
       title: t.title,
       stage: t.stage,
       agent: t.agentName || "Unassigned",
@@ -229,10 +233,8 @@ export function MissionWorkspace({ project }: { project: WorkspaceProject }) {
   const tasks = mission?.tasks ?? [];
   const hasPrd = Boolean(mission?.artifacts?.some((a) => a.name === "PRD.md"));
   const done = tasks.filter((task) => task.stage === "Done").length;
-  const tokens = tasks.reduce((sum, task) => sum + task.tokens, 0);
   // The mission's own retry cap; demo missions use the orchestrator default.
   const maxRetriesShown = mission?.maxRetries ?? 2;
-  const assignedAgents = new Set(tasks.map((t) => t.agent).filter((a) => a && a !== "Unassigned")).size;
 
   function refresh() {
     list.reload();
@@ -402,73 +404,6 @@ export function MissionWorkspace({ project }: { project: WorkspaceProject }) {
           </Button>
         </div>
       </div>
-      <section
-        className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4"
-        aria-label="Mission overview"
-      >
-        {[
-          {
-            label: "Mission status",
-            value:
-              mission?.status === "running"
-                ? "In progress"
-                : mission?.status === "completed"
-                  ? "Completed"
-                  : mission?.status === "cancelled"
-                    ? "Cancelled"
-                    : "Awaiting plan",
-            detail: isLive ? `Phase: ${mission?.phase ?? "—"}` : "Sample data",
-            icon: ActivityIcon,
-            kind: "mission",
-          },
-          {
-            label: "Tasks completed",
-            value: `${done} / ${tasks.length}`,
-            detail: "Across execution pipeline",
-            icon: Check,
-            kind: "tasks",
-          },
-          {
-            label: "Team capacity",
-            value: isLive ? `${assignedAgents} assigned` : "6 agents",
-            detail: isLive ? "Agents on this mission" : "Sample team",
-            icon: Layers3,
-            kind: "team",
-          },
-          {
-            label: "Token usage",
-            value: formatCompactTokens(tokens),
-            detail: isLive ? "Reported by Hermes" : "Sample usage",
-            icon: Zap,
-            kind: "tokens",
-          },
-        ].map(({ label, value, detail, kind }, index) => (
-          <div
-            className="stat-card"
-            key={label}
-            style={
-              {
-                "--i": index,
-                ...statLook(kind as StatKind),
-              } as React.CSSProperties
-            }
-            onPointerMove={followPointer}
-            onPointerLeave={resetPointer}
-          >
-            <div className="flex min-w-0 flex-1 flex-col">
-              <span className="text-sm text-white/85">{label}</span>
-              <p className="stat-value tabular-nums">{value}</p>
-              <p className="mt-auto pt-2 text-xs text-white/75">{detail}</p>
-            </div>
-            <StatObject
-              kind={kind as StatKind}
-              label={label}
-              active={mission?.status === "running"}
-              progress={tasks.length ? done / tasks.length : 0}
-            />
-          </div>
-        ))}
-      </section>
       <section className="space-y-5">
         {isLive && mission?.workBranch && (
           <WorktreeBar
@@ -538,14 +473,14 @@ export function MissionWorkspace({ project }: { project: WorkspaceProject }) {
                   <TabsTrigger value="board">
                     <Layers3 className="size-3.5" />
                     Board{" "}
-                    <span className="font-mono text-[10px]">
+                    <span className="project-count">
                       {tasks.length}
                     </span>
                   </TabsTrigger>
                   <TabsTrigger value="artifacts">
                     <FileText className="size-3.5" />
                     Artifacts{" "}
-                    <span className="font-mono text-[10px]">
+                    <span className="project-count">
                       {isLive ? (mission.artifacts?.length ?? 0) : 2}
                     </span>
                   </TabsTrigger>
@@ -653,6 +588,7 @@ export function MissionWorkspace({ project }: { project: WorkspaceProject }) {
                   </div>
                 ) : (
                   <TaskChat
+                    missionId={isLive ? mission.id : undefined}
                     tasks={tasks}
                     artifacts={mission.rawArtifacts ?? []}
                     maxRetries={maxRetriesShown}
@@ -707,5 +643,3 @@ export function MissionWorkspace({ project }: { project: WorkspaceProject }) {
     </div>
   );
 }
-
-const ActivityIcon = Clock3;

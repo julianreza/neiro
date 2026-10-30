@@ -4,7 +4,7 @@ import { NextResponse } from "next/server";
 import { connection } from "next/server";
 import type { NextRequest } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
-import { startHermesRun } from "@/lib/hermes";
+import { startRun } from "@/lib/agent-runtime";
 import { mapAgentRow } from "@/lib/orchestrator-store";
 import { chatSessionId, recordAskStart } from "@/lib/ask-history";
 import { linkToProject } from "@/lib/projects-store";
@@ -89,13 +89,16 @@ export async function POST(request: NextRequest) {
     // One chat = one Hermes session: always the chat's first run id.
     const hermesSessionId = sessionId ? await chatSessionId(supabase, sessionId) : undefined;
 
-    const started = await startHermesRun(agent, {
+    const started = await startRun(agent, {
       prompt: workspace ? `Question: ${question}\n\nWorkspace: ${workspace}` : `Question: ${question}`,
       instructions: [agent.prompt, workspace ? ASK_RULES : CHAT_RULES].filter(Boolean).join("\n\n"),
       sessionId: hermesSessionId,
+      cwd: workspace || undefined,
+      // A write or command waits for Allow / Deny in the chat.
+      approvals: "ask",
     });
     if (started.kind === "deferred") {
-      return NextResponse.json({ error: "Hermes is busy. Try again in a minute." }, { status: 503 });
+      return NextResponse.json({ error: `${agent.name} is busy. Try again in a minute.` }, { status: 503 });
     }
 
     // Saved so the answer shows in History, even after a page refresh.

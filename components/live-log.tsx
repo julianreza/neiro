@@ -5,9 +5,8 @@ import { toast } from "sonner";
 import { Copy, Loader2, RotateCw } from "lucide-react";
 import { BotRig, agentLook, roleForAgent } from "@/components/agent-bot";
 import { Button } from "@/components/ui/button";
-import { useRole } from "@/hooks/use-role";
-import { formatTokens, missionHref, sendJson, timeAgo } from "@/lib/client-api";
-import { appendStep, parseRunEvent } from "@/lib/run-events";
+import { formatTokens, missionHref, timeAgo } from "@/lib/client-api";
+import { useRunSteps } from "@/hooks/use-run-steps";
 import type { LogStep } from "@/lib/run-events";
 import type { ActiveRunDTO } from "@/app/api/runs/active/route";
 
@@ -167,68 +166,9 @@ function RunInspector({
   status: RunStatus;
   onGone: (runId: string) => void;
 }) {
-  const [steps, setSteps] = useState<LogStep[]>([]);
-  const [state, setState] = useState<"connecting" | "live" | "ended" | "error">("connecting");
-  const [streamError, setStreamError] = useState<string | null>(null);
-  const [attempt, setAttempt] = useState(0);
+  const { steps, state, error: streamError, retry } = useRunSteps(run.runId, run.agentId ?? null, onGone);
   const [picked, setPicked] = useState<number | null>(null);
-  const [answered, setAnswered] = useState<Set<number>>(new Set());
   const bottom = useRef<HTMLLIElement>(null);
-  const role = useRole();
-
-  useEffect(() => {
-    const controller = new AbortController();
-    const url = `/api/hermes/runs/${encodeURIComponent(run.runId)}/events${
-      run.agentId ? `?agentId=${encodeURIComponent(run.agentId)}` : ""
-    }`;
-
-    (async () => {
-      try {
-        const res = await fetch(url, { signal: controller.signal, headers: { Accept: "text/event-stream" } });
-        if (!res.ok || !res.body) {
-          const data = await res.json().catch(() => ({}));
-          const message = typeof data.error === "string" ? data.error : `Stream failed (${res.status})`;
-          // Hermes dropped the run (finished long ago or cleaned up).
-          if (res.status === 404 || /run[_ ]not[_ ]found/i.test(message)) {
-            onGone(run.runId);
-            setState("ended");
-            return;
-          }
-          setStreamError(message);
-          setState("error");
-          return;
-        }
-        setState("live");
-        const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
-        let buffer = "";
-        for (;;) {
-          const { value, done } = await reader.read();
-          if (done) break;
-          buffer += value;
-          // SSE frames end with a blank line; keep any partial frame.
-          const frames = buffer.split(/\r?\n\r?\n/);
-          buffer = frames.pop() ?? "";
-          for (const frame of frames) {
-            let name: string | undefined;
-            const data: string[] = [];
-            for (const line of frame.split(/\r?\n/)) {
-              if (line.startsWith("event:")) name = line.slice(6).trim();
-              else if (line.startsWith("data:")) data.push(line.slice(5).replace(/^ /, ""));
-            }
-            const step = data.length > 0 ? parseRunEvent(data.join("\n"), name) : null;
-            if (step) setSteps((list) => appendStep(list, { ...step, at: step.at ?? new Date().toISOString() }));
-          }
-        }
-        setState("ended");
-      } catch (err: unknown) {
-        if (controller.signal.aborted) return;
-        setStreamError(err instanceof Error ? err.message : "Stream stopped");
-        setState("error");
-      }
-    })();
-
-    return () => controller.abort();
-  }, [run.runId, run.agentId, attempt, onGone]);
 
   // Follow the newest step until the user picks one.
   useEffect(() => {
@@ -237,20 +177,6 @@ function RunInspector({
 
   const focusIndex = picked ?? steps.length - 1;
   const focus = steps[focusIndex] ?? null;
-
-  async function decide(index: number, approve: boolean) {
-    const result = await sendJson(
-      `/api/missions/${encodeURIComponent(run.missionId)}/tasks/${encodeURIComponent(run.taskId)}/control`,
-      "POST",
-      { action: approve ? "approve_tool" : "deny_tool" }
-    );
-    if (!result.ok) {
-      toast.error(result.error);
-      return;
-    }
-    setAnswered((set) => new Set(set).add(index));
-    toast.success(approve ? "Allowed" : "Denied");
-  }
 
   async function copy(value: string) {
     try {
@@ -261,17 +187,8 @@ function RunInspector({
     }
   }
 
-  const canDecide = (i: number) => steps[i]?.kind === "approval" && role !== "viewer" && !answered.has(i);
-  const decideButtons = (i: number) => (
-    <span className="inline-flex gap-1.5">
-      <Button size="xs" onClick={() => void decide(i, true)}>
-        Allow
-      </Button>
-      <Button size="xs" variant="outline" onClick={() => void decide(i, false)}>
-        Deny
-      </Button>
-    </span>
-  );
+  // Allow / Deny live in the mission's task chat; the log only points there.
+  const asksYou = (i: number) => steps[i]?.kind === "approval";
 
   const header = (
     <div className="log-head">
@@ -319,11 +236,7 @@ function RunInspector({
             <Button
               size="xs"
               variant="outline"
-              onClick={() => {
-                setStreamError(null);
-                setState("connecting");
-                setAttempt((n) => n + 1);
-              }}
+              onClick={retry}
             >
               <RotateCw className="size-3" /> Retry
             </Button>
@@ -384,7 +297,15 @@ function RunInspector({
                 </button>
               </div>
             )}
-            {canDecide(focusIndex) && <div className="mt-3">{decideButtons(focusIndex)}</div>}
+            {asksYou(focusIndex) && (
+              <p className="mt-3 text-sm text-muted-foreground">
+                Allow or deny it in the{" "}
+                <a className="underline" href={missionHref(run.missionId)}>
+                  mission chat
+                </a>
+                .
+              </p>
+            )}
           </>
         ) : (
           <p className="mt-2 text-sm text-muted-foreground">Click a step to see its command, file or text.</p>

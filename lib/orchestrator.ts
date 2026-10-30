@@ -16,13 +16,15 @@
  *                 (failed gates go back to Queued, or to "Needs you").
  */
 import {
-  createHermesSession,
-  getHermesRun,
-  startHermesRun,
   type HermesRunStatus,
-  type HermesStartRunInput,
   type HermesStartRunResult,
 } from "@/lib/hermes";
+import {
+  createSession as createAgentSession,
+  getRun as getAgentRun,
+  startRun as startAgentRun,
+  type RunStartInput,
+} from "@/lib/agent-runtime";
 import {
   extractGateVerdict,
   extractPlanFromOrchestratorOutput,
@@ -60,7 +62,7 @@ import { supabaseNotifier } from "@/lib/notifications-store";
 /* ------------------------------------------------------------------ */
 
 export interface HermesClient {
-  startRun(agent: Agent, input: HermesStartRunInput): Promise<HermesStartRunResult>;
+  startRun(agent: Agent, input: RunStartInput): Promise<HermesStartRunResult>;
   getRun(agent: Agent, runId: string): Promise<HermesRunStatus>;
   createSession(agent: Agent, title: string): Promise<string>;
 }
@@ -83,10 +85,11 @@ export type OrchestratorDeps = {
   notify?: Notifier;
 };
 
+// Each agent runs on Hermes or a local CLI; lib/agent-runtime.ts picks.
 const realHermes: HermesClient = {
-  startRun: startHermesRun,
-  getRun: getHermesRun,
-  createSession: createHermesSession,
+  startRun: startAgentRun,
+  getRun: getAgentRun,
+  createSession: createAgentSession,
 };
 
 function resolveDeps(deps?: Partial<OrchestratorDeps>): OrchestratorDeps {
@@ -406,6 +409,7 @@ async function stepMissionRun(m: MissionDetailDTO, d: OrchestratorDeps, ctx: Pas
     try {
       started = await d.hermes.startRun(agent, {
         prompt: phase === "planning" ? planPrompt(m) : specPrompt(m),
+        cwd: m.agentWorkspacePath || m.workspacePath || undefined,
         // The claim token makes each attempt distinct (a failed run is not
         // replayed) while a retried start of the same claim stays deduped.
         idempotencyKey: `${phase}-${m.id}-${token.slice(CLAIM_PREFIX.length)}`,
@@ -1110,6 +1114,7 @@ async function startTaskRun(
     started = await d.hermes.startRun(agent, {
       prompt: taskPrompt(m, task),
       sessionId,
+      cwd: m.agentWorkspacePath || m.workspacePath || undefined,
       idempotencyKey: `${TASK_STAGE_KEY[task.stage]}-${task.id}-${task.retries}`,
     });
   } catch (err: unknown) {

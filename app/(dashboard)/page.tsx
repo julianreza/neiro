@@ -1,6 +1,5 @@
-import { redirect } from "next/navigation";
+import { DashboardHome } from "@/components/dashboard-home";
 
-// The all-projects dashboard will live here. Until then, Projects is home.
 export default function Home() {
-  redirect("/projects");
+  return <DashboardHome />;
 }

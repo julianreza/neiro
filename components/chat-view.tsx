@@ -1,15 +1,18 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import Markdown from "react-markdown";
-import remarkGfm from "remark-gfm";
-import { ChevronRight, FolderGit2, Loader2, MessagesSquare, Plus, Send } from "lucide-react";
+import { AgentMarkdown, CopyButton } from "@/components/agent-markdown";
+import { FilesRead, ReplyTime } from "@/components/reply-parts";
+import { Check, ChevronRight, CircleAlert, FolderGit2, Loader2, MessagesSquare, Plus, RotateCcw, Send } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Picker } from "@/components/ui/picker";
 import { Textarea } from "@/components/ui/textarea";
 import { AgentBot, agentLook, roleForAgent } from "@/components/agent-bot";
+import { ApprovalAsk, AskHand } from "@/components/approval-ask";
 import { useRole } from "@/hooks/use-role";
+import { useRunSteps } from "@/hooks/use-run-steps";
+import { normalizeApprovals, type PendingApproval } from "@/lib/approvals";
 import { timeAgo } from "@/lib/client-api";
 import { splitAnswerFiles } from "@/lib/ask-history";
 import type { AskQuestionDTO } from "@/lib/ask-history";
@@ -41,6 +44,8 @@ export function ChatView() {
   const [newProject, setNewProject] = useState("");
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
+  // Tool calls the running answer waits on, shown as Allow / Deny in its bubble.
+  const [approvals, setApprovals] = useState<{ runId: string; list: PendingApproval[] } | null>(null);
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
   const input = useRef<HTMLTextAreaElement>(null);
 
@@ -89,16 +94,38 @@ export function ChatView() {
   useEffect(() => {
     if (!running?.agentId) return;
     const url = `/api/ask/${encodeURIComponent(running.id)}?agentId=${encodeURIComponent(running.agentId)}`;
+    const id = running.id;
     const timer = setInterval(() => {
       fetch(url, { cache: "no-store" })
         .then((res) => (res.ok ? res.json() : null))
-        .then((data: { status?: string } | null) => {
-          if (data?.status && data.status !== "running" && data.status !== "queued") void load();
+        .then((data: { status?: string; approvals?: unknown } | null) => {
+          if (!data) return;
+          setApprovals({ runId: id, list: normalizeApprovals(data.approvals) });
+          if (data.status && data.status !== "running" && data.status !== "queued") void load();
         })
         .catch(() => undefined);
     }, POLL_MS);
     return () => clearInterval(timer);
   }, [running?.id, running?.agentId, load]);
+
+  async function answerApproval(row: AskQuestionDTO, approval: PendingApproval, approve: boolean) {
+    if (!row.agentId) return "This answer has no agent to reply to.";
+    try {
+      const res = await fetch(`/api/ask/${encodeURIComponent(row.id)}?agentId=${encodeURIComponent(row.agentId)}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ approve, requestId: approval.requestId }),
+      });
+      if (!res.ok) {
+        const data = (await res.json().catch(() => ({}))) as { error?: string };
+        return data.error ?? `Request failed (${res.status})`;
+      }
+      setApprovals((cur) => (cur ? { ...cur, list: cur.list.filter((a) => a !== approval) } : cur));
+      return null;
+    } catch {
+      return "Network error";
+    }
+  }
 
   async function send() {
     const question = draft.trim();
@@ -106,6 +133,11 @@ export function ChatView() {
       input.current?.focus();
       return;
     }
+    if (await ask(question)) setDraft("");
+  }
+
+  /** Send a question to the chat; true when it was accepted. */
+  async function ask(question: string): Promise<boolean> {
     const projectId = chat ? chat.projectId : newProject || null;
     const path = projectId ? (projectById.get(projectId)?.path ?? "") : "";
     const last = chat?.messages[chat.messages.length - 1];
@@ -119,13 +151,14 @@ export function ChatView() {
       const data = (await res.json().catch(() => ({}))) as { runId?: string; error?: string };
       if (!res.ok || !data.runId) {
         toast.error(data.error ?? `Couldn't send (${res.status})`);
-        return;
+        return false;
       }
-      setDraft("");
       await load();
       setSelected(chat ? chat.id : data.runId);
+      return true;
     } catch {
       toast.error("Network error");
+      return false;
     } finally {
       setSending(false);
     }
@@ -225,7 +258,16 @@ export function ChatView() {
             {isNew && (
               <p className="chat-empty">Pick a project to ask about its files, or leave it empty to just chat.</p>
             )}
-            {chat?.messages.map((m) => <ChatTurn key={m.id} row={m} />)}
+            {chat?.messages.map((m) => (
+              <ChatTurn
+                key={m.id}
+                row={m}
+                approvals={m.status === "running" && approvals?.runId === m.id ? approvals.list : []}
+                canAnswer={canSend}
+                answer={(approval, approve) => answerApproval(m, approval, approve)}
+                retry={running || sending ? undefined : () => void ask(m.question)}
+              />
+            ))}
           </div>
 
           {canSend && (
@@ -277,39 +319,135 @@ export function ChatView() {
 }
 
 /** One question and its answer: the question on the right, the robot's reply on the left. */
-function ChatTurn({ row }: { row: AskQuestionDTO }) {
+function ChatTurn({
+  row,
+  approvals,
+  canAnswer,
+  answer,
+  retry,
+}: {
+  row: AskQuestionDTO;
+  approvals: PendingApproval[];
+  canAnswer: boolean;
+  answer: (approval: PendingApproval, approve: boolean) => Promise<string | null>;
+  retry?: () => void;
+}) {
   const botRole = roleForAgent(row.agentName || "Q&A");
-  const answer = splitAnswerFiles(row.answer);
+  const answerParts = splitAnswerFiles(row.answer);
   const asleep = row.status === "failed" || row.status === "stopped";
+  const asks = approvals.length > 0;
+  const done = !asks && row.status !== "running" && !asleep;
   return (
     <>
       <p className="chat-you">{row.question}</p>
       <div className="chat-reply" style={agentLook(botRole)}>
-        <span className="chat-bot">
-          <AgentBot name={row.agentName || "Q&A"} role={botRole} asleep={asleep} working={row.status === "running"} />
+        <span className="chat-bot" data-asks={asks || undefined}>
+          <AgentBot name={row.agentName || "Q&A"} role={botRole} asleep={asleep} working={row.status === "running" && !asks} />
+          {asks && <AskHand />}
         </span>
         <div className="min-w-0">
-          <p className="chat-name">{row.agentName || "Q&A"}</p>
-          <div className="chat-bubble">
-            {row.status === "running" ? (
-              <span className="chat-dots" aria-label="Answering">
-                <i />
-                <i />
-                <i />
-              </span>
-            ) : asleep ? (
-              <p className="text-sm text-muted-foreground">{row.error || "No answer: the question was stopped."}</p>
+          <div className="chat-bubble" data-asks={asks ? "" : undefined} data-failed={asleep && !asks ? "" : undefined}>
+            {asleep && !asks ? (
+              <FailedReply row={row} retry={canAnswer ? retry : undefined} />
             ) : (
-              <div className="composer-markdown">
-                <Markdown remarkPlugins={[remarkGfm]}>{answer.body}</Markdown>
+              <p className="chat-tag">
+                <i aria-hidden="true" />
+                {row.agentName || "Q&A"}
+                {(row.agentName || "Q&A") !== botRole && <span> · {botRole}</span>}
+              </p>
+            )}
+            {asks ? (
+              <ApprovalAsk agentName={row.agentName || "Q&A"} approvals={approvals} readOnly={!canAnswer} send={answer} />
+            ) : row.status === "running" ? (
+              <WorkingSteps runId={row.id} agentId={row.agentId} />
+            ) : asleep ? null : (
+              <FoldedAnswer text={answerParts.body} />
+            )}
+            <FilesRead files={answerParts.files} />
+            {done && answerParts.body && (
+              <div className="chat-foot">
+                <CopyButton text={answerParts.body} label="Copy answer" />
               </div>
             )}
-            {answer.files.length > 0 && (
-              <p className="mt-2 text-xs text-muted-foreground">Read: {answer.files.join(", ")}</p>
-            )}
           </div>
+          <ReplyTime at={row.createdAt} finishedAt={row.status !== "running" ? row.finishedAt : null} />
         </div>
       </div>
     </>
+  );
+}
+
+const FOLD_AT = 700;
+
+/** A long answer starts folded behind a fade, with a Show all button. */
+function FoldedAnswer({ text }: { text: string }) {
+  const long = text.length > FOLD_AT;
+  const [open, setOpen] = useState(false);
+  return (
+    <>
+      <div className="composer-markdown chat-answer" data-folded={long && !open ? "" : undefined}>
+        <AgentMarkdown text={text} />
+      </div>
+      {long && (
+        <button type="button" className="story-more chat-more" aria-expanded={open} onClick={() => setOpen((v) => !v)}>
+          {open ? "Show less" : "Show all"}
+        </button>
+      )}
+    </>
+  );
+}
+
+/** A failed or stopped answer: a red card with the error, a retry and the full details. */
+function FailedReply({ row, retry }: { row: AskQuestionDTO; retry?: () => void }) {
+  const [open, setOpen] = useState(false);
+  const stopped = row.status === "stopped";
+  const detail = row.error?.trim() || (stopped ? "The question was stopped before an answer came back." : "No answer came back.");
+  const long = detail.length > 160 || detail.includes("\n");
+  return (
+    <div className="chat-fail" role="alert">
+      <p className="chat-fail-head">
+        <CircleAlert aria-hidden="true" />
+        {stopped ? "Stopped before answering" : "Couldn't answer"}
+      </p>
+      <pre className="chat-fail-detail" data-open={open || undefined}>
+        {detail}
+      </pre>
+      <div className="chat-fail-actions">
+        {retry && (
+          <Button size="sm" variant="outline" onClick={retry}>
+            <RotateCcw aria-hidden="true" /> Try again
+          </Button>
+        )}
+        {long && (
+          <Button size="sm" variant="ghost" aria-expanded={open} onClick={() => setOpen((v) => !v)}>
+            {open ? "Hide details" : "Show details"}
+          </Button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** While the agent works: its latest steps, the newest one pulsing. */
+function WorkingSteps({ runId, agentId }: { runId: string; agentId: string | null }) {
+  const { steps } = useRunSteps(runId, agentId);
+  const tools = steps.filter((step) => step.kind === "tool").slice(-3).map((step) => step.text);
+  const writing = steps.length > 0 && steps[steps.length - 1].kind === "message";
+  const items = [...tools, ...(writing ? ["Writing the answer"] : [])];
+  if (items.length === 0) items.push("Reading the question");
+  return (
+    <ol className="chat-steps" role="status" aria-label="Answering" aria-live="polite">
+      {items.map((text, i) => {
+        const now = i === items.length - 1;
+        return (
+          <li key={`${i}-${text}`} data-state={now ? "now" : "done"}>
+            <span className="chat-step-mark" aria-hidden="true">
+              {!now && <Check />}
+            </span>
+            <span className="min-w-0 truncate">{text}</span>
+          </li>
+        );
+      })}
+    </ol>
   );
 }

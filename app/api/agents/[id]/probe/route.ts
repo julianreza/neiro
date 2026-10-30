@@ -2,7 +2,8 @@ import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { probeHermesAgent, listHermesCapabilitiesInventory } from "@/lib/hermes";
-import { AppConfigError } from "@/lib/types";
+import { listCliRuntime } from "@/lib/cli-runtime";
+import { AppConfigError, asRuntime } from "@/lib/types";
 import type { Agent } from "@/lib/types";
 
 type RouteContext = {
@@ -41,6 +42,25 @@ export async function POST(_request: NextRequest, context: RouteContext) {
       enabled: agent.enabled,
       activeRun: agent.active_run ?? false,
     };
+
+    const runtime = asRuntime(agent.runtime);
+    if (runtime !== "hermes") {
+      const started = Date.now();
+      const info = await listCliRuntime(runtime);
+      return NextResponse.json(
+        {
+          ok: info.installed && info.models.length > 0,
+          latencyMs: Date.now() - started,
+          error: !info.installed
+            ? "omp is not installed on this computer."
+            : info.models.length === 0
+              ? `The CLI answered without models${info.reason ? `: ${info.reason}` : "."}`
+              : undefined,
+          capabilities: [],
+        },
+        { status: 200 },
+      );
+    }
 
     const probe = await probeHermesAgent(typedAgent);
     let capabilities: string[] = [];

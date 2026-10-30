@@ -2,7 +2,8 @@ import { NextResponse } from "next/server";
 import { connection } from "next/server";
 import type { NextRequest } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
-import { getHermesRun, stopHermesRun } from "@/lib/hermes";
+import { getRun, stopRun, submitRunApproval } from "@/lib/agent-runtime";
+import { normalizeApprovals } from "@/lib/approvals";
 import { mapAgentRow } from "@/lib/orchestrator-store";
 import { recordAskResult, recordAskStopped } from "@/lib/ask-history";
 import { AppConfigError } from "@/lib/types";
@@ -45,16 +46,40 @@ export async function GET(request: NextRequest, context: RouteContext) {
   try {
     const agent = await loadAgent(request);
     if (agent instanceof NextResponse) return agent;
-    const run = await getHermesRun(agent, runId);
+    const run = await getRun(agent, runId);
     await recordAskResult(getSupabaseAdmin(), runId, run);
     return NextResponse.json({
       status: run.status,
       output: run.output ?? "",
       tokens: run.tokens ?? 0,
       error: run.error ?? null,
+      approvals: normalizeApprovals(run.pending_controls),
     });
   } catch (err: unknown) {
     return failure(err, "Could not read the answer");
+  }
+}
+
+/** Allow or deny a tool call the answering agent is waiting on: { approve, requestId? }. */
+export async function POST(request: NextRequest, context: RouteContext) {
+  await connection();
+  const { runId } = await context.params;
+  if (!ID.test(runId)) return NextResponse.json({ error: "Invalid run id" }, { status: 400 });
+
+  try {
+    const body = (await request.json().catch(() => null)) as Record<string, unknown> | null;
+    if (typeof body?.approve !== "boolean") {
+      return NextResponse.json({ error: "Send approve: true or false." }, { status: 400 });
+    }
+    const requestId = typeof body.requestId === "string" && body.requestId.length <= 200 ? body.requestId : undefined;
+    const agent = await loadAgent(request);
+    if (agent instanceof NextResponse) return agent;
+    const answered = await submitRunApproval(agent, runId, body.approve, requestId ? { requestId } : undefined);
+    return answered
+      ? NextResponse.json({ ok: true })
+      : NextResponse.json({ error: "The agent did not take the answer. It may have stopped waiting." }, { status: 409 });
+  } catch (err: unknown) {
+    return failure(err, "Could not send the answer");
   }
 }
 
@@ -67,7 +92,7 @@ export async function DELETE(request: NextRequest, context: RouteContext) {
   try {
     const agent = await loadAgent(request);
     if (agent instanceof NextResponse) return agent;
-    const stopped = await stopHermesRun(agent, runId);
+    const stopped = await stopRun(agent, runId);
     if (stopped) await recordAskStopped(getSupabaseAdmin(), runId);
     return NextResponse.json({ ok: stopped }, { status: stopped ? 200 : 502 });
   } catch (err: unknown) {

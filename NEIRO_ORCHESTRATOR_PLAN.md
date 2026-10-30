@@ -1,12 +1,12 @@
 # Neiro — AI Team Orchestrator
 
-This document has two parts. **Shipped** describes what the code on `feat/phase-1-design-system` does today. **Planned — not in this PR** keeps the original design plan; where it disagrees with Shipped, Shipped is correct.
+This document has two parts. **Shipped** describes what the code on `main` does today. **Not built** lists the parts of the original design plan that still do not exist; the original plan follows it. Where the plan disagrees with Shipped, Shipped is correct.
 
 ## Shipped
 
-### Schema (`supabase/schema.sql`)
+### Schema (`supabase/migrations/`)
 
-Idempotent DDL (re-runnable). RLS is enabled on every table with zero policies, so only the server-side service-role client (`lib/supabase.ts`, `SUPABASE_SERVICE_ROLE_KEY`) can read or write.
+Idempotent, ordered migrations starting from `20261028000000_baseline.sql`. RLS is enabled on every table with zero policies, so only the server-side service-role client (`lib/supabase.ts`, `SUPABASE_SERVICE_ROLE_KEY`) can read or write. The core tables are below; later migrations add the rest.
 
 | Table | Columns |
 | --- | --- |
@@ -15,12 +15,13 @@ Idempotent DDL (re-runnable). RLS is enabled on every table with zero policies, 
 | `mission_tasks` | `id text PK`, `mission_id`, `task_key` (unique per mission), `title`, `stage` (`Queued`/`Coding`/`QA check`/`Final review`/`Needs you`/`Done`), `agent_id`, `agent_name`, `model`, `tokens`, `depends` (JSONB array of `task_key`s), `approval`, `retries`, `result` (requirements), `result_output` (coding output), `run_id`, `run_agent_id`, `run_started_at`, timestamps |
 | `mission_artifacts` | `id text PK`, `mission_id`, `task_id`, `title`, `kind` (`task_plan`/`prd`/`qa_report`/`review_report`/`mission_summary`), `content`, `dedupe_key` (unique), `created_at` |
 | `app_state` | `key text PK`, `value jsonb`, `updated_at` (holds `last_cron_tick_at`) |
+| Added later | `missions` worktree columns (`repo_root`, `base_branch`, `work_branch`, `worktree_path`, `agent_workspace_path`), `token_budget` on missions and agents, `project_id`; `mission_tasks` routing columns (`routing_status`, `laya_agent_id`, `route_*`), `session_id`; `agents.runtime` (`hermes`/`ohmypi`) and `effort`; tables `app_users`, `notifications`, `ask_questions`, `projects` |
 
 `neiro_claim_task(task_id, token)` atomically moves a `Queued` task to `Coding` while the mission is under `max_parallel_workers`. It is serialized per mission with an advisory lock and executable only by the service role.
 
 ### Orchestrator (`lib/orchestrator.ts`)
 
-`advanceMission(id)` is called by `POST /api/orchestrator/tick` (VPS cron, `deploy/neiro-tick.cron`) and eagerly by the mission routes. Each call does at most one step per mission and per task:
+`advanceMission(id)` is called by `POST /api/orchestrator/tick` (VPS cron, `deploy/neiro-tick.cron`, not yet installed), by the in-process local ticker (`lib/local-ticker.ts`, on under `bun run dev`, `NEIRO_LOCAL_TICK`), and eagerly by the mission routes. Each call does at most one step per mission and per task:
 
 - **Compare-and-set**: every update is guarded on the observed `phase`/`stage` and `run_id`. A tick that loses the guard stops touching that row, so overlapping ticks never duplicate runs, artifacts or retries. Artifacts are inserted once per `dedupe_key`; planned tasks once per `task_key`.
 - **Run lifecycle**: a stage claims the row with a `claim:<uuid>` token, starts the Hermes run (with an `Idempotency-Key`), and stores its `run_id`. Later ticks poll `GET /v1/runs/{id}` and transition only when the run is terminal. Claims older than 5 minutes are released.
@@ -30,16 +31,18 @@ Idempotent DDL (re-runnable). RLS is enabled on every table with zero policies, 
 
 ### Dashboard data sources
 
-Each surface loads from its API and falls back to labelled sample data ("Demo data — reason") when the API is unavailable. See the table in `README.md`. Schedules are read-only. The dashboard does not auto-tick missions; the VPS cron does.
+Each surface loads from its API and falls back to labelled sample data ("Demo data — reason") when the API is unavailable. See the table in `README.md`. The browser never ticks missions; the local ticker or the VPS cron does.
 
-## Planned — not in this PR
+Also shipped since the original plan: one git worktree per mission (`lib/worktree.ts`), the Laya task router (`lib/task-router.ts`, stages `Awaiting routing`/`Routed`), the live run inspector over SSE (`components/run-inspector-sheet.tsx`, `/api/hermes/runs/[runId]/events`), schedule create/edit/pause/delete (`components/schedules-manager.tsx`), the model picker (`components/model-picker.tsx`), the `⌘K` command menu, projects, Chat, users and roles, budgets and notifications.
 
-These items from the original plan are **not built**. Do not code against them as if they exist:
+## Not built
+
+These items from the original plan do **not** exist. Do not code against them:
 
 - `agents` columns `role_stage`, `slug`, `system_prompt`, `custom_base_url`, `custom_api_key`, `hermes_profile`, `avatar_color` (shipped: `stage`, `prompt`, `url`, `key_enc`, `profile`).
 - Mission statuses `planning`, `writing_spec`, `summarizing`, `needs_you`, `failed` (shipped: the 4 statuses plus a separate `phase`).
 - Columns `mission_artifacts.verdict`, `mission_artifacts.agent_id`, `mission_tasks.qa_feedback`/`review_feedback`/`pending_approval`/`hermes_session_id`, per-mission `total_tokens`.
-- 3-second browser auto-tick, `expired_404` recovery from session transcripts, git worktree isolation per task, least-loaded agent selection, live SSE run inspector, schedule CRUD from the dashboard, model combobox, setup banner and command-menu actions as specified below.
+- 3-second browser auto-tick, `expired_404` recovery from session transcripts (an `expired_404` run is treated as a failure), worktree isolation per task (it is per mission), least-loaded agent selection, and the setup banner.
 - `lib/utils.ts` uses `clsx` + `tailwind-merge`, not the `cn` npm package named in Step 1.
 
 The original plan follows, unchanged except for heading levels.

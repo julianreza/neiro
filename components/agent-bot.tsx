@@ -25,7 +25,7 @@ const looks: Record<string, Look> = {
   Research: { from: "#10b981", to: "#064e3b", c1: "#a7f3d0", c2: "#34d399", c3: "#047857", glow: "#d1fae5", accessory: "book" },
   Content: { from: "#f59e0b", to: "#78350f", c1: "#fde68a", c2: "#fbbf24", c3: "#b45309", glow: "#fef9c3", accessory: "brush" },
   QA: { from: "#3b82f6", to: "#1e3a8a", c1: "#bfdbfe", c2: "#60a5fa", c3: "#1d4ed8", glow: "#dbeafe", accessory: "mag" },
-  Security: { from: "#334155", to: "#020617", c1: "#fecdd3", c2: "#fb7185", c3: "#be123c", glow: "#ffe4e6", accessory: "check" },
+  Security: { from: "#334155", to: "#020617", c1: "#c7d2fe", c2: "#818cf8", c3: "#4338ca", glow: "#e0e7ff", accessory: "check" },
   "Q&A": { from: "#06b6d4", to: "#164e63", c1: "#a5f3fc", c2: "#22d3ee", c3: "#0e7490", glow: "#cffafe", accessory: "book" },
 };
 

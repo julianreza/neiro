@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { connection } from "next/server";
 import type { NextRequest } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
-import { openHermesRunEventStream } from "@/lib/hermes";
+import { openRunEventStream } from "@/lib/agent-runtime";
 import { AppConfigError } from "@/lib/types";
 import type { Agent } from "@/lib/types";
 
@@ -65,7 +65,7 @@ export async function GET(request: NextRequest, context: RouteContext) {
       };
     }
 
-    const stream = await openHermesRunEventStream(agent, runId, request.signal);
+    const stream = await openRunEventStream(agent, runId, request.signal);
 
     return new Response(stream, {
       headers: {

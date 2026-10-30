@@ -100,7 +100,7 @@ export function NeedsYouInbox() {
   );
 
   return (
-    <div className="mx-auto w-full max-w-4xl px-4 py-6 md:px-8">
+    <div className="w-full px-4 py-6 md:px-8">
       <div className="flex flex-wrap items-baseline justify-between gap-2">
         <h1 className="flex items-center gap-3 text-2xl font-semibold">
           Needs you

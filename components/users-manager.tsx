@@ -88,7 +88,7 @@ export function UsersManager() {
 
   if (role === "viewer") {
     return (
-      <div className="mx-auto w-full max-w-3xl px-4 py-6 md:px-8">
+      <div className="w-full px-4 py-6 md:px-8">
         <h1 className="text-2xl font-semibold">Users</h1>
         <p className="mt-2 text-sm text-muted-foreground">Only admins can manage users.</p>
       </div>
@@ -96,7 +96,7 @@ export function UsersManager() {
   }
 
   return (
-    <div className="mx-auto w-full max-w-3xl px-4 py-6 md:px-8">
+    <div className="w-full px-4 py-6 md:px-8">
       <h1 className="text-2xl font-semibold">Users</h1>
       <p className="text-sm text-muted-foreground">
         Admins can change everything. Viewers can look but can&apos;t change anything. The passcode in{" "}

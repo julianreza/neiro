@@ -1,5 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { getSupabaseAdmin } from "@/lib/supabase";
+import { asRuntime } from "@/lib/types";
 import type {
   Agent,
   AgentStage,
@@ -151,6 +152,8 @@ export function mapAgentRow(row: Row): Agent {
     enabled: Boolean(row.enabled ?? true),
     activeRun: Boolean(row.active_run ?? false),
     tokenBudget: num(row.token_budget),
+    runtime: asRuntime(row.runtime),
+    effort: str(row.effort) ?? "",
     createdAt: str(row.created_at) ?? undefined,
     updatedAt: str(row.updated_at) ?? undefined,
   };

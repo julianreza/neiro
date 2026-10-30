@@ -3,6 +3,7 @@
 import {
   useEffect,
   useId,
+  useLayoutEffect,
   useRef,
   useState,
   useSyncExternalStore,
@@ -56,12 +57,25 @@ const CO = Math.cos(Math.PI / 6);
 const DESK_Y = 0.3;
 const ROW = 1.6;
 const COL = 1.4;
-const PER_ROW = 3;
 const CORRIDOR = 2;
-const WALL = 1.5;
 const BACK_WALL = 2.4;
+/** Fixed desks per stage zone, so the office keeps its size as the team grows. */
+const DESKS: Record<string, number> = { workers: 3 };
+const DEFAULT_DESKS = 2;
+const LOUNGE_D = 2.9;
+/** Wide enough that name tags in the lounge never sit on a neighbour's head. */
+const LOUNGE_COL = 2.2;
+/** Seated robots sit on the chair, this high above the floor. */
+const SEAT_Z = 0.28;
+const LOUNGE_ROWS = 2;
+const SOFA_SEATS = 5;
+const LOUNGE_COLOR = "#10b981";
+/** Walking speed in world units per second. */
+const WALK_SPEED = 2.6;
 
 type Pt = [number, number];
+type Spot = { x: number; y: number; z?: number };
+const ORIGIN: Pt = [0, 0];
 const f = (n: number) => n.toFixed(1);
 const P = (x: number, y: number, z = 0): Pt => [
   (x - y) * CO * K,
@@ -162,12 +176,68 @@ function Plane({
   );
 }
 
-function Rug({ x, y, w, d, color, opacity }: { x: number; y: number; w: number; d: number; color: string; opacity: number }) {
+function Rug({
+  x,
+  y,
+  w,
+  d,
+  color,
+  opacity,
+  outline = false,
+}: {
+  x: number;
+  y: number;
+  w: number;
+  d: number;
+  color: string;
+  opacity: number;
+  outline?: boolean;
+}) {
   return (
     <polygon
+      className={outline ? "office-zone" : undefined}
       points={pts([P(x, y), P(x + w, y), P(x + w, y + d), P(x, y + d)])}
-      style={{ fill: color, opacity }}
+      style={{ fill: color, fillOpacity: opacity, stroke: outline ? color : "none" }}
     />
+  );
+}
+
+/** Wooden desk with a monitor facing the room, a keyboard and a chair in front. */
+function Desk({ x, agent, busy }: { x: number; agent?: OfficeAgent; busy: boolean }) {
+  const status = agent ? statusOf(agent) : "off";
+  return (
+    <g>
+      <Box x={x - 0.45} y={DESK_Y} z={0} w={0.9} d={0.55} h={0.55} fill="#a16207" top="#d4a373" />
+      <Box x={x - 0.25} y={DESK_Y + 0.06} z={0.55} w={0.5} d={0.07} h={0.38} fill="#1e293b" top="#334155" />
+      <Plane axis="y" x={x - 0.21} y={DESK_Y + 0.135} z={0.9}>
+        <rect
+          className="office-screen"
+          data-status={status}
+          width=".42"
+          height=".28"
+          rx=".03"
+          fill={agent ? botLook(agent.role).from : "#334155"}
+        />
+      </Plane>
+      <Box x={x - 0.18} y={DESK_Y + 0.3} z={0.55} w={0.36} d={0.12} h={0.02} fill="#94a3b8" top="#e2e8f0" />
+      {busy && <Sparks at={P(x, DESK_Y + 0.3, 1)} />}
+      <Box x={x - 0.24} y={DESK_Y + 0.95} z={0} w={0.48} d={0.42} h={SEAT_Z} fill="#475569" top="#94a3b8" />
+      <Box x={x - 0.24} y={DESK_Y + 0.95} z={SEAT_Z} w={0.48} d={0.08} h={0.45} fill="#475569" top="#64748b" />
+    </g>
+  );
+}
+
+/** Painted on the floor: a zone name with a small count after it. */
+function FloorLabel({ x, y, color, name, count }: { x: number; y: number; color: string; name: string; count: string }) {
+  return (
+    <Plane axis="z" x={x} y={y} z={0}>
+      <text className="office-zone-name" fontSize=".34" style={{ fill: color }} aria-hidden="true">
+        {name}
+        <tspan className="office-zone-count" dx=".18" fontSize=".24">
+          {count}
+        </tspan>
+      </text>
+    </Plane>
   );
 }
 
@@ -343,6 +413,7 @@ function Robot({
   boss = false,
   patrol = false,
   delay = 0,
+  queued = false,
   selected,
   onSelect,
 }: {
@@ -353,11 +424,14 @@ function Robot({
   boss?: boolean;
   patrol?: boolean;
   delay?: number;
+  /** On a run but every desk in its zone is taken. */
+  queued?: boolean;
   selected: boolean;
   onSelect: (id: string) => void;
 }) {
   const status = statusOf(agent);
   const ring = officeStatus[status].color;
+  const label = `${agent.name}, ${officeStatus[status].label}${queued ? ", waiting for a desk" : ""}`;
 
   function pick(target: SVGGElement) {
     onSelect(agent.id);
@@ -389,11 +463,12 @@ function Robot({
       className="office-bot"
       data-status={status}
       data-boss={boss || undefined}
+      data-queued={queued || undefined}
       data-selected={selected || undefined}
       role="button"
       tabIndex={0}
       aria-pressed={selected}
-      aria-label={`${agent.name}, ${officeStatus[status].label}`}
+      aria-label={label}
       transform={`translate(${f(at[0])},${f(at[1])}) scale(${((scale * K) / 5).toFixed(2)})`}
       style={{ "--d": `${delay.toFixed(2)}s` } as CSSProperties}
       onClick={(event: MouseEvent<SVGGElement>) => pick(event.currentTarget)}
@@ -406,7 +481,7 @@ function Robot({
         if (event.animationName === "office-hop") delete event.currentTarget.dataset.hop;
       }}
     >
-      <title>{`${agent.name}: ${officeStatus[status].label}`}</title>
+      <title>{label}</title>
       {patrol ? <g className="office-face">{body}</g> : body}
     </g>
   );
@@ -462,6 +537,61 @@ function AddPill({ at, label, onAdd }: { at: Pt; label: string; onAdd: (trigger:
 const WHIP_KEY = "neiro.office.whip";
 const whipListeners = new Set<() => void>();
 
+/**
+ * Moves its children to `to`. When `to` changes the robot walks there:
+ * out to the corridor, along it, then in, so it never cuts through desks.
+ * No walk on first paint, while motion is paused, or with reduced motion.
+ */
+function Walker({ to, aisle, still, children }: { to: Spot; aisle: number; still: boolean; children: ReactNode }) {
+  const ref = useRef<SVGGElement>(null);
+  const was = useRef<Spot | null>(null);
+  const z = to.z ?? 0;
+  const end = P(to.x, to.y, z);
+
+  useLayoutEffect(() => {
+    const node = ref.current;
+    const from = was.current;
+    was.current = { x: to.x, y: to.y, z };
+    if (!node || !from || (from.x === to.x && from.y === to.y && from.z === z)) return;
+    if (still || matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    const legs = [Math.abs(from.y - aisle), Math.abs(from.x - to.x), Math.abs(aisle - to.y)];
+    const length = legs[0] + legs[1] + legs[2];
+    if (length < 0.01) return;
+    const path = [P(from.x, from.y, from.z ?? 0), P(from.x, aisle), P(to.x, aisle), P(to.x, to.y, z)];
+    let run = 0;
+    const frames = path.map((p, i) => {
+      if (i > 0) run += legs[i - 1];
+      return { transform: `translate(${f(p[0])}px,${f(p[1])}px)`, offset: run / length };
+    });
+    node.dataset.walking = "";
+    const walk = node.animate(frames, { duration: (length / WALK_SPEED) * 1000, easing: "linear" });
+    const done = () => delete node.dataset.walking;
+    walk.onfinish = done;
+    walk.oncancel = done;
+    return () => walk.cancel();
+  }, [to.x, to.y, z, aisle, still]);
+
+  return (
+    <g ref={ref} className="office-walk" style={{ transform: `translate(${f(end[0])}px,${f(end[1])}px)` }}>
+      {children}
+    </g>
+  );
+}
+
+/** "+N more" when the lounge is full. The roster beside the office lists everyone. */
+function MorePill({ at, count }: { at: Pt; count: number }) {
+  const label = `+${count} more in the lounge`;
+  const w = label.length * 3.1 + 10;
+  return (
+    <g className="office-more" transform={`translate(${f(at[0] - w / 2)},${f(at[1] - 6)})`} aria-hidden="true">
+      <rect width={f(w)} height="12" rx="6" />
+      <text x={f(w / 2)} y="8.2" textAnchor="middle">
+        {label}
+      </text>
+    </g>
+  );
+}
+
 function subscribeWhip(listener: () => void) {
   whipListeners.add(listener);
   return () => whipListeners.delete(listener);
@@ -492,7 +622,7 @@ export function TeamOffice({
   onSelect,
   onAdd,
 }: {
-  /** First room is the corridor lead (orchestrator); the rest get glass rooms. */
+  /** First room is the corridor lead (orchestrator); the rest get a zone with fixed desks. */
   rooms: readonly { id: string; name: string }[];
   agents: OfficeAgent[];
   selectedId: string | null;
@@ -534,115 +664,117 @@ export function TeamOffice({
   }
 
   const [lead, ...glassRooms] = rooms;
+  const zoneIds = new Set(glassRooms.map((room) => room.id));
   const leads = agents.filter((agent) => agent.stage === lead.id);
   const walkers = leads.filter((agent) => statusOf(agent) !== "off");
-  const resting = agents.filter((agent) => statusOf(agent) === "off");
   const working = agents.filter((agent) => statusOf(agent) === "work");
   const counts = {
     work: working.length,
     on: agents.filter((agent) => statusOf(agent) === "on").length,
-    off: resting.length,
+    off: agents.filter((agent) => statusOf(agent) === "off").length,
   };
+  // Desks are fixed per zone. Agents on a run take a desk; everyone else
+  // waits in the lounge, so a bigger team only fills the lounge.
   const layout = glassRooms.map((room) => {
     const members = agents.filter((agent) => agent.stage === room.id);
-    const cols = Math.min(Math.max(members.length, 1), PER_ROW);
-    return { ...room, members, w: Math.max(2.4, cols * COL + 0.7) };
+    const desks = DESKS[room.id] ?? DEFAULT_DESKS;
+    const busy = members.filter((agent) => statusOf(agent) === "work");
+    const online = members.filter((agent) => statusOf(agent) === "on");
+    // Agents on a run get desks first; online agents take whatever desks are left.
+    const freeDesks = Math.max(0, desks - busy.length);
+    return {
+      ...room,
+      members,
+      desks,
+      seated: [...busy.slice(0, desks), ...online.slice(0, freeDesks)],
+      queued: busy.slice(desks),
+      spare: online.slice(freeDesks),
+      w: desks * COL + 0.7,
+    };
   });
-  const rows = Math.max(1, ...layout.map((room) => Math.ceil(room.members.length / PER_ROW)));
-  const depth = DESK_Y + rows * ROW + 0.7;
+  const depth = DESK_Y + ROW + 0.7;
   const width = layout.reduce((sum, room) => sum + room.w, 0);
-  const total = depth + CORRIDOR;
   const walkY = depth + 1;
+  const loungeY = depth + CORRIDOR;
+  const total = loungeY + LOUNGE_D;
+  const deskCount = layout.reduce((sum, room) => sum + room.desks, 0);
+  const seatedCount = layout.reduce((sum, room) => sum + room.seated.length, 0);
+  const queued = layout.flatMap((room) => room.queued);
+  const queuedIds = new Set(queued.map((agent) => agent.id));
 
   const left = P(0, total)[0] - 24;
   const right = P(width, 0)[0] + 24;
   const topY = P(0, 0, BACK_WALL)[1] - 24;
   const bottom = P(width, total)[1] + 16;
 
-  /** Name tags go on top of everything, so collect them while placing robots. */
-  const tags: { agent: OfficeAgent; at: Pt }[] = [];
+  /** Where each robot belongs right now. When that changes, it walks there. */
+  const spots: { agent: OfficeAgent; to: Spot; delay: number }[] = [];
   const deskBots: Pt[] = [];
 
   let x0 = 0;
-  const roomNodes = layout.map((room, ri) => {
+  const zoneNodes = layout.map((room, ri) => {
     const start = x0;
     x0 += room.w;
     const color = STAGE_COLOR[room.id] ?? "#64748b";
-    const n = room.members.length;
-    const seats = room.members.map((agent, i) => {
-      const row = Math.floor(i / PER_ROW);
-      const inRow = Math.min(PER_ROW, n - row * PER_ROW);
-      const col = i % PER_ROW;
-      const x = start + room.w / 2 + (col - (inRow - 1) / 2) * COL;
-      return { agent, x, deskY: DESK_Y + row * ROW, row };
-    });
-
     return (
-      <g key={room.id} data-room={room.id}>
-        {ri > 0 && <Box x={start - 0.06} y={0} z={0} w={0.12} d={depth} h={WALL} fill={WALLS} />}
-        {Array.from({ length: rows }, (_, row) =>
-          seats
-            .filter((seat) => seat.row === row)
-            .map(({ agent, x, deskY }, i) => {
-              const status = statusOf(agent);
-              const at = P(x, deskY + 1.25);
-              if (status !== "off") {
-                tags.push({ agent, at });
-                if (status === "work") deskBots.push(at);
-              }
-              return (
-                <g key={agent.id}>
-                  <Box x={x - 0.45} y={deskY} z={0} w={0.9} d={0.55} h={0.6} fill="#475569" top="#64748b" />
-                  <Plane axis="z" x={x - 0.35} y={deskY + 0.12} z={0.61}>
-                    <rect
-                      className="office-screen"
-                      data-status={status}
-                      width=".7"
-                      height=".3"
-                      rx=".04"
-                      fill={status === "off" ? "#334155" : botLook(agent.role).from}
-                    />
-                  </Plane>
-                  {status === "work" && <Sparks at={P(x, deskY + 0.3, 1)} />}
-                  {status !== "off" && (
-                    <Robot
-                      agent={agent}
-                      uid={uid}
-                      at={at}
-                      delay={-(ri * 3 + i) * 0.37}
-                      selected={agent.id === selectedId}
-                      onSelect={onSelect}
-                    />
-                  )}
-                </g>
-              );
-            }),
-        )}
-        {n === 0 && (
+      <g key={room.id} data-zone={room.id}>
+        <Rug x={start + 0.08} y={0.08} w={room.w - 0.16} d={depth - 0.16} color={color} opacity={0.14} outline />
+        <FloorLabel
+          x={start + 0.25}
+          y={depth - 0.22}
+          color={color}
+          name={room.name}
+          count={`${room.seated.length}/${room.members.length}`}
+        />
+        {Array.from({ length: room.desks }, (_, i) => {
+          const x = start + room.w / 2 + (i - (room.desks - 1) / 2) * COL;
+          const agent = room.seated[i];
+          const busy = agent !== undefined && statusOf(agent) === "work";
+          if (agent) {
+            spots.push({ agent, to: { x, y: DESK_Y + 1.25, z: SEAT_Z }, delay: -(ri * 3 + i) * 0.37 });
+            if (busy) deskBots.push(P(x, DESK_Y + 1.25));
+          }
+          return <Desk key={i} x={x} agent={agent} busy={busy} />;
+        })}
+        {room.members.length === 0 && (
           <AddPill
-            at={P(start + room.w / 2, depth / 2)}
+            at={P(start + room.w / 2, DESK_Y + 1.3)}
             label={`Add to ${room.name}`}
             onAdd={(trigger) => onAdd(room.id, trigger)}
           />
         )}
-        <Plane axis="y" x={start + 0.08} y={depth} z={WALL}>
-          <rect width={room.w - 0.16} height={WALL} fill="#bae6fd" fillOpacity=".16" stroke="#94a3b8" strokeWidth=".04" />
-          <rect x={room.w - 0.75} y=".38" width=".5" height={WALL - 0.38} fill="#0f172a" fillOpacity=".08" stroke="#94a3b8" strokeWidth=".03" />
-          <rect x=".12" y=".07" width={(room.name.length * 0.115 + 0.3).toFixed(2)} height=".24" rx=".06" fill={color} />
-          <text className="office-room-name" x=".27" y=".24" fontSize=".16">
-            {room.name}
-          </text>
-        </Plane>
       </g>
     );
   });
 
-  // Lounge: paused agents rest on the sofa in the corridor.
-  const sofaLen = Math.max(2.2, resting.length * 1.1 + 0.5);
-  const sofaX = Math.max(3, width - 1.3 - sofaLen);
-  const sofaY = depth + 0.15;
-  const sofaSeats = resting.map((agent, i) => ({ agent, at: P(sofaX + 0.6 + i * 1.1, sofaY + 0.42, 0.35) }));
-  sofaSeats.forEach((seat) => tags.push(seat));
+  // Lounge: paused agents sleep on the sofa; online and waiting agents stand by.
+  const resting = agents.filter(
+    (agent) => statusOf(agent) === "off" && (zoneIds.has(agent.stage) || agent.stage === lead.id),
+  );
+  const sofaAgents = resting.slice(0, SOFA_SEATS);
+  const sofaLen = Math.max(2.2, sofaAgents.length * 1.1 + 0.5);
+  const sofaX = 0.9;
+  const sofaY = total - 1.25;
+  sofaAgents.forEach((agent, i) =>
+    spots.push({ agent, to: { x: sofaX + 0.6 + i * 1.1, y: sofaY + 0.42, z: 0.35 }, delay: -i * 0.5 }),
+  );
+  const kitchenX = width - 2.4;
+  const standX = sofaX + sofaLen + 1;
+  const cols = Math.max(2, Math.floor((kitchenX - 1.9 - standX) / LOUNGE_COL) + 1);
+  const standing = [...queued, ...layout.flatMap((room) => room.spare)];
+  const shown = standing.slice(0, cols * LOUNGE_ROWS);
+  shown.forEach((agent, i) => {
+    const row = Math.floor(i / cols);
+    spots.push({
+      agent,
+      // The second row sits half a step over so its tags clear the first row's heads.
+      to: { x: standX + (i % cols) * LOUNGE_COL + row * (LOUNGE_COL / 2), y: loungeY + 0.9 + row * 1.05 },
+      delay: -i * 0.41,
+    });
+  });
+  const unseen = standing.length - shown.length + resting.length - sofaAgents.length;
+  // Paint back to front so nearer robots overlap farther ones.
+  spots.sort((a, b) => a.to.x + a.to.y - (b.to.x + b.to.y));
 
   const sweep = width - 2.6;
   const taskFrom = P(width / 2, walkY, 1.8);
@@ -665,7 +797,7 @@ export function TeamOffice({
         className="office-scene"
         viewBox={`${f(left)} ${f(topY)} ${f(right - left)} ${f(bottom - topY)}`}
         role="group"
-        aria-label="AI team office. Each glass room is a stage; the orchestrator walks the corridor."
+        aria-label="AI team office. Each colored zone is a stage with fixed desks. Agents on a run sit at a desk, the rest wait in the lounge, and the orchestrator walks the corridor."
         onPointerMove={look}
         onPointerLeave={stopLooking}
       >
@@ -704,36 +836,37 @@ export function TeamOffice({
         ))}
 
         <Rug x={0} y={depth + 0.15} w={width} d={CORRIDOR - 0.3} color={STAGE_COLOR.orchestrator} opacity={0.08} />
-        {(() => {
-          let x = 0;
-          return layout.map((room) => {
-            const node = (
-              <Rug key={room.id} x={x + 0.05} y={0} w={room.w - 0.1} d={depth} color={STAGE_COLOR[room.id] ?? "#64748b"} opacity={0.14} />
-            );
-            x += room.w;
-            return node;
-          });
-        })()}
-        {roomNodes}
+        <Rug x={0.08} y={loungeY + 0.1} w={width - 0.16} d={LOUNGE_D - 0.2} color={LOUNGE_COLOR} opacity={0.1} outline />
+        <FloorLabel
+          x={0.3}
+          y={total - 0.25}
+          color={LOUNGE_COLOR}
+          name="Lounge"
+          count={String(standing.length + resting.length)}
+        />
+        {zoneNodes}
 
         <g aria-hidden="true">
-          <Box x={sofaX - 2.1} y={depth + 0.2} z={0} w={0.4} d={0.4} h={0.9} fill="#e2e8f0" top="#f8fafc" />
-          <Box x={sofaX - 2.02} y={depth + 0.28} z={0.9} w={0.24} d={0.24} h={0.35} fill="#7dd3fc" top="#bae6fd" />
-          <Box x={sofaX - 1.1} y={depth + 0.18} z={0} w={0.6} d={0.45} h={0.85} fill="#334155" top="#475569" />
-          <Steam at={P(sofaX - 0.8, depth + 0.4, 0.9)} />
+          <Box x={kitchenX} y={loungeY + 0.25} z={0} w={0.4} d={0.4} h={0.9} fill="#e2e8f0" top="#f8fafc" />
+          <Box x={kitchenX + 0.08} y={loungeY + 0.33} z={0.9} w={0.24} d={0.24} h={0.35} fill="#7dd3fc" top="#bae6fd" />
+          <Box x={kitchenX + 1} y={loungeY + 0.23} z={0} w={0.6} d={0.45} h={0.85} fill="#334155" top="#475569" />
+          <Steam at={P(kitchenX + 1.3, loungeY + 0.45, 0.9)} />
           <Box x={sofaX} y={sofaY} z={0} w={sofaLen} d={0.6} h={0.35} fill="#0f766e" top="#14b8a6" />
           <Box x={sofaX} y={sofaY} z={0.35} w={sofaLen} d={0.18} h={0.5} fill="#0f766e" top="#2dd4bf" />
         </g>
-        {sofaSeats.map(({ agent, at }, i) => (
-          <Robot
-            key={agent.id}
-            agent={agent}
-            uid={uid}
-            at={at}
-            delay={-i * 0.5}
-            selected={agent.id === selectedId}
-            onSelect={onSelect}
-          />
+        {unseen > 0 && <MorePill at={P(kitchenX + 0.4, total - 0.55)} count={unseen} />}
+        {spots.map(({ agent, to, delay }) => (
+          <Walker key={agent.id} to={to} aisle={walkY} still={paused}>
+            <Robot
+              agent={agent}
+              uid={uid}
+              at={ORIGIN}
+              delay={delay}
+              queued={queuedIds.has(agent.id)}
+              selected={agent.id === selectedId}
+              onSelect={onSelect}
+            />
+          </Walker>
         ))}
 
         {leads.length === 0 ? (
@@ -793,8 +926,10 @@ export function TeamOffice({
               }
             />
           ))}
-        {tags.map(({ agent, at }) => (
-          <NameTag key={agent.id} agent={agent} at={at} />
+        {spots.map(({ agent, to }) => (
+          <Walker key={agent.id} to={to} aisle={walkY} still={paused}>
+            <NameTag agent={agent} at={ORIGIN} queued={queuedIds.has(agent.id)} />
+          </Walker>
         ))}
       </svg>
 
@@ -806,6 +941,17 @@ export function TeamOffice({
         <div>
           <b>
             {counts.on} <span>online</span> · {counts.off} <span>paused</span>
+          </b>
+        </div>
+        <div>
+          <b>
+            {seatedCount}/{deskCount} <span>desks taken</span>
+            {queued.length > 0 && (
+              <>
+                {" "}
+                · {queued.length} <span>waiting</span>
+              </>
+            )}
           </b>
         </div>
       </div>
@@ -852,15 +998,15 @@ export function TeamOffice({
   );
 }
 
-/** Name above a robot. Working robots get a yellow tag with typing dots. */
-function NameTag({ agent, at, lift = 0 }: { agent: OfficeAgent; at: Pt; lift?: number }) {
+/** Name above a robot. Working robots get a yellow tag with typing dots; waiting ones an hourglass. */
+function NameTag({ agent, at, lift = 0, queued = false }: { agent: OfficeAgent; at: Pt; lift?: number; queued?: boolean }) {
   const status = statusOf(agent);
   const name = agent.name.length > 14 ? `${agent.name.slice(0, 13)}…` : agent.name;
   const w = name.length * 3.1 + (status === "work" ? 22 : 15);
   return (
     <g
       className="office-tag"
-      data-status={status}
+      data-status={queued ? "queue" : status}
       transform={`translate(${f(at[0] - w / 2)},${f(at[1] - 47 - lift)})`}
       aria-hidden="true"
     >
@@ -869,7 +1015,8 @@ function NameTag({ agent, at, lift = 0 }: { agent: OfficeAgent; at: Pt; lift?: n
       <text x="10.5" y="7.6">
         {name}
       </text>
-      {status === "work" && (
+      {queued && <path className="office-hourglass" transform={`translate(${f(w - 9)},2.5)`} d="M0,0H4L2,3L4,6H0L2,3Z" />}
+      {status === "work" && !queued && (
         <g className="office-typing">
           {[0, 1, 2].map((i) => (
             <circle key={i} cx={f(w - 10 + i * 2.6)} cy="5.5" r=".8" style={{ animationDelay: `${i * 0.2}s` }} />

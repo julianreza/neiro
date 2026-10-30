@@ -11,8 +11,8 @@ import {
   FolderGit2,
   MessagesSquare,
   Inbox,
+  LayoutDashboard,
   Network,
-  Radio,
   Users,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -41,9 +41,9 @@ import {
 } from "@/components/ui/tooltip";
 
 const navigation: NavItem[] = [
+  { href: "/", label: "Dashboard", icon: LayoutDashboard },
   { href: "/projects", label: "Projects", icon: FolderGit2 },
   { href: "/needs-you", label: "Needs you", icon: Inbox },
-  { href: "/live", label: "Live log", icon: Radio },
   { href: "/chat", label: "Chat", icon: MessagesSquare },
   { href: "/agents", label: "AI team", icon: Bot },
   { href: "/schedules", label: "Time AI", icon: Clock3 },

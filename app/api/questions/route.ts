@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { connection } from "next/server";
 import type { NextRequest } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
-import { getHermesRun } from "@/lib/hermes";
+import { getRun } from "@/lib/agent-runtime";
 import { mapAgentRow } from "@/lib/orchestrator-store";
 import {
   ASK_TABLE,
@@ -93,7 +93,7 @@ async function refreshRunning(supabase: ReturnType<typeof getSupabaseAdmin>, pag
       const agent = agents.get(item.agentId as string);
       if (!agent) return;
       try {
-        const run = await getHermesRun(agent, item.id);
+        const run = await getRun(agent, item.id);
         const update = await recordAskResult(supabase, item.id, run);
         if (update) {
           Object.assign(item, {
