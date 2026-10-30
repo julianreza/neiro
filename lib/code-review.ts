@@ -374,7 +374,39 @@ export function toFinding(raw: unknown, id: string): ReviewFinding | null {
     suggestion: text(r.suggestion),
     posted: r.posted === true,
     dismissed: r.dismissed === true,
+    fixMissionId: typeof r.fixMissionId === "string" && r.fixMissionId ? r.fixMissionId : null,
   };
+}
+
+/**
+ * The brief of a "Fix with agent" mission: the chosen findings, in order,
+ * with everything the reviewer said about each. The mission runs on a new
+ * neiro/ branch cut from the PR's head, and opens a PR stacked on it.
+ */
+export function buildFixBrief(
+  review: { repo: string; prNumber: number; prUrl: string; prTitle: string | null; headRef: string | null },
+  findings: ReviewFinding[],
+): string {
+  const items = sortFindings(findings).map((f, i) =>
+    [
+      `${i + 1}. [${f.severity} · ${f.category}] ${f.problem}`,
+      `   File: ${f.file}${f.line ? `:${f.line}` : ""}`,
+      f.observation ? `   Observation: ${f.observation}` : "",
+      f.evidence ? `   Evidence:\n${f.evidence.split("\n").map((l) => `      ${l}`).join("\n")}` : "",
+      f.consequence ? `   Consequence: ${f.consequence}` : "",
+      f.suggestion ? `   Suggested fix: ${f.suggestion}` : "",
+    ]
+      .filter(Boolean)
+      .join("\n"),
+  );
+  return [
+    `Bug fix. Fix the code review findings below on pull request ${review.repo}#${review.prNumber}${review.prTitle ? ` "${review.prTitle}"` : ""} (${review.prUrl}).`,
+    `The workspace starts from the PR's branch ${review.headRef ?? "(head)"}. First confirm each finding is real in the code, then fix it and prove the fix (a test when the repo has tests).`,
+    "Fix only these findings. Do not refactor or change anything else. If a finding turns out to be wrong, leave that code alone and say why in your result.",
+    "",
+    "Findings:",
+    ...items,
+  ].join("\n");
 }
 
 /** The design gate, or null when the reviewer gave none. */

@@ -6,6 +6,7 @@ import {
   callerFrom,
   createReviewApi,
   dismissFindingApi,
+  fixFindingsApi,
   getReviewApi,
   listReviewsApi,
   postFindingsApi,
@@ -203,4 +204,45 @@ test("dismiss hides a finding from posting and can be undone", async () => {
 
   await dismissFindingApi(ID, { findingId: "f1", dismissed: false }, ADMIN, deps);
   assert.equal(reviews.rows.get(ID)!.findings[0].dismissed, false);
+});
+
+test("fix: starts a mission for the chosen, non-dismissed findings and links them", async () => {
+  const started: { ids: string[] }[] = [];
+  const { deps, reviews } = setup({
+    startFix: async (_review, findings) => {
+      started.push({ ids: findings.map((f) => f.id) });
+      return { ok: true, missionId: "mission-9" };
+    },
+  });
+  reviews.seed({
+    id: ID,
+    status: "done",
+    headRef: "feat/x",
+    findings: [finding("f1"), finding("f2"), { ...finding("f3"), dismissed: true }],
+  });
+  assert.equal((await fixFindingsApi(ID, { findingIds: ["f1"] }, VIEWER, deps)).status, 403);
+  assert.equal((await fixFindingsApi(ID, { findingIds: [] }, ADMIN, deps)).status, 400);
+  assert.equal((await fixFindingsApi(ID, { findingIds: ["f3"] }, ADMIN, deps)).status, 400);
+
+  const result = await fixFindingsApi(ID, { findingIds: ["f1", "f3"] }, ADMIN, deps);
+  assert.equal(result.status, 201);
+  assert.equal(result.body.missionId, "mission-9");
+  assert.deepEqual(started, [{ ids: ["f1"] }]);
+  assert.deepEqual(reviews.rows.get(ID)!.findings.map((f) => f.fixMissionId ?? null), ["mission-9", null, null]);
+});
+
+test("fix: refuses unfinished reviews, unknown branches and passes errors through", async () => {
+  const { deps, reviews } = setup({
+    startFix: async () => ({ ok: false, status: 409, error: "No saved project is a checkout of o/r." }),
+  });
+  reviews.seed({ id: ID, status: "reviewing", headRef: "feat/x", findings: [finding("f1")] });
+  assert.equal((await fixFindingsApi(ID, { findingIds: ["f1"] }, ADMIN, deps)).status, 409);
+  reviews.rows.get(ID)!.status = "done";
+  reviews.rows.get(ID)!.headRef = null;
+  assert.equal((await fixFindingsApi(ID, { findingIds: ["f1"] }, ADMIN, deps)).status, 409);
+  reviews.rows.get(ID)!.headRef = "feat/x";
+  const result = await fixFindingsApi(ID, { findingIds: ["f1"] }, ADMIN, deps);
+  assert.equal(result.status, 409);
+  assert.match(String(result.body.error), /No saved project/);
+  assert.equal(reviews.rows.get(ID)!.findings[0].fixMissionId ?? null, null);
 });

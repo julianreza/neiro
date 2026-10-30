@@ -21,6 +21,11 @@ export type ReviewsApiDeps = {
   post: typeof postReviewComments;
   /** Starts the next review step now instead of on the next tick. */
   kick?: () => void;
+  /** Starts a Fix mission for these findings (Fix with agent). */
+  startFix?: (
+    review: CodeReview,
+    findings: CodeReview["findings"],
+  ) => Promise<{ ok: true; missionId: string } | { ok: false; status: number; error: string }>;
 };
 
 /** Headers the proxy sets (proxy.ts SESSION_HEADERS); clients cannot send them. */
@@ -199,5 +204,41 @@ export async function dismissFindingApi(id: string, body: unknown, caller: Calle
     return { status: 200, body: { review: updated ?? { ...review, findings } } };
   } catch (err) {
     return failure(err, "Could not change the finding");
+  }
+}
+
+/**
+ * Fix with agent: start a Fix mission for the chosen findings. It works on a
+ * new neiro/ branch cut from the PR's head and opens a draft PR stacked on
+ * that PR (lib/orchestrator.ts), so the PR's own branch is never pushed.
+ */
+export async function fixFindingsApi(id: string, body: unknown, caller: Caller, deps: ReviewsApiDeps): Promise<ApiResult> {
+  const denied = guardWrite(caller);
+  if (denied) return denied;
+  if (!UUID.test(id)) return NOT_FOUND;
+  if (!deps.startFix) return { status: 501, body: { error: "Fix with agent is not available here." } };
+  const raw = body && typeof body === "object" ? (body as Record<string, unknown>).findingIds : undefined;
+  if (!Array.isArray(raw) || raw.length === 0 || raw.length > 50 || !raw.every((x) => typeof x === "string")) {
+    return { status: 400, body: { error: "Choose at least one finding to fix." } };
+  }
+  const wanted = new Set(raw as string[]);
+  try {
+    const review = await deps.reviews.getReview(id);
+    if (!review) return NOT_FOUND;
+    if (review.status !== "done") return { status: 409, body: { error: "Only a finished review can be fixed." } };
+    if (!review.headRef) return { status: 409, body: { error: "This review does not know the PR's branch. Press Review again first." } };
+    const chosen = review.findings.filter((f) => wanted.has(f.id) && !f.dismissed);
+    if (chosen.length === 0) return { status: 400, body: { error: "Those findings are dismissed, or do not exist." } };
+
+    const started = await deps.startFix(review, chosen);
+    if (!started.ok) return { status: started.status, body: { error: started.error } };
+
+    const ids = new Set(chosen.map((f) => f.id));
+    const findings = review.findings.map((f) => (ids.has(f.id) ? { ...f, fixMissionId: started.missionId } : f));
+    const updated = await deps.reviews.updateReview(id, { findings });
+    return { status: 201, body: { review: updated ?? { ...review, findings }, missionId: started.missionId } };
+  } catch (err) {
+    if (err instanceof PrError) return { status: 409, body: { error: err.message } };
+    return failure(err, "Could not start the fix");
   }
 }

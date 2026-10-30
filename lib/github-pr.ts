@@ -503,3 +503,36 @@ export async function listOpenPulls(repo: string, exec: Exec = defaultExec, limi
     })
     .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
 }
+
+/* ------------------------------------------------------------------ */
+/* Fix with agent: start from the PR's head                            */
+/* ------------------------------------------------------------------ */
+
+/** A branch name safe to pass to git as one argument. */
+export function isSafeBranch(name: string | null | undefined): name is string {
+  return (
+    !!name &&
+    name.length <= 200 &&
+    /^(?!-)(?!.*\.\.)(?!.*\/\/)(?!.*\.lock$)[A-Za-z0-9._/-]+(?<![./])$/.test(name)
+  );
+}
+
+/**
+ * Fetch the PR's head branch into `checkout` so a mission can start from
+ * it. Returns the ref to start from (`origin/<head>`). The head must be a
+ * branch of `origin`: a PR from a fork is refused.
+ */
+export async function fetchPrHead(checkout: string, headRef: string, exec: Exec = defaultExec): Promise<string> {
+  if (!isSafeBranch(headRef)) throw new PrError("command_failed", `Unusual branch name "${headRef}"; refusing to fetch it.`);
+  try {
+    await exec("git", ["-C", checkout, "fetch", "--quiet", "origin", headRef], { timeoutMs: 120_000 });
+  } catch (err) {
+    const stderr = err instanceof ExecError ? err.stderr : "";
+    if (/couldn't find remote ref|not our ref/i.test(stderr)) {
+      throw new PrError("pr_unreadable", `Branch "${headRef}" is not on origin. Pull requests from forks are not supported yet.`);
+    }
+    if (/not a git repository/i.test(stderr)) throw new PrError("not_worktree", `${checkout} is not a git repository.`);
+    throw new PrError("command_failed", `Fetching ${headRef}: ${firstLine(stderr) || String(err)}`);
+  }
+  return `origin/${headRef}`;
+}

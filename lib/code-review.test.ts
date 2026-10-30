@@ -3,6 +3,7 @@ import { test } from "node:test";
 import {
   DEFAULT_REVIEW_RULES,
   MAX_REVIEW_RULES_CHARS,
+  buildFixBrief,
   buildReviewPrompt,
   countBySeverity,
   fileRisk,
@@ -309,4 +310,21 @@ test("edited review rules replace only the middle; safety and format stay", () =
   }
   const long = buildReviewPrompt({ ...basePr, rules: "x".repeat(MAX_REVIEW_RULES_CHARS + 50) });
   assert.ok(!long.includes("x".repeat(MAX_REVIEW_RULES_CHARS + 1)));
+});
+
+test("buildFixBrief lists the findings worst first, with what to change", () => {
+  const brief = buildFixBrief(
+    { repo: "o/r", prNumber: 18, prUrl: "https://github.com/o/r/pull/18", prTitle: "Code review", headRef: "feat/x" },
+    [
+      finding({ id: "a", severity: "minor", file: "b.ts", line: 3, problem: "Small thing" }),
+      finding({ id: "b", severity: "blocker", file: "a.ts", line: 9, problem: "SQL injection", evidence: "q = `${x}`", suggestion: "Use a parameter" }),
+    ],
+  );
+  assert.match(brief, /^Bug fix\. Fix the code review findings below on pull request o\/r#18 "Code review"/);
+  assert.match(brief, /starts from the PR's branch feat\/x/);
+  assert.match(brief, /Fix only these findings/);
+  assert.ok(brief.indexOf("SQL injection") < brief.indexOf("Small thing"));
+  assert.match(brief, /File: a.ts:9/);
+  assert.match(brief, /Evidence:\n {6}q = `\$\{x\}`/);
+  assert.match(brief, /Suggested fix: Use a parameter/);
 });

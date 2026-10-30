@@ -5842,7 +5842,7 @@ button.project-row { width: 100%; text-align: left; }
 
 /* ------------------------------------------------------------------ */
 /* Code review (/reviews): Sage layout (option A), robot while running */
-/* (option C). Severity colour comes in as --sev on each element.    */
+/* (option C). Severity colour comes in as --sev on each element.      */
 /* ------------------------------------------------------------------ */
 .cr-board {
   --cr-h: calc(100dvh - 8rem);
@@ -6000,6 +6000,7 @@ button.project-row { width: 100%; text-align: left; }
 .cr-raw { max-height: 70vh; overflow: auto; }
 .cr-finding-foot { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.5rem; margin-top: 0.875rem; font-size: 0.8125rem; color: var(--muted-foreground); }
 .cr-select { display: inline-flex; align-items: center; gap: 0.5rem; cursor: pointer; }
+.cr-post-group { display: inline-flex; align-items: center; gap: 1rem; font-size: 0.8125rem; color: var(--muted-foreground); }
 .cr-posted { color: #16a34a; font-weight: 600; }
 
 @keyframes cr-sweep { from { transform: translateX(-100%); } to { transform: translateX(100%); } }

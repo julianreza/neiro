@@ -5,7 +5,9 @@ import {
   PrError,
   ensureMissionPr,
   fetchPr,
+  fetchPrHead,
   isPushableBranch,
+  isSafeBranch,
   listOpenPulls,
   parsePrUrl,
   parseRepoSlug,
@@ -298,4 +300,18 @@ test("listOpenPulls reads gh pr list, newest first", async () => {
   await assert.rejects(listOpenPulls("o/r/x", exec), (e: PrError) => e.reason === "pr_unreadable");
   assert.equal(parseRepoSlug("julianreza/neiro"), "julianreza/neiro");
   assert.equal(parseRepoSlug("-x/r"), null);
+});
+
+test("fetchPrHead fetches the PR branch and refuses odd names and forks", async () => {
+  const ok = fakeExec([]);
+  assert.equal(await fetchPrHead("/repo", "feat/code-review-page", ok.exec), "origin/feat/code-review-page");
+  assert.deepEqual(ok.calls[0].args, ["-C", "/repo", "fetch", "--quiet", "origin", "feat/code-review-page"]);
+
+  for (const bad of ["-upload-pack=x", "a..b", "", "x.lock"]) {
+    await assert.rejects(fetchPrHead("/repo", bad, ok.exec), PrError, bad);
+  }
+  assert.equal(isSafeBranch("neiro/1730-ab"), true);
+
+  const fork = fakeExec([["fetch", failed("fatal: couldn't find remote ref feat/x")]]);
+  await assert.rejects(fetchPrHead("/repo", "feat/x", fork.exec), /forks are not supported/);
 });

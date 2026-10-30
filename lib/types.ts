@@ -287,6 +287,8 @@ export type ReviewFinding = {
   posted: boolean;
   /** Set aside by the operator: hidden from the counts and never posted. */
   dismissed: boolean;
+  /** The Fix mission an operator started for this finding ("Fix with agent"). */
+  fixMissionId?: string | null;
 };
 
 /** The reviewer's verdict on the change as a whole (Sage's design gate). */

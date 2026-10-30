@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useState, type CSSProperties } from "react";
 import Link from "next/link";
 import { toast } from "sonner";
-import { Eye, EyeOff, GitPullRequest, Loader2, Plus, RotateCcw, ScanSearch, Send, SlidersHorizontal } from "lucide-react";
+import { Eye, EyeOff, GitPullRequest, Loader2, Plus, RotateCcw, ScanSearch, Send, SlidersHorizontal, Wrench } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -573,7 +573,15 @@ function FindingsView({
 }) {
   const [filter, setFilter] = useState<Filter>("all");
   const [showDismissed, setShowDismissed] = useState(false);
-  const [chosen, setChosen] = useState<Set<string>>(() => new Set());
+  // Must-fix and should-fix findings start ticked; the rest are opt-in.
+  const [chosen, setChosen] = useState<Set<string>>(
+    () =>
+      new Set(
+        review.findings
+          .filter((f) => !f.posted && !f.dismissed && (f.severity === "blocker" || f.severity === "major"))
+          .map((f) => f.id),
+      ),
+  );
   const [posting, setPosting] = useState(false);
   const counts = countBySeverity(review.findings);
   const live = review.findings.filter((f) => !f.dismissed);
@@ -583,6 +591,20 @@ function FindingsView({
   );
   const postable = (f: ReviewFinding) => canAct && !f.posted && !f.dismissed;
   const chosenNow = [...chosen].filter((id) => review.findings.some((f) => f.id === id && postable(f)));
+  // "Select all" works on what the filter shows right now.
+  const shownPostable = shown.filter(postable).map((f) => f.id);
+  const shownChosen = shownPostable.filter((id) => chosen.has(id)).length;
+  const allShownChosen = shownPostable.length > 0 && shownChosen === shownPostable.length;
+  function toggleAllShown() {
+    setChosen((set) => {
+      const next = new Set(set);
+      for (const id of shownPostable) {
+        if (allShownChosen) next.delete(id);
+        else next.add(id);
+      }
+      return next;
+    });
+  }
 
   async function post(ids: string[]) {
     setPosting(true);
@@ -590,6 +612,22 @@ function FindingsView({
     setPosting(false);
     if (!result.ok) return void toast.error(result.error);
     toast.success(`Posted ${ids.length} comment${ids.length === 1 ? "" : "s"} to GitHub.`);
+    setChosen(new Set());
+    onChange(result.data.review);
+  }
+
+  const [fixing, setFixing] = useState(false);
+  // The ticked findings that are not dismissed: what Fix with agent sends.
+  const fixIds = [...chosen].filter((id) => review.findings.some((f) => f.id === id && !f.dismissed));
+
+  async function fix(ids: string[]) {
+    setFixing(true);
+    const result = await sendJson<{ review: CodeReview; missionId: string }>(`/api/reviews/${review.id}/fix`, "POST", {
+      findingIds: ids,
+    });
+    setFixing(false);
+    if (!result.ok) return void toast.error(result.error);
+    toast.success(`Fix mission started for ${ids.length} finding${ids.length === 1 ? "" : "s"}. It opens a draft PR on top of this one.`);
     setChosen(new Set());
     onChange(result.data.review);
   }
@@ -629,10 +667,33 @@ function FindingsView({
           )}
         </div>
         {canAct && (
+          <span className="cr-post-group">
+            <label className="cr-select">
+              <input
+                type="checkbox"
+                checked={allShownChosen}
+                disabled={shownPostable.length === 0}
+                ref={(el) => {
+                  if (el) el.indeterminate = shownChosen > 0 && !allShownChosen;
+                }}
+                onChange={toggleAllShown}
+              />
+              Select all{filter === "all" ? "" : ` ${SEVERITY[filter].label.toLowerCase()}`}
+            </label>
+          <Button
+            variant="outline"
+            disabled={fixing || fixIds.length === 0 || !review.headRef}
+            title={review.headRef ? undefined : "Review again first: this review does not know the PR's branch."}
+            onClick={() => void fix(fixIds)}
+          >
+            {fixing ? <Loader2 className="animate-spin" /> : <Wrench />}
+            Fix with agent ({fixIds.length})
+          </Button>
           <Button disabled={posting || chosenNow.length === 0} onClick={() => void post(chosenNow)}>
             {posting ? <Loader2 className="animate-spin" /> : <Send />}
             Post to GitHub ({chosenNow.length})
           </Button>
+          </span>
         )}
       </div>
 
@@ -714,6 +775,12 @@ function FindingsView({
             )}
           </dl>
           <footer className="cr-finding-foot">
+            {f.fixMissionId && (
+              <Link href={missionHref(f.fixMissionId)} className="cr-link">
+                <Wrench className="mr-1 inline size-3.5" aria-hidden="true" />
+                Fixing in a mission
+              </Link>
+            )}
             {f.posted ? (
               <span className="cr-posted">On GitHub</span>
             ) : (
@@ -731,7 +798,7 @@ function FindingsView({
                     })
                   }
                 />
-                Select for post
+                Select
               </label>
             )}
             {canAct && !f.posted && (
