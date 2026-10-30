@@ -7,7 +7,7 @@ import type {
   PointerEvent as ReactPointerEvent,
 } from "react";
 import type { LucideIcon } from "lucide-react";
-import { LogOut, MoreHorizontal, Network, PanelLeftClose, PanelLeftOpen } from "lucide-react";
+import { LogOut, MoreHorizontal, PanelLeftClose, PanelLeftOpen } from "lucide-react";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import {
   Tooltip,
@@ -107,14 +107,41 @@ export function DesktopRail({
       className="nav-rail flex flex-col"
       data-expanded={expanded || undefined}
     >
-      <Link href="/" aria-label="Neiro home" className="nav-rail-brand mt-5 mb-8">
-        <span className="nav-rail-logo flex size-10 shrink-0 items-center justify-center rounded-xl">
-          <Network className="size-5" aria-hidden="true" />
-        </span>
-        <span className="nav-rail-label text-base font-semibold" aria-hidden="true">
-          Neiro
-        </span>
-      </Link>
+      <div className="nav-rail-head mt-7 mb-9">
+        <Link href="/" aria-label="Neiro home" className="nav-rail-brand">
+          <span className="nav-rail-logo nav-rail-neural flex size-10 shrink-0 items-center justify-center rounded-xl">
+            <svg className="size-7" viewBox="0 0 34 34" aria-hidden="true">
+              <path d="M9 26V8l16 18V8" fill="none" stroke="currentColor" strokeWidth="2" strokeLinejoin="round" />
+              <circle className="neural-node" cx="9" cy="26" r="3" />
+              <circle className="neural-node" cx="9" cy="8" r="3" />
+              <circle className="neural-node" cx="25" cy="26" r="3" />
+              <circle className="neural-node" cx="25" cy="8" r="3" />
+            </svg>
+          </span>
+          <span className="nav-rail-label text-base font-semibold" aria-hidden="true">
+            Neiro
+          </span>
+        </Link>
+        {/* Expanded: sits at the end of the brand row. Collapsed: covers the logo, shown on hover. */}
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <button
+              type="button"
+              aria-expanded={expanded}
+              aria-label={expanded ? "Collapse menu" : "Expand menu"}
+              className="nav-rail-toggle"
+              onClick={onToggle}
+            >
+              {expanded ? (
+                <PanelLeftClose className="size-5" aria-hidden="true" />
+              ) : (
+                <PanelLeftOpen className="size-5" aria-hidden="true" />
+              )}
+            </button>
+          </TooltipTrigger>
+          <TooltipContent side="right">{expanded ? "Collapse menu" : "Expand menu"}</TooltipContent>
+        </Tooltip>
+      </div>
 
       <ul
         className="nav-rail-list flex flex-1 flex-col gap-4"
@@ -165,31 +192,6 @@ export function DesktopRail({
           );
         })}
       </ul>
-
-      <div className="nav-rail-item mb-2">
-        <Tooltip open={tipOpen}>
-          <TooltipTrigger asChild>
-            <button
-              type="button"
-              aria-expanded={expanded}
-              className="nav-rail-link"
-              onPointerMove={magnet}
-              onPointerLeave={unmagnet}
-              onClick={onToggle}
-            >
-              {expanded ? (
-                <PanelLeftClose className="size-5 shrink-0" aria-hidden="true" />
-              ) : (
-                <PanelLeftOpen className="size-5 shrink-0" aria-hidden="true" />
-              )}
-              <span className="nav-rail-label">
-                {expanded ? "Collapse menu" : "Expand menu"}
-              </span>
-            </button>
-          </TooltipTrigger>
-          <TooltipContent side="right">Expand menu</TooltipContent>
-        </Tooltip>
-      </div>
 
       <div className="nav-rail-item mb-6">
         <Tooltip open={tipOpen}>

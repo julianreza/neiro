@@ -1,18 +1,21 @@
 "use client";
 
-import Link from "next/link";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { FolderGit2, GitBranch, Loader2, MessageCircleQuestionMark, Plus, Rocket } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
+import { Picker } from "@/components/ui/picker";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { StoryEmpty, StoryPill } from "@/components/history-story";
+import { StoryEmpty } from "@/components/history-story";
 import type { StoryTone } from "@/components/history-story";
 import { rememberFolder, useFolderDialog } from "@/components/folder-picker";
-import { MissionRail, RailLegend } from "@/components/mission-rail-card";
+import { MissionWorkspace } from "@/components/mission-workspace";
+import { ProjectSettings } from "@/components/project-settings";
 import { ProjectComposer } from "@/components/project-composer";
+import { ProjectQuestionPanel } from "@/components/project-question-panel";
 import { useRole } from "@/hooks/use-role";
-import { projectHref, timeAgo } from "@/lib/client-api";
+import { timeAgo } from "@/lib/client-api";
+import { groupThreads } from "@/lib/chats";
 import { groupProjects } from "@/lib/projects";
 import type { Project, SavedProject } from "@/lib/projects";
 import type { AskQuestionDTO } from "@/lib/ask-history";
@@ -31,6 +34,12 @@ const ASK_TONE: Record<AskQuestionDTO["status"], StoryTone> = {
   failed: "bad",
   stopped: "off",
 };
+
+/** Picker value for the "+ Add project" row in the project dropdown. */
+const ADD_PROJECT = "__add_project__";
+
+/** The mission or chat shown under the composer. */
+type Opened = { kind: "mission" | "question"; id: string };
 
 type Load<T> = { state: "loading" } | { state: "error"; message: string } | { state: "ready"; data: T };
 
@@ -68,22 +77,63 @@ export function ProjectHub() {
     typeof window === "undefined" ? null : new URLSearchParams(window.location.search).get("project"),
   );
 
+  // Missions and questions refresh every 10s (while the tab is visible) and
+  // right after the composer starts or finishes something. A running answer
+  // re-reads only the questions.
+  const [tick, setTick] = useState(0);
+  const [questionTick, setQuestionTick] = useState(0);
+  const refresh = useCallback(() => setTick((t) => t + 1), []);
+  const refreshQuestions = useCallback(() => setQuestionTick((t) => t + 1), []);
+  // What the panel under the composer shows; null = the project's newest item.
+  const [opened, setOpened] = useState<Opened | null>(() => {
+    if (typeof window === "undefined") return null;
+    const params = new URLSearchParams(window.location.search);
+    const mission = params.get("mission");
+    const chat = params.get("chat");
+    return mission ? { kind: "mission", id: mission } : chat ? { kind: "question", id: chat } : null;
+  });
+
   useEffect(() => {
     let cancelled = false;
     // The list comes from the projects table; missions and questions fill it in.
     getJson("/api/projects")
       .then((d) => !cancelled && setSaved({ state: "ready", data: Array.isArray(d.projects) ? d.projects : [] }))
       .catch((e: Error) => !cancelled && setSaved({ state: "error", message: e.message }));
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
     getJson("/api/missions?limit=200")
-      .then((d) => !cancelled && setMissions(Array.isArray(d.missions) ? d.missions : []))
+      .then((d) => {
+        if (cancelled) return;
+        setMissions(Array.isArray(d.missions) ? d.missions : []);
+        setMissionsError("");
+      })
       .catch((e: Error) => !cancelled && setMissionsError(e.message));
+    return () => {
+      cancelled = true;
+    };
+  }, [tick]);
+
+  useEffect(() => {
+    let cancelled = false;
     getJson("/api/questions?limit=100")
       .then((d) => !cancelled && setQuestions(Array.isArray(d.questions) ? d.questions : []))
       .catch(() => undefined);
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [tick, questionTick]);
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      if (document.visibilityState === "visible") refresh();
+    }, 10_000);
+    return () => clearInterval(timer);
+  }, [refresh]);
 
   const projects = useMemo(
     () => (saved.state === "ready" ? groupProjects(missions, saved.data) : []),
@@ -91,9 +141,38 @@ export function ProjectHub() {
   );
   const project = projects.find((p) => p.id === picked) ?? projects[0] ?? null;
   const asked = useMemo(
-    () => (project ? questions.filter((q) => q.projectId === project.id) : []),
+    () =>
+      project
+        ? questions.filter((q) => q.projectId === project.id || (!q.projectId && q.workspacePath === project.path))
+        : [],
     [project, questions],
   );
+  // One row per chat: a question and its follow-ups.
+  const threads = useMemo(() => groupThreads(asked), [asked]);
+
+  // The newest mission or chat of the project, shown when nothing is picked.
+  const newest: Opened | null = useMemo(() => {
+    if (!project) return null;
+    const at = (s?: string | null) => (s ? Date.parse(s) || 0 : 0);
+    const m = project.missions.reduce<MissionSummaryDTO | null>(
+      (best, x) => (!best || at(x.createdAt) > at(best.createdAt) ? x : best),
+      null,
+    );
+    const t = threads[0];
+    if (!m && !t) return null;
+    if (m && (!t || at(m.createdAt) >= at(t.lastAt))) return { kind: "mission", id: m.id };
+    return { kind: "question", id: t.id };
+  }, [project, threads]);
+  const shown = opened ?? newest;
+  const shownThread =
+    shown?.kind === "question"
+      ? (threads.find((t) => t.id === shown.id || t.messages.some((m) => m.id === shown.id)) ?? null)
+      : null;
+
+  function pickProject(id: string) {
+    setPicked(id);
+    setOpened(null);
+  }
 
   // `?compose=1` focuses the composer once the project has loaded.
   const ready = project !== null;
@@ -118,6 +197,7 @@ export function ProjectHub() {
         data: [added, ...(list.state === "ready" ? list.data.filter((p) => p.path !== added.path) : [])],
       }));
       setPicked(added.id);
+      setOpened(null);
       rememberFolder(added.path);
       toast.success(`Added ${added.name}`);
     } catch {
@@ -132,8 +212,10 @@ export function ProjectHub() {
     cloneAction: "Clone & add",
   });
   const canAdd = role === "admin";
-  const addButton = canAdd && (
-    <Button className="min-h-10" onClick={() => folders.open("folder", project?.path.split("/").slice(0, -1).join("/"))}>
+  const openAdd = () => folders.open("folder", project?.path.split("/").slice(0, -1).join("/"));
+  // With no projects there is no dropdown yet, so show the button instead.
+  const addButton = canAdd && !project && (
+    <Button className="min-h-10" onClick={openAdd}>
       <Plus aria-hidden="true" />
       Add project
     </Button>
@@ -188,62 +270,29 @@ export function ProjectHub() {
 
       {project && (
         <div className="project-hub">
-          <nav className="project-list" aria-label="Projects">
-            <ul>
-              {projects.map((p) => (
-                <li key={p.path}>
-                  <button
-                    type="button"
-                    className="project-item"
-                    aria-current={p.id === project.id ? "true" : undefined}
-                    onClick={() => setPicked(p.id)}
-                  >
-                    <span className="project-dot" data-tone={projectTone(p)} aria-hidden="true" />
-                    <span className="min-w-0 flex-1">
-                      <span className="block truncate font-semibold">{p.name}</span>
-                      <span className="block truncate text-xs text-muted-foreground">{projectLine(p)}</span>
-                    </span>
-                    {p.git && (
-                      <span className="project-git" title="Git repo">
-                        git
-                      </span>
-                    )}
-                  </button>
-                </li>
-              ))}
-            </ul>
-          </nav>
+          <aside className="project-list" aria-label="Project">
+            <div className="project-pick">
+              <span className="project-dot" data-tone={projectTone(project)} aria-hidden="true" />
+              <Picker
+                value={project.id}
+                onChange={(v) => (v === ADD_PROJECT ? openAdd() : pickProject(v))}
+                options={[
+                  ...projects.map((p) => ({
+                    value: p.id,
+                    label: p.name,
+                    hint: p.git ? `git · ${projectLine(p)}` : projectLine(p),
+                  })),
+                  ...(canAdd ? [{ value: ADD_PROJECT, label: "+ Add project", group: " " }] : []),
+                ]}
+                searchable={projects.length > 6}
+                searchPlaceholder="Find a project…"
+                aria-label="Project"
+                className="min-w-0 flex-1"
+              />
+            </div>
 
-          <section className="project-detail" aria-labelledby="project-title">
-            <header className="project-detail-head">
-              <div className="min-w-0">
-                <h2 id="project-title" className="truncate text-lg font-semibold tracking-tight">
-                  {project.name}
-                </h2>
-                <p className="truncate text-xs text-muted-foreground">
-                  <span className="code-chip">{project.path}</span>
-                  {project.baseBranch && (
-                    <>
-                      {" "}
-                      on <span className="code-chip">{project.baseBranch}</span>
-                    </>
-                  )}
-                </p>
-              </div>
-              <Button asChild variant="outline" className="min-h-10">
-                <Link href={projectHref(project.id)}>
-                  <Rocket aria-hidden="true" />
-                  Open Mission control
-                </Link>
-              </Button>
-            </header>
-
-            {canAdd && (
-              <ProjectComposer key={project.id} projectId={project.id} path={project.path} inputRef={composerRef} />
-            )}
-
-            <Tabs defaultValue="missions" key={project.path}>
-              <TabsList aria-label="Project details" className="history-seg">
+            <Tabs defaultValue={shown?.kind === "question" ? "questions" : "missions"} key={project.path}>
+              <TabsList aria-label="Project details" className="history-seg project-tabs">
                 <TabsTrigger value="missions">
                   <Rocket aria-hidden="true" />
                   Missions <span className="project-count">{project.missions.length}</span>
@@ -254,40 +303,56 @@ export function ProjectHub() {
                 </TabsTrigger>
                 <TabsTrigger value="questions">
                   <MessageCircleQuestionMark aria-hidden="true" />
-                  Questions <span className="project-count">{asked.length}</span>
+                  Questions <span className="project-count">{threads.length}</span>
                 </TabsTrigger>
               </TabsList>
 
               <TabsContent value="missions">
                 {project.missions.length === 0 ? (
-                  <p className="project-none">No missions here yet. Write one above to give the team work.</p>
+                  <p className="project-none">No missions yet. Write one on the right.</p>
                 ) : (
-                  <div className="project-rails">
-                    <RailLegend />
-                    <ol className="rail-list">
-                      {project.missions.map((m) => (
-                        <MissionRail key={m.id} mission={m} />
-                      ))}
-                    </ol>
-                  </div>
+                  <ul className="project-rows">
+                    {project.missions.map((m) => (
+                      <li key={m.id}>
+                        <button
+                          type="button"
+                          className="project-row"
+                          aria-current={shown?.kind === "mission" && shown.id === m.id ? "true" : undefined}
+                          onClick={() => setOpened({ kind: "mission", id: m.id })}
+                        >
+                          <span className="project-dot" data-tone={STATUS[m.status].tone} aria-hidden="true" />
+                          <span className="min-w-0 flex-1">
+                            <span className="block truncate font-medium">{m.title}</span>
+                            <span className="block truncate text-xs text-muted-foreground">
+                              {STATUS[m.status].label} · {m.completedTasks}/{m.totalTasks} tasks · {timeAgo(m.createdAt)}
+                            </span>
+                          </span>
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
                 )}
               </TabsContent>
 
               <TabsContent value="branches">
                 {project.branches.length === 0 ? (
-                  <p className="project-none">No mission branches. Missions here ran without a worktree.</p>
+                  <p className="project-none">No mission branches yet.</p>
                 ) : (
                   <ul className="project-rows">
                     {project.branches.map((b) => (
                       <li key={`${b.missionId}:${b.name}`}>
-                        <Link href={projectHref(project.id, { mission: b.missionId })} className="project-row">
-                          <GitBranch className="size-4 text-primary" aria-hidden="true" />
-                          <span className="code-chip truncate">{b.name}</span>
-                          <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
-                            {b.missionTitle}
+                        <button
+                          type="button"
+                          className="project-row"
+                          aria-current={shown?.kind === "mission" && shown.id === b.missionId ? "true" : undefined}
+                          onClick={() => setOpened({ kind: "mission", id: b.missionId })}
+                        >
+                          <span className="project-dot" data-tone={STATUS[b.status].tone} aria-hidden="true" />
+                          <span className="min-w-0 flex-1">
+                            <span className="code-chip block truncate">{b.name}</span>
+                            <span className="block truncate text-xs text-muted-foreground">{b.missionTitle}</span>
                           </span>
-                          <StoryPill tone={STATUS[b.status].tone}>{STATUS[b.status].label}</StoryPill>
-                        </Link>
+                        </button>
                       </li>
                     ))}
                   </ul>
@@ -295,24 +360,100 @@ export function ProjectHub() {
               </TabsContent>
 
               <TabsContent value="questions">
-                {asked.length === 0 ? (
-                  <p className="project-none">No questions asked about this project yet.</p>
+                {threads.length === 0 ? (
+                  <p className="project-none">No questions yet.</p>
                 ) : (
                   <ul className="project-rows">
-                    {asked.map((q) => (
-                      <li key={q.id}>
-                        <Link href={`/chat?chat=${encodeURIComponent(q.id)}`} className="project-row">
-                          <MessageCircleQuestionMark className="size-4 text-primary" aria-hidden="true" />
-                          <span className="min-w-0 flex-1 truncate">{q.question}</span>
-                          <span className="text-xs text-muted-foreground">{timeAgo(q.createdAt)}</span>
-                          <StoryPill tone={ASK_TONE[q.status]}>{q.agentName}</StoryPill>
-                        </Link>
+                    {threads.map((t) => (
+                      <li key={t.id}>
+                        <button
+                          type="button"
+                          className="project-row"
+                          aria-current={shownThread?.id === t.id ? "true" : undefined}
+                          onClick={() => setOpened({ kind: "question", id: t.id })}
+                        >
+                          <span className="project-dot" data-tone={ASK_TONE[t.status]} aria-hidden="true" />
+                          <span className="min-w-0 flex-1">
+                            <span className="block truncate">{t.title}</span>
+                            <span className="block truncate text-xs text-muted-foreground">
+                              {t.status === "running" ? "Answering…" : timeAgo(t.lastAt)}
+                              {t.messages.length > 1 && ` · ${t.messages.length} messages`}
+                            </span>
+                          </span>
+                        </button>
                       </li>
                     ))}
                   </ul>
                 )}
               </TabsContent>
             </Tabs>
+          </aside>
+
+          <section className="project-detail" aria-labelledby="project-title">
+            <header className="project-detail-head">
+              <h2 id="project-title" className="min-w-0 truncate text-lg font-semibold tracking-tight">
+                {project.name}
+              </h2>
+              <ProjectSettings
+                project={project}
+                canDelete={canAdd}
+                onDeleted={() => {
+                  setSaved((list) =>
+                    list.state === "ready" ? { state: "ready", data: list.data.filter((p) => p.id !== project.id) } : list,
+                  );
+                  setPicked(null);
+                  setOpened(null);
+                }}
+              />
+            </header>
+
+            {canAdd && (
+              <ProjectComposer
+                key={project.id}
+                projectId={project.id}
+                path={project.path}
+                inputRef={composerRef}
+                onChanged={refresh}
+                onOpen={(item) => {
+                  setOpened(item);
+                  refresh();
+                }}
+              />
+            )}
+
+            {shown?.kind === "mission" && (
+              <div className="project-open">
+                <MissionWorkspace
+                  key={`${project.id}:${shown.id}`}
+                  project={project}
+                  embedded
+                  missionId={shown.id}
+                  onDeleted={() => {
+                    setMissions((list) => list.filter((m) => m.id !== shown.id));
+                    setOpened(null);
+                  }}
+                />
+              </div>
+            )}
+            {shown?.kind === "question" &&
+              (shownThread ? (
+                <ProjectQuestionPanel
+                  key={shownThread.id}
+                  thread={shownThread}
+                  projectPath={project.path}
+                  canSend={canAdd}
+                  onReload={refreshQuestions}
+                  onDeleted={() => {
+                    const gone = new Set(shownThread.messages.map((m) => m.id));
+                    setQuestions((list) => list.filter((q) => !gone.has(q.id)));
+                    setOpened(null);
+                  }}
+                />
+              ) : (
+                <p className="flex items-center gap-2 text-sm text-muted-foreground" role="status">
+                  <Loader2 className="size-4 animate-spin" aria-hidden="true" /> Loading the chat…
+                </p>
+              ))}
           </section>
         </div>
       )}

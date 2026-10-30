@@ -1,70 +1,48 @@
 "use client";
 
-import Link from "next/link";
-import { useEffect } from "react";
-import type { CSSProperties, ReactNode } from "react";
-import { ArrowRight, CheckCircle2 } from "lucide-react";
-import { AgentBot, agentLook, botRoles, followPointer, resetPointer, roleForAgent } from "@/components/agent-bot";
+import { useEffect, useState } from "react";
+import type { CSSProperties } from "react";
 import { DataSourceBadge } from "@/components/data-source-badge";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useLiveData } from "@/hooks/use-live-data";
-import { missionHref, timeAgo } from "@/lib/client-api";
-import { PIPE_LABELS, PIPE_STAGES, TOKEN_HOURS } from "@/lib/dashboard";
-import type { DashboardSnapshot, PipeItem, PipeStage } from "@/lib/dashboard";
-import type { NeedsYouItem, NeedsYouKind } from "@/lib/needs-you";
+import { PIPE_STAGES, TOKEN_DAYS } from "@/lib/dashboard";
+import type { AgentTokens, DashboardSnapshot } from "@/lib/dashboard";
 
 const POLL_MS = 15_000;
-const MAX_BOTS = 12;
-const MAX_ASKS = 3;
-
-type TeamAgent = { id: string; name: string; role: string; enabled: boolean; activeRun: boolean };
-
-const ASK_LABEL: Record<NeedsYouKind, string> = {
-  plan_approval: "Approve plan",
-  pick_agent: "Pick an agent",
-  budget: "Budget reached",
-  task_failed: "Task failed",
-  mission_error: "Mission stuck",
-};
-
-const minutesAgo = (m: number) => new Date(Date.now() - m * 60_000).toISOString();
 
 const demoSnapshot: DashboardSnapshot = {
   counts: { plan: 1, spec: 1, code: 2, qa: 1, review: 0, done: 7 },
-  items: [
-    { id: "d1", missionId: "d1", title: "Add a schedules page", stage: "plan", waiting: false },
-    { id: "d2", missionId: "d2", title: "Restyle login", stage: "spec", waiting: true },
-    { id: "d3", missionId: "d3", title: "Build the API", stage: "code", waiting: false },
-    { id: "d4", missionId: "d3", title: "Fix the form", stage: "code", waiting: true },
-    { id: "d5", missionId: "d3", title: "Write tests", stage: "qa", waiting: false },
+  items: [],
+  missions: [],
+  activity: [],
+  tokens: [12400, 18200, 6100, 0, 24800, 15300, 31200, 9800, 0, 22100, 27400, 14900, 36800, 41200],
+  agentTokens: [
+    { id: "dev", name: "Dev", tokens: 112000 },
+    { id: "qa", name: "QA", tokens: 64000 },
+    { id: "spec", name: "Spec", tokens: 41000 },
+    { id: "rev", name: "Reviewer", tokens: 23000 },
+    { id: "others", name: "Others", tokens: 20200 },
   ],
-  missions: [
-    { id: "d3", title: "Build the API", stage: "code", waiting: true, done: 3, total: 5 },
-    { id: "d2", title: "Restyle login", stage: "spec", waiting: true, done: 0, total: 0 },
-    { id: "d1", title: "Add a schedules page", stage: "plan", waiting: false, done: 0, total: 0 },
+  modelTokens: [
+    { id: "m1", name: "claude-sonnet-4.5", tokens: 150000 },
+    { id: "m2", name: "gpt-5", tokens: 80000 },
+    { id: "m3", name: "deepseek-3.2", tokens: 30200 },
   ],
-  activity: [
-    { id: "a1", missionId: "d3", title: "Write tests", label: "In QA", tone: "running", at: minutesAgo(2) },
-    { id: "a2", missionId: "d3", title: "Fix the form", label: "Needs you", tone: "waiting", at: minutesAgo(9) },
-    { id: "a3", missionId: "d3", title: "Login route", label: "Done", tone: "done", at: minutesAgo(25) },
-    { id: "a4", missionId: "d3", title: "Build the API", label: "Coding", tone: "running", at: minutesAgo(40) },
+  runtimeTokens: [
+    { id: "hermes", name: "Hermes", tokens: 182000 },
+    { id: "ohmypi", name: "OMP", tokens: 78200 },
   ],
-  tokens: [0, 1200, 800, 0, 3400, 5200, 2100, 0, 6100, 4800, 9200, 7300],
+  unsplitTokens: 0,
 };
 
-const demoTeam: TeamAgent[] = [
-  { id: "pm", name: "PM", role: "PM", enabled: true, activeRun: true },
-  { id: "spec", name: "Spec", role: "Spec writer", enabled: true, activeRun: false },
-  { id: "dev", name: "Dev", role: "Developer", enabled: true, activeRun: true },
-  { id: "qa", name: "QA", role: "QA", enabled: true, activeRun: true },
-  { id: "rev", name: "Reviewer", role: "Reviewer", enabled: true, activeRun: false },
-  { id: "ops", name: "Ops", role: "Scheduler", enabled: false, activeRun: false },
-];
-
-const demoAsks: NeedsYouItem[] = [
-  { kind: "plan_approval", missionId: "d2", missionTitle: "Restyle login", taskId: null, taskTitle: null, detail: "", since: null },
-  { kind: "task_failed", missionId: "d3", missionTitle: "Build the API", taskId: "d4", taskTitle: "Fix the form", detail: "", since: null },
-];
+/** One colour per agent row, in order. */
+const SLICE_COLORS = ["#d946ef", "#06b6d4", "#f59e0b", "#22c55e", "#6366f1"];
+/** Tokens no agent or model is credited with. Dark enough for white text on it. */
+const UNSPLIT_COLOR = "#64748b";
+/** Model bars use their own colours so they are not read as agents. */
+const MODEL_COLORS = ["#6366f1", "#22c55e", "#f97316", "#0ea5e9", "#ec4899"];
+/** Keyed by runtime id, as tokensByRuntime returns it. */
+const RUNTIME_COLORS: Record<string, string> = { hermes: "#8b5cf6", ohmypi: "#0ea5e9", antigravity: "#f97316" };
 
 function parseSnapshot(json: unknown): DashboardSnapshot {
   const body = json as Partial<DashboardSnapshot> | null;
@@ -77,25 +55,13 @@ function parseSnapshot(json: unknown): DashboardSnapshot {
   ) {
     throw new Error("Malformed /api/dashboard response");
   }
-  return body as DashboardSnapshot;
-}
-
-function parseTeam(json: unknown): TeamAgent[] {
-  const rows = (json as { agents?: Record<string, unknown>[] } | null)?.agents;
-  if (!Array.isArray(rows)) throw new Error("Malformed /api/agents response");
-  return rows.map((row) => ({
-    id: String(row.id ?? ""),
-    name: String(row.name ?? ""),
-    role: String(row.role ?? ""),
-    enabled: Boolean(row.enabled ?? true),
-    activeRun: Boolean(row.activeRun ?? row.active_run ?? false),
-  }));
-}
-
-function parseAsks(json: unknown): NeedsYouItem[] {
-  const items = (json as { items?: NeedsYouItem[] } | null)?.items;
-  if (!Array.isArray(items)) throw new Error("Malformed /api/needs-you response");
-  return items;
+  return {
+    ...body,
+    agentTokens: Array.isArray(body.agentTokens) ? body.agentTokens : [],
+    modelTokens: Array.isArray(body.modelTokens) ? body.modelTokens : [],
+    runtimeTokens: Array.isArray(body.runtimeTokens) ? body.runtimeTokens : [],
+    unsplitTokens: Number(body.unsplitTokens) || 0,
+  } as DashboardSnapshot;
 }
 
 function usePolled<T>(url: string, demo: T, parse: (json: unknown) => T) {
@@ -116,156 +82,195 @@ function compact(n: number): string {
   return String(n);
 }
 
-/** Demo rows must not link to missions that do not exist. */
-function MaybeLink({ demo, href, className, children, ...rest }: {
-  demo: boolean;
-  href: string;
-  className: string;
-  children?: ReactNode;
-  style?: CSSProperties;
-  "aria-label"?: string;
-  "data-waiting"?: true;
-}) {
-  return demo ? (
-    <span className={className} {...rest}>{children}</span>
-  ) : (
-    <Link href={href} className={className} {...rest}>{children}</Link>
-  );
-}
-
-function PipeDot({ item, index, demo }: { item: PipeItem; index: number; demo: boolean }) {
-  const style = { "--dot-delay": `${-(index * 1.7) % 6}s`, "--dot-row": index % 3 } as CSSProperties;
-  const label = `${item.title} · ${PIPE_LABELS[item.stage]}${item.waiting ? " · waiting for you" : ""}`;
-  return (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <MaybeLink
-          demo={demo}
-          href={missionHref(item.missionId)}
-          className="dash-dot"
-          data-waiting={item.waiting || undefined}
-          style={style}
-          aria-label={label}
-        />
-      </TooltipTrigger>
-      <TooltipContent>{label}</TooltipContent>
-    </Tooltip>
-  );
-}
-
-function CardHead({ id, title, href, link, children }: {
-  id: string;
-  title: string;
-  href?: string;
-  link?: string;
-  children?: ReactNode;
-}) {
-  return (
-    <div className="dash-head">
-      <div className="grid min-w-0 content-start gap-1">
-        <h2 id={id} className="eyebrow">{title}</h2>
-        {children}
-        {href && (
-          <Link href={href} className="dash-more">
-            {link} <ArrowRight aria-hidden="true" className="size-3.5" />
-          </Link>
-        )}
-      </div>
-    </div>
-  );
-}
-
-/** Dashboard card; the team card tilts its robots toward the pointer. */
-function Card({ tone, label, className = "", children }: {
-  tone: string;
-  label: string;
-  className?: string;
-  children: ReactNode;
-}) {
-  return (
-    <section
-      aria-labelledby={label}
-      className={`dash-card ${className}`}
-      data-tone={tone}
-      onPointerMove={followPointer}
-      onPointerLeave={resetPointer}
-    >
-      {children}
-    </section>
-  );
+/** Local dates of the chart's bars, oldest first; the last one is today. */
+function chartDays(count: number): Date[] {
+  return Array.from({ length: count }, (_, i) => {
+    const d = new Date();
+    d.setHours(0, 0, 0, 0);
+    d.setDate(d.getDate() - (count - 1 - i));
+    return d;
+  });
 }
 
 const Loading = () => <p className="text-sm text-muted-foreground">Loading…</p>;
 
-const MIN_DESKS = 4;
-
-/** The bot role whose colours this agent wears. */
-const lookRole = (a: TeamAgent) => (botRoles.includes(a.role) ? a.role : roleForAgent(a.name || a.role));
-
-/** Mini office: working agents sit at a desk with a lit monitor,
- *  everyone else rests on the lounge sofa. */
-function TeamOffice({ agents, extra }: { agents: TeamAgent[]; extra: number }) {
-  const atDesk = agents.filter((a) => a.enabled && a.activeRun);
-  const resting = agents.filter((a) => !(a.enabled && a.activeRun));
-  const empty = Math.max(0, MIN_DESKS - atDesk.length);
+function TokenChart({ tokens }: { tokens: number[] }) {
+  const days = chartDays(tokens.length);
+  const max = Math.max(1, ...tokens);
+  const total = tokens.reduce((a, b) => a + b, 0);
+  const today = tokens.at(-1) ?? 0;
+  const last = tokens.length - 1;
 
   return (
     <>
-      <div className="dash-floor" aria-label="Desks">
-        {atDesk.map((a) => (
-          <div key={a.id} className="dash-desk">
-            <div className="dash-bot" style={agentLook(lookRole(a))}>
-              <AgentBot name={a.name} role={lookRole(a)} asleep={false} working />
-            </div>
-            <div className="dash-table"><span className="dash-monitor" data-on /></div>
-            <span className="dash-desk-name">{a.name}</span>
-          </div>
-        ))}
-        {Array.from({ length: empty }, (_, i) => (
-          <div key={`empty-${i}`} className="dash-desk" data-empty>
-            <div className="dash-seat" />
-            <div className="dash-table"><span className="dash-monitor" /></div>
-            <span className="dash-desk-name">Free</span>
-          </div>
-        ))}
-      </div>
-      <div className="dash-lounge" aria-label="Lounge">
-        <span className="dash-lounge-label">Lounge</span>
-        <div className="dash-lounge-bots">
-          {resting.map((a) => (
-            <div key={a.id} className="dash-bot" style={agentLook(lookRole(a))}>
-              <AgentBot name={a.name} role={lookRole(a)} asleep={!a.enabled} working={false} />
-              <span className="w-full truncate text-center">{a.name}</span>
-            </div>
-          ))}
-          {extra > 0 && <span className="self-center text-sm text-muted-foreground">+{extra} more</span>}
-          {resting.length === 0 && extra === 0 && (
-            <span className="text-sm text-muted-foreground">Everyone is working</span>
-          )}
+      <div className="dash-head">
+        <div className="grid gap-1">
+          <h2 id="dash-tokens" className="eyebrow">Tokens per day</h2>
+          <b className="dash-count">{compact(total)}</b>
+          <span className="text-xs text-muted-foreground">last {tokens.length} days</span>
+        </div>
+        <div className="dash-today">
+          <span className="eyebrow">Today</span>
+          <b className="dash-count">{compact(today)}</b>
         </div>
       </div>
+      <ol className="dash-days" aria-label="Tokens per day">
+        {tokens.map((n, i) => {
+          const day = days[i];
+          const isToday = i === last;
+          const date = day.toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short" });
+          const pct = n === 0 ? 3 : Math.max(6, (n / max) * 100);
+          return (
+            <li
+              key={day.toISOString()}
+              data-today={isToday || undefined}
+              data-empty={n === 0 || undefined}
+              style={{ "--h": `${pct}%`, "--i": i } as CSSProperties}
+            >
+              <div className="dash-day-col">
+                {isToday && n > 0 && <span className="dash-day-value">{compact(n)}</span>}
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <span className="dash-day-bar" tabIndex={0} aria-label={`${date}: ${n.toLocaleString()} tokens`} />
+                  </TooltipTrigger>
+                  <TooltipContent>{`${date} · ${n.toLocaleString()} tokens`}</TooltipContent>
+                </Tooltip>
+              </div>
+              <span className="dash-day-label" aria-hidden="true">
+                {isToday ? "Today" : day.toLocaleDateString(undefined, { day: "numeric" })}
+              </span>
+            </li>
+          );
+        })}
+      </ol>
     </>
+  );
+}
+
+type TokenView = "runtime" | "agent" | "model";
+
+const TOKEN_VIEWS: { id: TokenView; label: string }[] = [
+  { id: "runtime", label: "Runtime" },
+  { id: "agent", label: "Agent" },
+  { id: "model", label: "Model" },
+];
+
+function AgentTokensCard({ agents, models, runtimes, unsplit, days, error }: {
+  agents: AgentTokens[];
+  models: AgentTokens[];
+  runtimes: AgentTokens[];
+  unsplit: number;
+  days: number;
+  error?: string;
+}) {
+  const [view, setView] = useState<TokenView>("runtime");
+  const total = agents.reduce((s, r) => s + r.tokens, 0) + unsplit;
+  // Chats from before the model was saved land in "Not recorded"; that is the
+  // same "older runs" bucket as the unsplit mission tokens, so show one gray row.
+  const NOT_RECORDED = "model:Not recorded";
+  const listed = view === "runtime" ? runtimes : view === "agent" ? agents : models;
+  const rows = listed.filter((r) => r.id !== NOT_RECORDED);
+  const older = unsplit + (listed.find((r) => r.id === NOT_RECORDED)?.tokens ?? 0);
+  const olderLabel = view === "model" ? "Not recorded (older runs)" : "Not split (older runs)";
+  const palette = view === "agent" ? SLICE_COLORS : MODEL_COLORS;
+  const colorOf = (id: string, i: number) =>
+    view === "runtime" ? RUNTIME_COLORS[id] ?? "#94a3b8" : palette[i % palette.length];
+
+  return (
+    <>
+      <div className="dash-head">
+        <div className="grid gap-1">
+          <h2 id="dash-agent-tokens" className="eyebrow">Tokens per agent &amp; model</h2>
+          <span className="text-xs text-muted-foreground">last {days} days</span>
+        </div>
+        {!error && total > 0 && <b className="dash-count">{compact(total)}</b>}
+      </div>
+      {error ? (
+        <p className="text-sm text-muted-foreground">
+          Per-agent tokens are not available yet. Run the <code className="code-chip">agent_token_usage</code> migration in Supabase.
+        </p>
+      ) : total === 0 ? (
+        <p className="text-sm text-muted-foreground">
+          No agent used tokens in the last {days} days. Counting starts with the next run.
+        </p>
+      ) : (
+        <>
+          <div className="dash-tabs" role="tablist" aria-label="Split tokens by">
+            {TOKEN_VIEWS.map((v) => (
+              <button
+                key={v.id}
+                type="button"
+                role="tab"
+                id={`dash-tab-${v.id}`}
+                aria-selected={view === v.id}
+                aria-controls="dash-token-panel"
+                className="dash-tab"
+                onClick={() => setView(v.id)}
+              >
+                {v.label}
+              </button>
+            ))}
+          </div>
+          <ul
+            key={view}
+            id="dash-token-panel"
+            role="tabpanel"
+            aria-labelledby={`dash-tab-${view}`}
+            className="dash-fill-list"
+          >
+            {rows.map((r, i) => (
+              <FillRow key={r.id} name={r.name} tokens={r.tokens} total={total} color={colorOf(r.id, i)} index={i} mono={view === "model"} />
+            ))}
+            {older > 0 && (
+              <FillRow name={olderLabel} tokens={older} total={total} color={UNSPLIT_COLOR} index={rows.length} />
+            )}
+          </ul>
+        </>
+      )}
+    </>
+  );
+}
+
+/**
+ * A row whose background fills to its share of the total. The label is drawn
+ * twice: dark on the empty part, white on the filled part, so it reads on both.
+ */
+function FillRow({ name, tokens, total, color, index, mono = false }: {
+  name: string;
+  tokens: number;
+  total: number;
+  color: string;
+  index: number;
+  mono?: boolean;
+}) {
+  const pct = total > 0 ? (tokens / total) * 100 : 0;
+  const text = (
+    <>
+      <span className={`min-w-0 truncate ${mono ? "font-mono text-xs" : ""}`}>{name}</span>
+      <span className="shrink-0 tabular-nums">
+        {compact(tokens)} · <b>{Math.round(pct)}%</b>
+      </span>
+    </>
+  );
+  return (
+    <li
+      className="dash-fill-row"
+      style={{ "--p": `${Math.max(pct, 1.5)}%`, "--c": color, "--i": index } as CSSProperties}
+      aria-label={`${name}: ${tokens.toLocaleString()} tokens, ${Math.round(pct)}%`}
+    >
+      <span className="dash-fill-bar" aria-hidden="true" />
+      <span className="dash-fill-text" aria-hidden="true">{text}</span>
+      <span className="dash-fill-text dash-fill-on" aria-hidden="true">{text}</span>
+    </li>
   );
 }
 
 export function DashboardHome() {
   const board = usePolled("/api/dashboard", demoSnapshot, parseSnapshot);
-  const team = usePolled("/api/agents", demoTeam, parseTeam);
-  const asks = usePolled("/api/needs-you", demoAsks, parseAsks);
-
   const snap = board.source === "loading" ? null : board.data;
-  const agents = team.source === "loading" ? null : team.data;
-  const askList = asks.source === "loading" ? null : asks.data;
-  const demo = board.source === "demo";
-  const byStage = (stage: PipeStage) => snap?.items.filter((i) => i.stage === stage) ?? [];
 
-  const working = agents?.filter((a) => a.enabled && a.activeRun).length ?? 0;
-  const resting = (agents?.length ?? 0) - working;
   const open = snap ? PIPE_STAGES.filter((s) => s !== "done").reduce((n, s) => n + snap.counts[s], 0) : 0;
   const waiting = snap?.items.filter((i) => i.waiting).length ?? 0;
-  const demoSource = [board, team, asks].find((s) => s.source === "demo");
-  const tokenTotal = snap?.tokens.reduce((a, b) => a + b, 0) ?? 0;
-  const tokenMax = Math.max(1, ...(snap?.tokens ?? []));
 
   return (
     <div className="w-full px-4 py-6 md:px-8">
@@ -280,165 +285,24 @@ export function DashboardHome() {
                 : `${open} in progress${waiting > 0 ? `, ${waiting} waiting for you` : ""}.`}
           </p>
         </div>
-        {demoSource?.source === "demo" && <DataSourceBadge source="demo" reason={demoSource.reason} />}
+        {board.source === "demo" && <DataSourceBadge source="demo" reason={board.reason} />}
       </div>
 
-      <section aria-label="Mission pipeline" className="dash-pipe mt-6">
-        <ol className="dash-stages">
-          {PIPE_STAGES.map((stage) => (
-            <li key={stage} className="dash-stage" data-stage={stage}>
-              <span className="eyebrow">{PIPE_LABELS[stage]}</span>
-              <b className="dash-count">{snap ? snap.counts[stage] : "–"}</b>
-              {stage === "done" && <span className="dash-note">last 24h</span>}
-            </li>
-          ))}
-        </ol>
-        <div className="dash-lane">
-          {PIPE_STAGES.map((stage) => (
-            <div key={stage} className="dash-cell" data-stage={stage}>
-              {stage === "done"
-                ? snap && snap.counts.done > 0 && <CheckCircle2 aria-hidden="true" className="dash-done" />
-                : byStage(stage).map((item, i) => <PipeDot key={item.id} item={item} index={i} demo={demo} />)}
-            </div>
-          ))}
-        </div>
-      </section>
-
-      <div className="dash-grid mt-6">
-        <Card tone="missions" label="dash-missions">
-          <CardHead
-            id="dash-missions"
-            title="Active missions"
-            href="/projects"
-            link="Projects"
-          />
-          {snap === null ? (
-            <Loading />
-          ) : snap.missions.length === 0 ? (
-            <p className="text-sm text-muted-foreground">No mission is running. Start one from Projects.</p>
-          ) : (
-            <ul className="grid gap-3">
-              {snap.missions.map((m) => {
-                const pct = m.total > 0 ? Math.round((m.done / m.total) * 100) : 0;
-                return (
-                  <li key={m.id}>
-                    <MaybeLink demo={demo} href={missionHref(m.id)} className="dash-mission" data-waiting={m.waiting || undefined}>
-                      <span className="flex items-baseline justify-between gap-3">
-                        <span className="truncate font-medium">{m.title}</span>
-                        <span className="shrink-0 text-xs text-muted-foreground">
-                          {PIPE_LABELS[m.stage]}
-                          {m.total > 0 && ` · ${m.done}/${m.total}`}
-                        </span>
-                      </span>
-                      <span
-                        className="dash-bar"
-                        role="progressbar"
-                        aria-label={`${m.title} progress`}
-                        aria-valuemin={0}
-                        aria-valuemax={100}
-                        aria-valuenow={pct}
-                      >
-                        <i style={{ width: `${Math.max(pct, 4)}%` }} />
-                      </span>
-                    </MaybeLink>
-                  </li>
-                );
-              })}
-            </ul>
-          )}
-        </Card>
-
-        <Card tone="activity" label="dash-activity">
-          <CardHead id="dash-activity" title="Activity" href="/live" link="Live log" />
-          {snap === null ? (
-            <Loading />
-          ) : snap.activity.length === 0 ? (
-            <p className="text-sm text-muted-foreground">No task moved in the last day.</p>
-          ) : (
-            <ol className="dash-feed" aria-live="polite">
-              {snap.activity.map((a) => (
-                <li key={`${a.id}:${a.at}`} data-tone={a.tone}>
-                  <i aria-hidden="true" />
-                  <span className="min-w-0 truncate">
-                    <span className="font-medium">{a.label}</span>
-                    <span className="text-muted-foreground"> · {a.title}</span>
-                  </span>
-                  <time dateTime={a.at} className="shrink-0 text-xs text-muted-foreground">{timeAgo(a.at)}</time>
-                </li>
-              ))}
-            </ol>
-          )}
-        </Card>
-
-        <div className="grid content-start gap-6">
-          <Card tone="asks" label="dash-asks">
-            <CardHead
-              id="dash-asks"
-              title="Needs you"
-              href="/needs-you"
-              link={askList && askList.length > 0 ? `All (${askList.length})` : "All"}
-            />
-            {askList === null ? (
-              <Loading />
-            ) : askList.length === 0 ? (
-              <p className="flex items-center gap-2 text-sm text-muted-foreground">
-                <CheckCircle2 aria-hidden="true" className="size-4" /> Nothing is waiting on you.
-              </p>
-            ) : (
-              <ul className="grid gap-2">
-                {askList.slice(0, MAX_ASKS).map((item) => (
-                  <li key={`${item.kind}:${item.missionId}:${item.taskId ?? ""}`}>
-                    <Link href="/needs-you" className="dash-ask">
-                      <span className="font-medium">{ASK_LABEL[item.kind]}</span>
-                      <span className="truncate text-muted-foreground">{item.taskTitle || item.missionTitle}</span>
-                      {item.since && <span className="text-xs text-muted-foreground">{timeAgo(item.since)}</span>}
-                    </Link>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </Card>
-
-          <Card tone="tokens" label="dash-tokens">
-            <CardHead id="dash-tokens" title="Tokens">
-              <b className="dash-count">{snap ? compact(tokenTotal) : "–"}</b>
-              <span className="text-xs text-muted-foreground">last {TOKEN_HOURS}h</span>
-            </CardHead>
-            {snap === null ? (
-              <Loading />
-            ) : (
-              <>
-                <div className="dash-spark" role="img" aria-label={`${tokenTotal} tokens in the last ${TOKEN_HOURS} hours`}>
-                  {snap.tokens.map((n, i) => (
-                    <i key={i} data-empty={n === 0 || undefined} style={{ height: `${Math.max(6, (n / tokenMax) * 100)}%` }} />
-                  ))}
-                </div>
-              </>
-            )}
-          </Card>
-        </div>
+      <div className="dash-token-grid mt-6">
+        <section aria-labelledby="dash-tokens" className="dash-card dash-tokens" data-tone="tokens">
+          {snap === null ? <Loading /> : <TokenChart tokens={snap.tokens.slice(-TOKEN_DAYS)} />}
+        </section>
+        <section aria-labelledby="dash-agent-tokens" className="dash-card dash-tokens" data-tone="tokens">
+          {snap === null ? <Loading /> : <AgentTokensCard
+              agents={snap.agentTokens}
+              models={snap.modelTokens}
+              runtimes={snap.runtimeTokens}
+              unsplit={snap.unsplitTokens}
+              days={TOKEN_DAYS}
+              error={snap.agentTokensError}
+            />}
+        </section>
       </div>
-
-      <Card tone="team" label="dash-team" className="dash-team mt-6">
-        <div className="grid gap-1">
-          <h2 id="dash-team" className="eyebrow">AI team</h2>
-          {agents && agents.length > 0 && (
-            <p className="text-sm text-muted-foreground">
-              {working} working · {resting} resting
-            </p>
-          )}
-          <Link href="/agents" className="dash-more">
-            Open <ArrowRight aria-hidden="true" className="size-3.5" />
-          </Link>
-        </div>
-        {agents === null ? (
-          <Loading />
-        ) : agents.length === 0 ? (
-          <p className="text-sm text-muted-foreground">No agents yet. Add one in AI team.</p>
-        ) : (
-          <TeamOffice agents={agents.slice(0, MAX_BOTS)} extra={Math.max(0, agents.length - MAX_BOTS)} />
-        )}
-      </Card>
     </div>
   );
 }

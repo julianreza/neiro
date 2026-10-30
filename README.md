@@ -31,6 +31,7 @@ Give Neiro a goal. A team of AI agents plans it, writes the spec, codes it, test
 | 🔍 **Live log** | Inspect every run step by step, copy output, allow or deny actions. |
 | 🙋 **Needs you** | One inbox for everything waiting on a human. |
 | 🌿 **Safe worktrees** | Agents work on their own git branch. Your checkout is never touched. |
+| 🔎 **Code review** | Review any GitHub PR by URL. Build and Fix missions open a draft PR and land their Final review here too. |
 | ⏰ **Schedules** | See the Hermes cron jobs that run your agents. |
 | 💰 **Budgets** | Token budgets with notifications before you overspend. |
 | 👥 **Users & roles** | Admin and viewer roles behind a signed session login. |
@@ -154,6 +155,18 @@ curl -X POST "$NEIRO_URL/api/missions/<id>/control" \
 ```
 
 This deletes the worktree and its branch.
+
+### 🔎 Code review
+
+The **Code review** page (`/reviews`) needs the GitHub CLI on the machine running Neiro, logged in once:
+
+```bash
+gh auth login
+```
+
+- **By PR**: paste `https://github.com/<owner>/<repo>/pull/<n>`. An enabled agent with the `reviewer` stage reads the diff and answers with a verdict, a design gate and findings. Nothing is posted to GitHub until you press **Post to GitHub**.
+- **From missions**: in **Build** and **Fix** missions, each task commits its work, pushes `neiro/<mission>` to `origin` and opens (or reuses) one draft PR before its Final review. That review shows up on the page. If the PR cannot be opened (no `origin`, `gh` not logged in), the task goes to **Needs you** with the reason.
+- Only `neiro/...` branches are ever pushed. Run `supabase/migrations/20261030000400_code_reviews.sql` and `20261030000500_code_review_design.sql` first.
 
 ### 🧪 Live vs demo data
 

@@ -61,6 +61,15 @@ test("an agent budget replaces a transient error and survives the next tick", as
   agent.tokenBudget = 500;
   const mission = store.seedMission({ phase: "executing", lastError: "Temporary outage" });
   store.seedTask(mission.id, { taskKey: "T1", stage: "Done", agentId: agent.id, tokens: 600 });
+  store.tokenUsage.push({
+    runId: "run-old",
+    missionId: mission.id,
+    taskId: "T1",
+    agentId: agent.id,
+    agentName: agent.name,
+    stage: "Coding",
+    tokens: 600,
+  });
   store.seedTask(mission.id, { taskKey: "T2" });
 
   await advanceMission(mission.id, deps);
@@ -81,6 +90,34 @@ test("agent budget only counts that agent's tokens in this mission", () => {
   const blocked = budgetBlock(detail, { id: "a2", name: "A2", tokenBudget: 1_000 });
   assert.equal(blocked?.scope, "agent");
   assert.equal(budgetBlock(detail, { id: "a2", name: "A2", tokenBudget: null }), null);
+});
+
+test("agent budget counts the agent's own runs, not the task's last agent", async () => {
+  const { store, hermes, deps } = setup();
+  const coder = store.seedAgent("workers");
+  coder.tokenBudget = 500;
+  const mission = store.seedMission({ phase: "executing" });
+  // The coder spent 100; the reviewer spent 900 on the same task and is its last agent.
+  store.seedTask(mission.id, { taskKey: "T1", stage: "Done", agentId: "review-agent", tokens: 1_000 });
+  store.tokenUsage.push(
+    { runId: "r1", missionId: mission.id, taskId: "T1", agentId: coder.id, agentName: coder.name, stage: "Coding", tokens: 100 },
+    { runId: "r2", missionId: mission.id, taskId: "T1", agentId: "review-agent", agentName: "Reviewer", stage: "Final review", tokens: 900 },
+  );
+  store.seedTask(mission.id, { taskKey: "T2" });
+
+  await advanceMission(mission.id, deps);
+  assert.equal(hermes.startsWithKeyPrefix("code-").length, 1);
+});
+
+test("without the usage table, agent budget falls back to the task count", () => {
+  const store = new MemoryStore();
+  const mission = store.seedMission({ phase: "executing" });
+  store.seedTask(mission.id, { taskKey: "T1", agentId: "a1", tokens: 2_000 });
+  const detail = { ...store.missions.get(mission.id)!, tasks: [...store.tasks.values()], artifacts: [] };
+  const agent = { id: "a1", name: "A1", tokenBudget: 1_000 };
+
+  assert.equal(budgetBlock(detail, agent, null)?.scope, "agent");
+  assert.equal(budgetBlock(detail, agent, 10), null);
 });
 
 test("under budget, the run starts as before", async () => {

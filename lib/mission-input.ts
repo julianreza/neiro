@@ -1,4 +1,6 @@
 import { parseTokenBudget } from "@/lib/budget";
+import { MISSION_MODES } from "@/lib/types";
+import type { MissionMode } from "@/lib/types";
 
 /**
  * Validation for POST /api/missions. Kept framework-free so it is unit-tested
@@ -26,6 +28,8 @@ export type MissionCreateInput = {
   isolateWorkspace: boolean;
   /** Max tokens for all tasks; null = no limit. */
   tokenBudget: number | null;
+  /** Composer mode; null when the caller did not say (older clients). */
+  mode: MissionMode | null;
 };
 
 // Conservative subset of `git check-ref-format`: no spaces, no "..", no "//",
@@ -120,6 +124,14 @@ export function parseMissionCreateBody(body: unknown): MissionCreateParseResult 
   const budget = parseTokenBudget(b.token_budget, "token_budget");
   if (!budget.ok) return budget;
 
+  let mode: MissionMode | null = null;
+  if (b.mode !== undefined && b.mode !== null) {
+    if (!MISSION_MODES.includes(b.mode as MissionMode)) {
+      return { ok: false, error: `mode must be one of ${MISSION_MODES.join(", ")}` };
+    }
+    mode = b.mode as MissionMode;
+  }
+
   return {
     ok: true,
     value: {
@@ -132,6 +144,7 @@ export function parseMissionCreateBody(body: unknown): MissionCreateParseResult 
       baseBranch,
       isolateWorkspace: b.isolate_workspace !== false,
       tokenBudget: budget.value,
+      mode,
     },
   };
 }

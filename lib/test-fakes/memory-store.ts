@@ -14,6 +14,7 @@ import type {
   MissionPatch,
   TaskGuard,
   TaskPatch,
+  TokenUsageRow,
 } from "../orchestrator-store";
 import type {
   Agent,
@@ -33,6 +34,7 @@ export class MemoryStore implements OrchestratorStore {
   missions = new Map<string, Mission>();
   tasks = new Map<string, MissionTask>();
   artifacts: MissionArtifact[] = [];
+  tokenUsage: TokenUsageRow[] = [];
   agents: Agent[] = [];
   private seq = 0;
 
@@ -223,6 +225,23 @@ export class MemoryStore implements OrchestratorStore {
       content: row.content,
       dedupeKey: row.dedupeKey,
     });
+  }
+
+  async recordTokenUsage(row: TokenUsageRow): Promise<void> {
+    await yieldTick();
+    if (this.tokenUsage.some((u) => u.runId === row.runId)) return;
+    this.tokenUsage.push({ ...row });
+  }
+
+  /** Set false to act like the agent_token_usage table is missing. */
+  tokenUsageAvailable = true;
+
+  async agentMissionTokens(missionId: string, agentId: string): Promise<number | null> {
+    await yieldTick();
+    if (!this.tokenUsageAvailable) return null;
+    return this.tokenUsage
+      .filter((u) => u.missionId === missionId && u.agentId === agentId)
+      .reduce((sum, u) => sum + u.tokens, 0);
   }
 
   async setMissionError(id: string, message: string | null): Promise<void> {

@@ -142,6 +142,9 @@ export async function recordAskStart(
     followUpOf?: string;
     /** The chat's Hermes session. A new chat's session is its own run id. */
     sessionId?: string;
+    /** The model and runtime the agent answered with, kept even if the agent changes later. */
+    model?: string;
+    runtime?: string;
   },
 ) {
   const base = {
@@ -153,17 +156,27 @@ export async function recordAskStart(
     follow_up_of: row.followUpOf ?? null,
     status: "running",
   };
-  const first = await Promise.resolve(
-    supabase.from(ASK_TABLE).upsert({ ...base, session_id: row.sessionId ?? row.id }),
-  ).catch((err: unknown) => ({ error: { message: String(err) } }));
-  const { error } = first;
-  if (!error) return;
-  // Before 20261029000300_ask_session.sql is applied the column is missing:
-  // save the question without it rather than lose it.
-  if (error.message.includes("session_id")) {
-    return bestEffort("save question", supabase.from(ASK_TABLE).upsert(base));
+  const save = (values: Record<string, unknown>) =>
+    Promise.resolve(supabase.from(ASK_TABLE).upsert(values)).catch((err: unknown) => ({
+      error: { message: String(err) },
+    }));
+  // Optional columns, each added by a later migration. A missing one is
+  // dropped from the row and the save retried, so one absent migration never
+  // costs the others (or the question itself).
+  const optional: Record<string, unknown> = {
+    session_id: row.sessionId ?? row.id, // 20261029000300_ask_session.sql
+    model: row.model || null, // 20261030000300_ask_model.sql
+    runtime: row.runtime || null, // 20261030000300_ask_model.sql
+  };
+  let { error } = await save({ ...base, ...optional });
+  while (error) {
+    const missing = Object.keys(optional).find((col) => new RegExp(`\\b${col}\\b`).test(error!.message));
+    if (!missing) break;
+    console.warn(`[ask-history] column ${missing} is missing; saving the question without it`);
+    delete optional[missing];
+    ({ error } = await save({ ...base, ...optional }));
   }
-  console.warn("[ask-history] save question failed:", error.message);
+  if (error) console.warn("[ask-history] save question failed:", error.message);
 }
 
 /** Saves the answer once the run ends. Only a still-running row is changed. */

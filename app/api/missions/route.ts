@@ -198,13 +198,15 @@ export async function POST(request: NextRequest) {
         // Only sent when set, so a database without the budget migration
         // still accepts missions that don't use it.
         ...(input.tokenBudget !== null ? { token_budget: input.tokenBudget } : {}),
+        // Same for the mode (migration 20261030000400_code_reviews.sql).
+        ...(input.mode !== null ? { mode: input.mode } : {}),
         ...workspaceColumns,
       })
       .select()
       .single();
 
     if (createErr) {
-      const hint = /agent_workspace_path|work_branch|worktree_path|repo_root|base_branch|token_budget/.test(createErr.message)
+      const hint = /agent_workspace_path|work_branch|worktree_path|repo_root|base_branch|token_budget|\bmode\b/.test(createErr.message)
         ? " Run the Supabase migrations (bun run db:push) first."
         : "";
       return NextResponse.json({ error: createErr.message + hint }, { status: 500 });

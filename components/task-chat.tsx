@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import { AgentMarkdown, CopyButton } from "@/components/agent-markdown";
@@ -42,6 +43,7 @@ export function TaskChat({
   routeAgents,
   stageStyle,
   onInspect,
+  reviewHrefFor,
 }: {
   /** Live mission id; without it (demo) no approvals are read. */
   missionId?: string;
@@ -51,6 +53,8 @@ export function TaskChat({
   routeAgents: RouteAgentOption[];
   stageStyle: Record<TaskStage, CSSProperties>;
   onInspect: (taskId: string) => void;
+  /** Link to the task's code review on /reviews (Build / Fix missions). */
+  reviewHrefFor?: (taskRowId: string) => string | null;
 }) {
   const fallback =
     tasks.find((t) => WORKING.has(t.stage)) ?? tasks.find((t) => t.stage !== "Done") ?? tasks[0];
@@ -106,6 +110,7 @@ export function TaskChat({
           routeAgents={routeAgents}
           stageStyle={stageStyle}
           onInspect={onInspect}
+          reviewHref={reviewHrefFor?.(task.rowId ?? task.id) ?? null}
           approvals={waitingFor(task)}
           answer={
             missionId
@@ -178,6 +183,7 @@ function TaskThread({
   routeAgents,
   stageStyle,
   onInspect,
+  reviewHref,
   approvals,
   answer,
 }: {
@@ -187,6 +193,7 @@ function TaskThread({
   routeAgents: RouteAgentOption[];
   stageStyle: Record<TaskStage, CSSProperties>;
   onInspect: (taskId: string) => void;
+  reviewHref: string | null;
   approvals: PendingApproval[];
   answer?: (approval: PendingApproval, approve: boolean) => Promise<string | null>;
 }) {
@@ -231,6 +238,11 @@ function TaskThread({
               <span className="text-xs font-semibold text-status-warning">
                 Retry {task.retries}/{maxRetries}
               </span>
+            )}
+            {reviewHref && (
+              <Link href={reviewHref} className="text-xs font-semibold text-primary hover:underline">
+                Open review
+              </Link>
             )}
           </p>
           <h3 className="mt-1 text-base font-semibold">{task.title}</h3>

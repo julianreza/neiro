@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useState } from "react";
 import {
   FileText,
@@ -37,6 +38,8 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { RunInspectorSheet } from "@/components/run-inspector-sheet";
 import { WorktreeBar } from "@/components/worktree-bar";
+import { DeleteButton } from "@/components/delete-button";
+import { useRole } from "@/hooks/use-role";
 import {
   MarkdownArtifactViewer,
   type ArtifactFile,
@@ -92,10 +95,28 @@ type MissionView = Omit<DemoMission, "tasks"> & {
   /** Mission branch when it runs in a git worktree (live missions only). */
   workBranch?: string | null;
   baseBranch?: string | null;
+  /** Draft PR a Build / Fix mission opened before Final review. */
+  prUrl?: string | null;
+  prNumber?: number | null;
   /** Auto-fix retries this mission allows per task (live missions only). */
   maxRetries?: number;
 };
 
+
+/** A mission's code reviews, newest first: enough to link to /reviews. */
+type ReviewLink = { id: string; taskId: string | null };
+
+function parseReviewLinks(json: unknown): ReviewLink[] {
+  const list = (json as { reviews?: { id?: unknown; taskId?: unknown }[] } | null)?.reviews;
+  if (!Array.isArray(list)) throw new Error("Malformed /api/reviews response");
+  return list
+    .filter((r) => typeof r.id === "string")
+    .map((r) => ({ id: r.id as string, taskId: typeof r.taskId === "string" ? r.taskId : null }));
+}
+
+function reviewHref(reviewId: string): string {
+  return `/reviews?id=${encodeURIComponent(reviewId)}`;
+}
 
 function parseMissionList(json: unknown): MissionView[] {
   const list = (json as { missions?: MissionSummaryDTO[] } | null)?.missions;
@@ -124,6 +145,8 @@ function parseMissionDetail(json: unknown): MissionView | null {
     lastError: m.lastError,
     workBranch: m.workBranch,
     baseBranch: m.baseBranch,
+    prUrl: m.prUrl ?? null,
+    prNumber: m.prNumber ?? null,
     maxRetries: m.maxRetries,
     tasks: m.tasks.map((t) => ({
       id: t.taskKey ?? t.id.slice(0, 8),
@@ -191,8 +214,24 @@ async function postJson(url: string, body: unknown): Promise<{ ok: boolean; data
 
 export type WorkspaceProject = { id: string; path: string; name: string };
 
-/** Mission control of one project: its missions, and new ones start in its folder. */
-export function MissionWorkspace({ project }: { project: WorkspaceProject }) {
+/**
+ * Mission control of one project: its missions, and new ones start in its folder.
+ * `embedded` (Projects page) drops the page chrome; `missionId` then picks the mission.
+ */
+export function MissionWorkspace({
+  project,
+  embedded = false,
+  missionId,
+  onDeleted,
+}: {
+  project: WorkspaceProject;
+  embedded?: boolean;
+  missionId?: string;
+  /** After this mission is deleted; without it the page goes back to Projects. */
+  onDeleted?: () => void;
+}) {
+  const router = useRouter();
+  const role = useRole();
   const list = useLiveData<MissionView[]>(
     `/api/missions?project=${encodeURIComponent(project.id)}`,
     initialMissions,
@@ -206,9 +245,11 @@ export function MissionWorkspace({ project }: { project: WorkspaceProject }) {
   const [selectedId, setSelectedId] = useState<string | null>(() =>
     typeof window === "undefined" ? null : new URLSearchParams(window.location.search).get("mission"),
   );
-  const effectiveId = missions.some((m) => m.id === selectedId)
-    ? selectedId
-    : (missions[0]?.id ?? null);
+  const effectiveId = missionId
+    ? missionId
+    : missions.some((m) => m.id === selectedId)
+      ? selectedId
+      : (missions[0]?.id ?? null);
   const detail = useLiveData<MissionView | null>(
     isLive && effectiveId ? `/api/missions/${encodeURIComponent(effectiveId)}` : null,
     null,
@@ -231,6 +272,15 @@ export function MissionWorkspace({ project }: { project: WorkspaceProject }) {
   const loading =
     list.source === "loading" || (isLive && effectiveId !== null && detail.source === "loading");
   const tasks = mission?.tasks ?? [];
+  const reviews = useLiveData<ReviewLink[]>(
+    isLive && mission?.prUrl ? `/api/reviews?missionId=${encodeURIComponent(mission.id)}` : null,
+    [],
+    parseReviewLinks,
+  );
+  const reviewLinks = reviews.source === "live" ? reviews.data : [];
+  // Newest review per task row (the list comes newest first).
+  const reviewByTask = new Map<string, string>();
+  for (const r of reviewLinks) if (r.taskId && !reviewByTask.has(r.taskId)) reviewByTask.set(r.taskId, r.id);
   const hasPrd = Boolean(mission?.artifacts?.some((a) => a.name === "PRD.md"));
   const done = tasks.filter((task) => task.stage === "Done").length;
   // The mission's own retry cap; demo missions use the orchestrator default.
@@ -344,31 +394,37 @@ export function MissionWorkspace({ project }: { project: WorkspaceProject }) {
   }
 
   return (
-    <div className="space-y-8 p-4 md:p-8">
+    <div className={embedded ? "space-y-5" : "space-y-8 p-4 md:p-8"}>
       <div className="flex flex-wrap items-end justify-between gap-4">
         <div className="min-w-0">
-          <nav aria-label="Breadcrumb" className="mb-1 text-sm text-muted-foreground">
-            <Link href="/projects" className="hover:text-foreground hover:underline">
-              Projects
-            </Link>
-            <span aria-hidden="true"> / </span>
-            <Link href={`/projects?project=${encodeURIComponent(project.id)}`} className="hover:text-foreground hover:underline">
-              {project.name}
-            </Link>
-          </nav>
-          <h1 className="flex flex-wrap items-center gap-3 text-3xl font-semibold tracking-tight">
+          {!embedded && (
+            <nav aria-label="Breadcrumb" className="mb-1 text-sm text-muted-foreground">
+              <Link href="/projects" className="hover:text-foreground hover:underline">
+                Projects
+              </Link>
+              <span aria-hidden="true"> / </span>
+              <Link href={`/projects?project=${encodeURIComponent(project.id)}`} className="hover:text-foreground hover:underline">
+                {project.name}
+              </Link>
+            </nav>
+          )}
+          <h1
+            className={`flex flex-wrap items-center gap-3 font-semibold tracking-tight ${embedded ? "text-lg" : "text-3xl"}`}
+          >
             <span className="min-w-0 break-words">{mission?.title ?? "Mission control"}</span>
             {mission && (
               <StoryPill tone={MISSION_PILL[mission.status].tone}>{MISSION_PILL[mission.status].label}</StoryPill>
             )}
           </h1>
-          <p className="mt-2 flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
-            <span className="code-chip" title={project.path}>{project.path}</span>
-            <DataSourceBadge
-              source={list.source}
-              reason={list.source === "demo" ? list.reason : undefined}
-            />
-          </p>
+          {!embedded && (
+            <p className="mt-2 flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
+              <span className="code-chip" title={project.path}>{project.path}</span>
+              <DataSourceBadge
+                source={list.source}
+                reason={list.source === "demo" ? list.reason : undefined}
+              />
+            </p>
+          )}
         </div>
         <div className="flex flex-wrap items-center gap-2">
           {isLive && (
@@ -385,6 +441,30 @@ export function MissionWorkspace({ project }: { project: WorkspaceProject }) {
               </Link>
             </Button>
           )}
+          {isLive && mission && role === "admin" && (
+            <DeleteButton
+              url={`/api/missions/${encodeURIComponent(mission.id)}`}
+              what="Mission"
+              title={`Delete “${mission.title}”?`}
+              disabledReason={
+                mission.status === "running" ? "This mission is still running. Cancel it first, then delete it." : undefined
+              }
+              body={
+                <>
+                  <p>The mission, its tasks and its artifacts are deleted. This can&apos;t be undone.</p>
+                  {mission.workBranch && (
+                    <p>
+                      Its branch <span className="code-chip">{mission.workBranch}</span> stays in git.
+                    </p>
+                  )}
+                </>
+              }
+              onDeleted={() => {
+                if (onDeleted) onDeleted();
+                else router.push(`/projects?project=${encodeURIComponent(project.id)}`);
+              }}
+            />
+          )}
           {isDemo && effectiveId && (
             <Button
               variant="ghost"
@@ -396,12 +476,14 @@ export function MissionWorkspace({ project }: { project: WorkspaceProject }) {
               Remove from preview
             </Button>
           )}
-          <Button asChild variant="outline">
-            <Link href={`/projects?project=${encodeURIComponent(project.id)}&compose=1`}>
-              <Plus className="size-4" />
-              New mission
-            </Link>
-          </Button>
+          {!embedded && (
+            <Button asChild variant="outline">
+              <Link href={`/projects?project=${encodeURIComponent(project.id)}&compose=1`}>
+                <Plus className="size-4" />
+                New mission
+              </Link>
+            </Button>
+          )}
         </div>
       </div>
       <section className="space-y-5">
@@ -411,6 +493,9 @@ export function MissionWorkspace({ project }: { project: WorkspaceProject }) {
             branch={mission.workBranch}
             baseBranch={mission.baseBranch ?? null}
             status={mission.status}
+            prUrl={mission.prUrl ?? null}
+            prNumber={mission.prNumber ?? null}
+            reviewHref={reviewLinks[0] ? reviewHref(reviewLinks[0].id) : null}
             onDiscarded={refresh}
           />
         )}
@@ -595,6 +680,10 @@ export function MissionWorkspace({ project }: { project: WorkspaceProject }) {
                     routeAgents={routeAgents}
                     stageStyle={stageLook}
                     onInspect={setInspected}
+                    reviewHrefFor={(rowId) => {
+                      const id = reviewByTask.get(rowId);
+                      return id ? reviewHref(id) : null;
+                    }}
                   />
                 )}
               </TabsContent>
@@ -628,13 +717,15 @@ export function MissionWorkspace({ project }: { project: WorkspaceProject }) {
         {mission?.title}: {done} of {tasks.length} tasks done.
         {isDemo ? " Demo data." : ""}
       </div>
-      <footer className="flex flex-wrap justify-between gap-2 border-t pt-4 text-[10px] text-muted-foreground">
-        <span className="flex items-center gap-2">
-          <Square className="size-2.5" />
-          {isLive ? "Neiro / live" : "Neiro / local preview"}
-        </span>
-        <span>Hermes agents · Supabase state</span>
-      </footer>
+      {!embedded && (
+        <footer className="flex flex-wrap justify-between gap-2 border-t pt-4 text-[10px] text-muted-foreground">
+          <span className="flex items-center gap-2">
+            <Square className="size-2.5" />
+            {isLive ? "Neiro / live" : "Neiro / local preview"}
+          </span>
+          <span>Hermes agents · Supabase state</span>
+        </footer>
+      )}
       <RunInspectorSheet
         task={tasks.find((task) => task.id === inspected) ?? null}
         onClose={() => setInspected(null)}

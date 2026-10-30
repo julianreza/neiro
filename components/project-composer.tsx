@@ -22,10 +22,16 @@ export function ProjectComposer({
   projectId,
   path,
   inputRef,
+  onChanged,
+  onOpen,
 }: {
   projectId: string;
   path: string;
   inputRef?: RefObject<HTMLTextAreaElement | null>;
+  /** Called when a question or mission starts or finishes, so lists can refresh. */
+  onChanged?: () => void;
+  /** Show a new question or mission on this page instead of leaving it. */
+  onOpen?: (item: { kind: "question" | "mission"; id: string }) => void;
 }) {
   const router = useRouter();
   const ownRef = useRef<HTMLTextAreaElement>(null);
@@ -64,6 +70,7 @@ export function ProjectComposer({
           title: objective.split("\n")[0].slice(0, 80),
           prompt: brief,
           pause_after_planning: pauseForPlan,
+          mode,
           workspace_path: workspace.trim() || undefined,
           base_branch: baseBranch.trim() || undefined,
           isolate_workspace: isolate,
@@ -78,8 +85,13 @@ export function ProjectComposer({
         return;
       }
       setPrompt("");
+      onChanged?.();
       toast.success(pauseForPlan ? "Mission launched. It will pause for plan approval." : "Mission launched.");
       const id = data.mission?.id;
+      if (onOpen && id) {
+        onOpen({ kind: "mission", id });
+        return;
+      }
       router.push(projectHref(projectId, id ? { mission: id } : {}));
     } catch {
       toast.error("Network error");
@@ -100,6 +112,11 @@ export function ProjectComposer({
       isLive
       launching={launching}
       onLaunch={launch}
+      answerElsewhere={Boolean(onOpen)}
+      onAskChange={(runId) => {
+        onChanged?.();
+        if (runId) onOpen?.({ kind: "question", id: runId });
+      }}
       advanced={
         <>
           <div className="grid gap-5 p-5 sm:grid-cols-2 lg:grid-cols-3">

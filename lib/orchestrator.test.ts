@@ -71,6 +71,34 @@ test("F1: concurrent ticks on a failed QA run bump retries once and write one re
   assert.equal(store.artifactsOf(mission.id, "qa_report").length, 1);
 });
 
+test("each finished run credits its tokens to the agent that ran it, once", async () => {
+  const { store, hermes, deps } = setup();
+  store.seedAgent("workers");
+  store.seedAgent("qa");
+  const mission = store.seedMission({ phase: "executing" });
+  const task = store.seedTask(mission.id, {
+    taskKey: "T1",
+    stage: "Coding",
+    runId: "run-code",
+    runAgentId: "workers-agent",
+  });
+  hermes.setRun("run-code", { status: "completed", output: "done", tokens: 120 });
+  await Promise.all([advanceMission(mission.id, deps), advanceMission(mission.id, deps)]);
+
+  Object.assign(store.tasks.get(task.id)!, { stage: "QA check", runId: "run-qa", runAgentId: "qa-agent" });
+  hermes.setRun("run-qa", { status: "completed", output: "VERDICT: PASS", tokens: 30 });
+  await advanceMission(mission.id, deps);
+
+  assert.deepEqual(
+    store.tokenUsage.map((u) => [u.runId, u.agentName, u.stage, u.tokens]),
+    [
+      ["run-code", "workers-agent", "Coding", 120],
+      ["run-qa", "qa-agent", "QA check", 30],
+    ],
+  );
+  assert.equal(store.tasks.get(task.id)!.tokens, 150);
+});
+
 test("F2: planning waits for the run to finish, then inserts keyed tasks once", async () => {
   const { store, hermes, deps } = setup();
   store.seedAgent("orchestrator");

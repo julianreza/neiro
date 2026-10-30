@@ -1,12 +1,13 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { getSupabaseAdmin } from "@/lib/supabase";
-import { asRuntime } from "@/lib/types";
+import { asRuntime, MISSION_MODES } from "@/lib/types";
 import type {
   Agent,
   AgentStage,
   Mission,
   MissionArtifact,
   MissionDetailDTO,
+  MissionMode,
   MissionPhase,
   MissionStatus,
   MissionTask,
@@ -40,6 +41,8 @@ export type MissionPatch = Partial<{
   runId: string | null;
   runAgentId: string | null;
   runStartedAt: string | null;
+  prUrl: string | null;
+  prNumber: number | null;
 }>;
 
 export type TaskPatch = Partial<
@@ -78,6 +81,20 @@ export type NewArtifactRow = {
   dedupeKey: string;
 };
 
+/** Tokens one finished run spent, credited to the agent that ran it. */
+export type TokenUsageRow = {
+  runId: string;
+  /** Null for runs outside a mission (a manual code review). */
+  missionId: string | null;
+  taskId: string | null;
+  agentId: string | null;
+  agentName: string;
+  stage: string;
+  tokens: number;
+  model?: string | null;
+  runtime?: string | null;
+};
+
 export interface OrchestratorStore {
   getMissionDetail(missionId: string): Promise<MissionDetailDTO>;
   /** Missions the tick should advance: status 'running' only. */
@@ -98,6 +115,13 @@ export interface OrchestratorStore {
   insertTasks(rows: NewTaskRow[]): Promise<void>;
   /** Insert an artifact unless one with the same dedupe key exists. */
   insertArtifactOnce(row: NewArtifactRow): Promise<void>;
+  /** Record a finished run's tokens; a run id already recorded is ignored. */
+  recordTokenUsage(row: TokenUsageRow): Promise<void>;
+  /**
+   * Tokens this agent's own runs spent in this mission, from
+   * agent_token_usage; null when that table cannot be read.
+   */
+  agentMissionTokens(missionId: string, agentId: string): Promise<number | null>;
   /** Record (message) or clear (null) the mission's last orchestration error. */
   setMissionError(id: string, message: string | null): Promise<void>;
 }
@@ -182,6 +206,9 @@ export function mapMissionRow(row: Row): Mission {
     lastError: str(row.last_error),
     lastErrorAt: str(row.last_error_at),
     tokenBudget: num(row.token_budget),
+    mode: MISSION_MODES.includes(row.mode as MissionMode) ? (row.mode as MissionMode) : null,
+    prUrl: str(row.pr_url),
+    prNumber: num(row.pr_number),
     createdAt: str(row.created_at) ?? undefined,
     updatedAt: str(row.updated_at) ?? undefined,
   };
@@ -234,6 +261,8 @@ function missionPatchToRow(patch: MissionPatch): Row {
   if (patch.runId !== undefined) row.run_id = patch.runId;
   if (patch.runAgentId !== undefined) row.run_agent_id = patch.runAgentId;
   if (patch.runStartedAt !== undefined) row.run_started_at = patch.runStartedAt;
+  if (patch.prUrl !== undefined) row.pr_url = patch.prUrl;
+  if (patch.prNumber !== undefined) row.pr_number = patch.prNumber;
   return row;
 }
 
@@ -400,6 +429,35 @@ export function createSupabaseStore(client?: SupabaseClient): OrchestratorStore 
           { onConflict: "dedupe_key", ignoreDuplicates: true },
         );
       if (error) throw new Error(error.message);
+    },
+
+    async recordTokenUsage(row) {
+      const base = {
+        run_id: row.runId,
+        mission_id: row.missionId,
+        task_id: row.taskId,
+        agent_id: row.agentId,
+        agent_name: row.agentName,
+        stage: row.stage,
+        tokens: Math.max(0, Math.round(row.tokens)),
+      };
+      const write = (values: Row) =>
+        db().from("agent_token_usage").upsert(values, { onConflict: "run_id", ignoreDuplicates: true });
+      let { error } = await write({ ...base, model: row.model ?? null, runtime: row.runtime ?? null });
+      // Before the model/runtime migration those columns are missing; still record the tokens.
+      if (error && (error.code === "PGRST204" || error.code === "42703")) ({ error } = await write(base));
+      if (error) throw new Error(error.message);
+    },
+
+    async agentMissionTokens(missionId, agentId) {
+      const { data, error } = await db()
+        .from("agent_token_usage")
+        .select("tokens")
+        .eq("mission_id", missionId)
+        .eq("agent_id", agentId)
+        .limit(10_000);
+      if (error) return null;
+      return (data ?? []).reduce((sum, r) => sum + (Number((r as Row).tokens) || 0), 0);
     },
 
     async setMissionError(id, message) {

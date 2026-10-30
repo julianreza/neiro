@@ -110,6 +110,8 @@ export async function POST(request: NextRequest) {
       workspacePath: workspace,
       followUpOf: sessionId,
       sessionId: hermesSessionId,
+      model: agent.model,
+      runtime: agent.runtime ?? "hermes",
     });
     await linkToProject(supabase, "ask_questions", started.runId, workspace);
 

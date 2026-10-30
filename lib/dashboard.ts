@@ -69,14 +69,122 @@ export type ActivityItem = {
 export type DashboardSnapshot = PipeSnapshot & {
   missions: MissionRow[];
   activity: ActivityItem[];
-  /** Tokens of tasks updated in each of the last TOKEN_HOURS hours, oldest first. */
+  /** Tokens of tasks last updated on each of the last TOKEN_DAYS local days, oldest first; the last one is today. */
   tokens: number[];
+  /** Tokens per agent over the same TOKEN_DAYS days, biggest first. */
+  agentTokens: AgentTokens[];
+  /** Tokens per model over the same days and runs as `agentTokens`. */
+  modelTokens: AgentTokens[];
+  /** Tokens per runtime (Hermes, OMP) over the same days and runs. */
+  runtimeTokens: AgentTokens[];
+  /** Tokens in `tokens` that no agent row covers (runs from before agent_token_usage). */
+  unsplitTokens: number;
+  /** Set when the per-agent usage could not be read (e.g. its table is missing). */
+  agentTokensError?: string;
 };
+
+export type AgentTokens = { id: string; name: string; tokens: number };
+export type TokenTask = Pick<PipeTask, "updatedAt" | "tokens"> & {
+  agentId?: string | null;
+  agentName?: string;
+  model?: string | null;
+  runtime?: string | null;
+};
+
+const RUNTIME_LABELS: Record<string, string> = {
+  hermes: "Hermes",
+  ohmypi: "OMP",
+  antigravity: "Antigravity",
+};
+
+/** Tokens summed per runtime (Hermes, OMP, ...), biggest first. */
+export function tokensByRuntime(tasks: TokenTask[]): AgentTokens[] {
+  return tokensByAgent(
+    tasks.map((t) => {
+      const runtime = t.runtime?.trim() || "hermes";
+      return { ...t, agentId: runtime, agentName: RUNTIME_LABELS[runtime] ?? runtime };
+    }),
+    Object.keys(RUNTIME_LABELS).length + 1,
+  );
+}
+
+/** The donut shows this many agents; the rest are summed into "Others". */
+export const MAX_AGENT_SLICES = 5;
+
+/** Tokens summed per model, biggest first, the tail folded into "Others". */
+export function tokensByModel(tasks: TokenTask[], max = MAX_AGENT_SLICES): AgentTokens[] {
+  return tokensByAgent(
+    tasks.map((t) => {
+      const model = t.model?.trim() || "Not recorded";
+      return { ...t, agentId: `model:${model}`, agentName: model };
+    }),
+    max,
+  );
+}
+
+/** Tokens summed per agent, biggest first, the tail folded into "Others". */
+export function tokensByAgent(tasks: TokenTask[], max = MAX_AGENT_SLICES): AgentTokens[] {
+  const sums = new Map<string, AgentTokens>();
+  for (const t of tasks) {
+    const n = Number(t.tokens) || 0;
+    if (n <= 0) continue;
+    const name = t.agentName?.trim() || "Unassigned";
+    const id = t.agentId || `name:${name}`;
+    const row = sums.get(id) ?? { id, name, tokens: 0 };
+    row.tokens += n;
+    sums.set(id, row);
+  }
+  const rows = [...sums.values()].sort((a, b) => b.tokens - a.tokens);
+  if (rows.length <= max) return rows;
+  const rest = rows.slice(max - 1).reduce((s, r) => s + r.tokens, 0);
+  return [...rows.slice(0, max - 1), { id: "others", name: "Others", tokens: rest }];
+}
 
 export const MAX_MISSION_ROWS = 5;
 export const MAX_ACTIVITY = 8;
-export const TOKEN_HOURS = 12;
-const HOUR_MS = 60 * 60 * 1000;
+export const TOKEN_DAYS = 14;
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/** Local midnight of the day `at` falls on. */
+function dayStart(at: number): number {
+  const d = new Date(at);
+  d.setHours(0, 0, 0, 0);
+  return d.getTime();
+}
+
+/** Days back from today's local day; NaN when the time is missing or in the future. */
+function daysBack(iso: string | null | undefined, now: number): number {
+  const at = time(iso);
+  if (!Number.isFinite(at) || at > now) return NaN;
+  // Round, because a day across a DST change is 23 or 25 hours long.
+  return Math.round((dayStart(now) - dayStart(at)) / DAY_MS);
+}
+
+/** Tasks last updated inside the chart's `days` local days. */
+function windowed<T extends Pick<PipeTask, "updatedAt">>(tasks: T[], now: number, days = TOKEN_DAYS): T[] {
+  return tasks.filter((t) => {
+    const back = daysBack(t.updatedAt, now);
+    return back >= 0 && back < days;
+  });
+}
+
+/**
+ * Tokens per local calendar day for the last `days` days, oldest first.
+ * A task's tokens count on the day it was last updated.
+ */
+export function tokensByDay(
+  tasks: Pick<PipeTask, "updatedAt" | "tokens">[],
+  now = Date.now(),
+  days = TOKEN_DAYS,
+): number[] {
+  const out = Array.from({ length: days }, () => 0);
+  for (const t of tasks) {
+    const back = daysBack(t.updatedAt, now);
+    if (!(back >= 0 && back < days)) continue;
+    out[days - 1 - back] += Number(t.tokens) || 0;
+  }
+  return out;
+}
 
 const ACTIVITY: Record<TaskStage, { label: string; tone: ActivityTone }> = {
   Queued: { label: "Queued", tone: "running" },
@@ -96,9 +204,17 @@ function time(iso: string | null | undefined): number {
 
 /**
  * Everything the Dashboard shows, from open missions and their tasks plus
- * tasks updated recently. Pass each task once.
+ * tasks updated recently. Pass each task once. `tokenTasks` feeds the
+ * per-day token chart and may reach further back than `tasks`. `usage` is
+ * one row per finished run (agent_token_usage) and feeds the per-agent donut.
  */
-export function buildDashboard(missions: PipeMission[], tasks: PipeTask[], now = Date.now()): DashboardSnapshot {
+export function buildDashboard(
+  missions: PipeMission[],
+  tasks: PipeTask[],
+  now = Date.now(),
+  tokenTasks: Pick<PipeTask, "updatedAt" | "tokens">[] = tasks,
+  usage: TokenTask[] = [],
+): DashboardSnapshot {
   const pipe = buildPipe(missions, tasks, now);
 
   const totals = new Map<string, { done: number; total: number }>();
@@ -126,14 +242,20 @@ export function buildDashboard(missions: PipeMission[], tasks: PipeTask[], now =
     .slice(0, MAX_ACTIVITY)
     .map((t) => ({ id: t.id, missionId: t.missionId, title: t.title, at: t.updatedAt as string, ...ACTIVITY[t.stage] }));
 
-  const tokens = Array.from({ length: TOKEN_HOURS }, () => 0);
-  for (const t of tasks) {
-    const ago = now - time(t.updatedAt);
-    if (!(ago >= 0 && ago < TOKEN_HOURS * HOUR_MS)) continue;
-    tokens[TOKEN_HOURS - 1 - Math.floor(ago / HOUR_MS)] += Number(t.tokens) || 0;
-  }
-
-  return { ...pipe, missions: rows, activity, tokens };
+  const tokens = tokensByDay(tokenTasks, now);
+  const credited = windowed(usage, now);
+  const agentTokens = tokensByAgent(credited);
+  const sum = (ns: number[]) => ns.reduce((a, b) => a + b, 0);
+  return {
+    ...pipe,
+    missions: rows,
+    activity,
+    tokens,
+    agentTokens,
+    modelTokens: tokensByModel(credited),
+    runtimeTokens: tokensByRuntime(credited),
+    unsplitTokens: Math.max(0, sum(tokens) - sum(agentTokens.map((a) => a.tokens))),
+  };
 }
 
 /** Dots are capped so a busy day stays readable; counts are never capped. */

@@ -7,6 +7,29 @@ import type { MissionStatus, TaskStage } from "@/lib/types";
 
 export type NeedsYouKind = "plan_approval" | "task_failed" | "pick_agent" | "budget" | "mission_error";
 
+/**
+ * How the orchestrator records, in the mission's last_error, that a task was
+ * parked because its PR could not be pushed or opened. Read back below.
+ */
+export function prProblem(taskTitle: string, reason: string): string {
+  return `PR for "${taskTitle}": ${reason}`;
+}
+
+/** The PR reason for one task out of a mission's last_error, or null. */
+export function prProblemFor(lastError: string | null | undefined, taskTitle: string): string | null {
+  if (!lastError) return null;
+  const marker = `PR for "${taskTitle}": `;
+  const at = lastError.indexOf(marker);
+  if (at < 0) return null;
+  const rest = lastError.slice(at + marker.length);
+  const end = rest.indexOf("; PR for \"");
+  return (end < 0 ? rest : rest.slice(0, end)).trim() || null;
+}
+
+export function hasPrProblem(lastError: string | null | undefined): boolean {
+  return !!lastError && /(^|; )PR for "/.test(lastError);
+}
+
 export type NeedsYouItem = {
   kind: NeedsYouKind;
   missionId: string;
@@ -66,6 +89,7 @@ export function buildNeedsYou(missions: NeedsYouMission[], tasks: NeedsYouTask[]
   }
 
   const budgetMissions = new Set<string>();
+  const prMissions = new Set<string>();
   for (const t of tasks) {
     const m = byId.get(t.missionId);
     if (!m || m.status === "cancelled" || m.status === "completed") continue;
@@ -83,13 +107,19 @@ export function buildNeedsYou(missions: NeedsYouMission[], tasks: NeedsYouTask[]
     } else if (t.stage === "Needs you") {
       const budget = /token budget/i.test(m.lastError ?? "");
       if (budget) budgetMissions.add(m.id);
+      const pr = budget ? null : prProblemFor(m.lastError, t.title);
+      if (pr) prMissions.add(m.id);
       items.push({
         kind: budget ? "budget" : "task_failed",
         missionId: m.id,
         missionTitle: m.title,
         taskId: t.id,
         taskTitle: t.title,
-        detail: budget ? (m.lastError as string) : `Failed after ${t.retries + 1} attempt(s). Retry it or mark it done.`,
+        detail: budget
+          ? (m.lastError as string)
+          : pr
+            ? `The PR could not be opened before Final review: ${pr}`
+            : `Failed after ${t.retries + 1} attempt(s). Retry it or mark it done.`,
         since: t.updatedAt ?? null,
       });
     }
@@ -98,7 +128,7 @@ export function buildNeedsYou(missions: NeedsYouMission[], tasks: NeedsYouTask[]
   for (const m of missions) {
     // Needs-you covers active missions, including plans awaiting approval.
     // Completed/cancelled missions belong in history, not the action queue.
-    if ((m.status !== "running" && m.status !== "awaiting_plan_approval") || !m.lastError || budgetMissions.has(m.id)) continue;
+    if ((m.status !== "running" && m.status !== "awaiting_plan_approval") || !m.lastError || budgetMissions.has(m.id) || prMissions.has(m.id)) continue;
     items.push({
       kind: "mission_error",
       missionId: m.id,

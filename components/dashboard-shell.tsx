@@ -13,6 +13,7 @@ import {
   Inbox,
   LayoutDashboard,
   Network,
+  ScanSearch,
   Users,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -43,6 +44,7 @@ import {
 const navigation: NavItem[] = [
   { href: "/", label: "Dashboard", icon: LayoutDashboard },
   { href: "/projects", label: "Projects", icon: FolderGit2 },
+  { href: "/reviews", label: "Code review", icon: ScanSearch },
   { href: "/needs-you", label: "Needs you", icon: Inbox },
   { href: "/chat", label: "Chat", icon: MessagesSquare },
   { href: "/agents", label: "AI team", icon: Bot },

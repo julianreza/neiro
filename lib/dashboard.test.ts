@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { buildDashboard, buildPipe, MAX_PIPE_ITEMS } from "./dashboard";
+import { buildDashboard, buildPipe, MAX_PIPE_ITEMS, tokensByAgent, tokensByDay, tokensByModel, tokensByRuntime } from "./dashboard";
 import type { PipeMission, PipeTask } from "./dashboard";
 
 const NOW = Date.parse("2026-10-30T12:00:00Z");
@@ -72,7 +72,70 @@ test("buildDashboard adds mission rows, newest activity first and hourly tokens"
     ["a", "done"],
     ["c", "running"],
   ]);
-  assert.equal(snap.tokens.length, 12);
-  assert.equal(snap.tokens[11], 150);
-  assert.equal(snap.tokens[9], 7);
+  assert.equal(snap.tokens.length, 14);
+  assert.equal(snap.tokens[13], 157);
+  // No per-agent rows were passed, so every token is unsplit.
+  assert.equal(snap.unsplitTokens, 157);
+});
+
+test("tokensByDay buckets by local day and skips old or future tasks", () => {
+  const day = 24 * 60 * 60 * 1000;
+  const iso = (at: number) => new Date(at).toISOString();
+  const tokens = tokensByDay(
+    [
+      { updatedAt: iso(NOW - 1000), tokens: 5 },
+      { updatedAt: iso(NOW - 3 * day), tokens: 9 },
+      { updatedAt: iso(NOW - 30 * day), tokens: 100 },
+      { updatedAt: iso(NOW + day), tokens: 100 },
+      { updatedAt: null, tokens: 100 },
+    ],
+    NOW,
+  );
+  assert.equal(tokens.length, 14);
+  assert.equal(tokens[13], 5);
+  assert.equal(tokens[10], 9);
+  assert.equal(tokens.reduce((a, b) => a + b, 0), 14);
+});
+
+test("tokensByRuntime labels runtimes and treats a missing one as Hermes", () => {
+  const rows = tokensByRuntime([
+    { runtime: "ohmypi", tokens: 30 },
+    { runtime: "hermes", tokens: 10 },
+    { runtime: null, tokens: 5 },
+  ]);
+  assert.deepEqual(rows.map((r) => [r.id, r.name, r.tokens]), [
+    ["ohmypi", "OMP", 30],
+    ["hermes", "Hermes", 15],
+  ]);
+});
+
+test("tokensByModel sums per model and names a missing model", () => {
+  const rows = tokensByModel([
+    { agentId: "a", model: "gpt-5", tokens: 10 },
+    { agentId: "b", model: "gpt-5", tokens: 5 },
+    { agentId: "c", model: null, tokens: 7 },
+  ]);
+  assert.deepEqual(rows.map((r) => [r.name, r.tokens]), [
+    ["gpt-5", 15],
+    ["Not recorded", 7],
+  ]);
+});
+
+test("tokensByAgent sums per agent and folds the tail into Others", () => {
+  const rows = tokensByAgent(
+    [
+      { agentId: "a", agentName: "Dev", tokens: 50 },
+      { agentId: "a", agentName: "Dev", tokens: 30 },
+      { agentId: "b", agentName: "QA", tokens: 40 },
+      { agentId: null, agentName: "", tokens: 5 },
+      { agentId: "c", agentName: "Spec", tokens: 3 },
+      { agentId: "d", agentName: "Ops", tokens: 0 },
+    ],
+    3,
+  );
+  assert.deepEqual(rows.map((r) => [r.name, r.tokens]), [
+    ["Dev", 80],
+    ["QA", 40],
+    ["Others", 8],
+  ]);
 });

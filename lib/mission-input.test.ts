@@ -16,8 +16,18 @@ test("parseMissionCreateBody applies defaults", () => {
       baseBranch: null,
       isolateWorkspace: true,
       tokenBudget: null,
+      mode: null,
     },
   });
+});
+
+test("parseMissionCreateBody keeps the composer mode", () => {
+  for (const mode of ["build", "fix", "plan"] as const) {
+    const result = parseMissionCreateBody({ prompt: "x", mode });
+    assert.equal(result.ok && result.value.mode, mode);
+  }
+  const bad = parseMissionCreateBody({ prompt: "x", mode: "ask" });
+  assert.equal(bad.ok, false);
 });
 
 test("parseMissionCreateBody keeps valid operator controls", () => {
