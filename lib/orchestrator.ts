@@ -56,6 +56,17 @@ import { nextPrdVersion, prdKey, prdNotesFor, prdTitle, prdVersions } from "@/li
 import { safeNotify, shortHash } from "@/lib/notifications";
 import type { Notifier } from "@/lib/notifications";
 import { supabaseNotifier } from "@/lib/notifications-store";
+import { buildReviewPrompt, parseReviewOutput, reviewPassed, type ParsedReview } from "@/lib/code-review";
+import { createCodeReviewStore, type CodeReviewStore } from "@/lib/code-reviews-store";
+import {
+  ensureMissionPr as realEnsureMissionPr,
+  fetchPr as realFetchPr,
+  prSlug,
+  type MissionPr,
+  type PrData,
+} from "@/lib/github-pr";
+import { hasPrProblem, prProblem } from "@/lib/needs-you";
+import { missionNeedsPr } from "@/lib/types";
 
 /* ------------------------------------------------------------------ */
 /* Dependencies                                                        */
@@ -83,6 +94,19 @@ export type OrchestratorDeps = {
    * when a custom store is passed (tests) it defaults to none.
    */
   notify?: Notifier;
+  /**
+   * code_reviews rows for Build / Fix mission reviews, shown on /reviews.
+   * `null` = not recorded. Omit for the Supabase store; when a custom store
+   * is passed (tests) it defaults to none.
+   */
+  reviews?: CodeReviewStore | null;
+  /** git + gh steps that give a Build / Fix mission its PR. */
+  github?: MissionGitHub;
+};
+
+export type MissionGitHub = {
+  ensureMissionPr: typeof realEnsureMissionPr;
+  fetchPr: typeof realFetchPr;
 };
 
 // Each agent runs on Hermes or a local CLI; lib/agent-runtime.ts picks.
@@ -101,6 +125,8 @@ function resolveDeps(deps?: Partial<OrchestratorDeps>): OrchestratorDeps {
     router:
       deps?.router !== undefined ? deps.router : isRouterEnabled() ? createLayaRouter() : null,
     notify: deps?.notify ?? (deps?.store ? undefined : supabaseNotifier),
+    reviews: deps?.reviews !== undefined ? deps.reviews : deps?.store ? null : createCodeReviewStore(),
+    github: deps?.github ?? { ensureMissionPr: realEnsureMissionPr, fetchPr: realFetchPr },
   };
 }
 
@@ -129,9 +155,9 @@ const FAILURE_STATUSES = new Set([
   "expired_404",
 ]);
 
-type RunOutcome = "pending" | "success" | "failure";
+export type RunOutcome = "pending" | "success" | "failure";
 
-function classifyRun(status: string): RunOutcome {
+export function classifyRun(status: string): RunOutcome {
   const s = status.toLowerCase();
   if (SUCCESS_STATUSES.has(s)) return "success";
   if (FAILURE_STATUSES.has(s)) return "failure";
@@ -280,7 +306,10 @@ export async function advanceMission(
   } else if (
     detail.lastError &&
     // A quiet tick must not erase the reason a task is still parked.
-    !(/token budget/i.test(detail.lastError) && detail.tasks.some((t) => t.stage === "Needs you"))
+    !(
+      (/token budget/i.test(detail.lastError) || hasPrProblem(detail.lastError)) &&
+      detail.tasks.some((t) => t.stage === "Needs you")
+    )
   ) {
     await d.store.setMissionError(missionId, null);
   }
@@ -651,7 +680,14 @@ async function stepTask(
       runStartedAt: d.now().toISOString(),
     });
     if (!claimed) return;
-    await startTaskRun(m, { ...task, runId: token }, d, ctx, agent);
+    const claimedTask = { ...task, runId: token };
+    // Build / Fix: the task's work goes into the mission PR before it is reviewed.
+    let review: MissionReviewRun | null = null;
+    if (task.stage === "Final review" && missionNeedsPr(m.mode)) {
+      review = await openMissionPr(m, claimedTask, d, ctx);
+      if (!review) return;
+    }
+    await startTaskRun(m, claimedTask, d, ctx, agent, review);
     return;
   }
 
@@ -675,7 +711,31 @@ async function stepTask(
   const output = (run.output ?? "").trim();
   const tokens = task.tokens + (run.tokens ?? 0);
 
+  // Credit this run's tokens to the agent that ran it. Before the task
+  // moves on, so a failed write is retried by the next tick.
+  if ((run.tokens ?? 0) > 0) {
+    await d.store.recordTokenUsage({
+      runId: task.runId,
+      missionId: m.id,
+      taskId: task.id,
+      agentId: agent.id,
+      agentName: agent.name,
+      stage: task.stage,
+      tokens: run.tokens ?? 0,
+      model: agent.model || null,
+      runtime: agent.runtime ?? "hermes",
+    });
+  }
+
   if (outcome === "failure" || !output) {
+    if (task.stage === "Final review") {
+      await finishMissionReview(task, d, {
+        status: "failed",
+        error: run.error || (output ? `The review run ended with status "${run.status}".` : "The reviewer returned an empty answer."),
+        rawOutput: output || null,
+        tokens: run.tokens ?? 0,
+      });
+    }
     await failAttempt(m, task, guard, tokens, d);
     return;
   }
@@ -711,24 +771,16 @@ async function stepTask(
 
   const verdict = isQa
     ? extractGateVerdict(output, "PASS", "FAIL")
-  // Credit this run's tokens to the agent that ran it. Before the task
-  // moves on, so a failed write is retried by the next tick.
-  if ((run.tokens ?? 0) > 0) {
-    await d.store.recordTokenUsage({
-      runId: task.runId,
-      missionId: m.id,
-      taskId: task.id,
-      agentId: agent.id,
-      agentName: agent.name,
-      stage: task.stage,
-      tokens: run.tokens ?? 0,
-      model: agent.model || null,
-      runtime: agent.runtime ?? "hermes",
-    });
-  }
-
     : extractGateVerdict(output, "APPROVED", "CHANGES_REQUESTED");
-  const passed = verdict.verdict === (isQa ? "PASS" : "APPROVED");
+  let passed = verdict.verdict === (isQa ? "PASS" : "APPROVED");
+
+  // Final review: a JSON answer (the PR review prompt) decides, and its
+  // findings go to the task's row on /reviews.
+  if (!isQa && missionNeedsPr(m.mode)) {
+    const parsed = parseReviewOutput(output);
+    if (parsed.ok) passed = reviewPassed(parsed.verdict, parsed.findings);
+    await finishMissionReview(task, d, reviewPatchFrom(parsed, output, run.tokens ?? 0));
+  }
 
   if (!passed) {
     await failAttempt(m, task, guard, tokens, d);
@@ -1071,6 +1123,7 @@ async function startTaskRun(
   d: OrchestratorDeps,
   ctx: PassContext,
   knownAgent?: Agent,
+  review?: MissionReviewRun | null,
 ) {
   const claimGuard: TaskGuard = { stage: task.stage, runId: task.runId };
   const release = () =>
@@ -1130,7 +1183,7 @@ async function startTaskRun(
   let started: HermesStartRunResult;
   try {
     started = await d.hermes.startRun(agent, {
-      prompt: taskPrompt(m, task),
+      prompt: review?.prompt ?? taskPrompt(m, task),
       sessionId,
       cwd: m.agentWorkspacePath || m.workspacePath || undefined,
       idempotencyKey: `${TASK_STAGE_KEY[task.stage]}-${task.id}-${task.retries}`,
@@ -1145,11 +1198,176 @@ async function startTaskRun(
     return;
   }
 
-  await d.store.updateTaskIf(task.id, claimGuard, {
+  const updated = await d.store.updateTaskIf(task.id, claimGuard, {
     runId: started.runId,
     runAgentId: agent.id,
     agentId: agent.id,
     agentName: agent.name,
     model: agent.model,
   });
+
+  if (updated && review?.reviewId && d.reviews) {
+    try {
+      await d.reviews.updateReview(review.reviewId, {
+        status: "reviewing",
+        runId: started.runId,
+        agentId: agent.id,
+        model: agent.model || null,
+        runtime: agent.runtime ?? "hermes",
+        error: null,
+      });
+    } catch (err: unknown) {
+      console.warn("[orchestrator] could not update the code review row", errorMessage(err));
+    }
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Mission PR + code review (Build / Fix)                              */
+/* ------------------------------------------------------------------ */
+
+/** What startTaskRun needs for a Final review of a mission PR. */
+export type MissionReviewRun = { prompt: string; reviewId: string | null };
+
+const PR_DELIVERABLE_CHARS = 4000;
+
+export function missionReviewPrompt(m: MissionDetailDTO, task: MissionTask, pr: MissionPr, data: PrData): string {
+  return buildReviewPrompt(
+    {
+      repo: prSlug(pr.ref),
+      number: pr.number,
+      url: pr.url,
+      title: data.title,
+      body: data.body,
+      headRef: data.headRef,
+      baseRef: data.baseRef,
+      files: data.files,
+      diff: data.diff,
+      diffTruncated: data.diffTruncated,
+    },
+    [
+      `This is the Final review of task "${task.title}" in the neiro mission "${m.title}".`,
+      "The PR holds the whole mission so far. Judge whether this task is done right, and still report any blocker you see elsewhere in the diff.",
+      `Task requirements: ${task.result || task.title}`,
+      ...workspaceLines(m, "Review"),
+      "",
+      "The worker's notes:",
+      truncateMiddle(task.resultOutput ?? "", PR_DELIVERABLE_CHARS) || "(none)",
+      "",
+      "After the json block, end with VERDICT: APPROVED or VERDICT: CHANGES_REQUESTED.",
+    ],
+  );
+}
+
+/**
+ * Commit + push the mission branch and open (or reuse) its draft PR, then
+ * record the review row. Null when the PR could not be made: the task is
+ * parked in Needs you with the reason on the mission.
+ */
+async function openMissionPr(
+  m: MissionDetailDTO,
+  task: MissionTask,
+  d: OrchestratorDeps,
+  ctx: PassContext,
+): Promise<MissionReviewRun | null> {
+  const claimGuard: TaskGuard = { stage: task.stage, runId: task.runId };
+  const github = d.github ?? { ensureMissionPr: realEnsureMissionPr, fetchPr: realFetchPr };
+
+  let pr: MissionPr;
+  let data: PrData;
+  try {
+    pr = await github.ensureMissionPr(m, task.title);
+    data = await github.fetchPr(pr.ref);
+  } catch (err: unknown) {
+    const reason = errorMessage(err);
+    const parked = await d.store.updateTaskIf(task.id, claimGuard, {
+      stage: "Needs you",
+      runId: null,
+      runAgentId: null,
+      runStartedAt: null,
+    });
+    if (parked) {
+      ctx.problems.push(prProblem(task.title, reason));
+      await safeNotify(d.notify, {
+        kind: "task_needs_you",
+        missionId: m.id,
+        taskId: task.id,
+        title: "A task needs you",
+        body: `"${task.title}" is ready for Final review, but its PR could not be opened: ${reason}`,
+        dedupeKey: `pr:${task.id}:${task.retries}`,
+      });
+    }
+    return null;
+  }
+
+  if (m.prUrl !== pr.url || m.prNumber !== pr.number) {
+    try {
+      await d.store.updateMissionIf(m.id, { phase: m.phase, runId: m.runId }, { prUrl: pr.url, prNumber: pr.number });
+    } catch (err: unknown) {
+      // pr_url column not migrated yet: the PR still exists and is reviewed.
+      console.warn("[orchestrator] could not save the mission PR", errorMessage(err));
+    }
+  }
+
+  let reviewId: string | null = null;
+  if (d.reviews) {
+    const prFields = {
+      prTitle: data.title || null,
+      headRef: data.headRef || null,
+      baseRef: data.baseRef || null,
+      files: data.files,
+    };
+    try {
+      const existing = await d.reviews.findReviewForTask(task.id, task.retries);
+      if (existing) {
+        await d.reviews.updateReview(existing.id, { ...prFields, status: "fetching", error: null });
+        reviewId = existing.id;
+      } else {
+        const row = await d.reviews.createReview({
+          repo: prSlug(pr.ref),
+          prNumber: pr.number,
+          prUrl: pr.url,
+          source: "mission",
+          missionId: m.id,
+          taskId: task.id,
+          taskAttempt: task.retries,
+          status: "fetching",
+          ...prFields,
+        });
+        reviewId = row.id;
+      }
+    } catch (err: unknown) {
+      // The /reviews page is a view; the Final review gate still runs.
+      console.warn("[orchestrator] could not record the code review", errorMessage(err));
+    }
+  }
+
+  return { prompt: missionReviewPrompt(m, task, pr, data), reviewId };
+}
+
+type ReviewRowPatch = Parameters<CodeReviewStore["updateReview"]>[1];
+
+function reviewPatchFrom(parsed: ParsedReview, output: string, tokens: number): ReviewRowPatch {
+  if (!parsed.ok) return { status: "failed", error: parsed.error, rawOutput: output, tokens };
+  return {
+    status: "done",
+    verdict: parsed.verdict,
+    summary: parsed.summary || null,
+    design: parsed.design,
+    findings: parsed.findings,
+    rawOutput: output,
+    tokens,
+    error: parsed.dropped > 0 ? `${parsed.dropped} finding(s) were not in the expected shape and were left out.` : null,
+  };
+}
+
+/** Writes the Final review result to the task attempt's row, if it has one. */
+async function finishMissionReview(task: MissionTask, d: OrchestratorDeps, patch: ReviewRowPatch) {
+  if (!d.reviews) return;
+  try {
+    const row = await d.reviews.findReviewForTask(task.id, task.retries);
+    if (row && row.status !== "done" && row.status !== "failed") await d.reviews.updateReview(row.id, patch);
+  } catch (err: unknown) {
+    console.warn("[orchestrator] could not save the code review result", errorMessage(err));
+  }
 }

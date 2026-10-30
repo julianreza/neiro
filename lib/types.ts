@@ -106,6 +106,14 @@ export type MissionPhase =
   | "summarizing"
   | "done";
 
+export const MISSION_MODES = ["build", "fix", "plan"] as const;
+export type MissionMode = (typeof MISSION_MODES)[number];
+
+/** Modes whose tasks open a PR before Final review. */
+export function missionNeedsPr(mode: MissionMode | null | undefined): boolean {
+  return mode === "build" || mode === "fix";
+}
+
 export type Mission = {
   id: string;
   title: string;
@@ -134,6 +142,11 @@ export type Mission = {
   lastErrorAt: string | null;
   /** Max tokens all tasks in this mission may use; null = no limit. */
   tokenBudget?: number | null;
+  /** Composer mode the mission was launched with; null on older missions. */
+  mode?: MissionMode | null;
+  /** Draft PR the mission opened from its work branch, once it has one. */
+  prUrl?: string | null;
+  prNumber?: number | null;
   createdAt?: string;
   updatedAt?: string;
 };
@@ -225,6 +238,99 @@ export type MissionSummaryDTO = Mission & {
   totalTasks: number;
   completedTasks: number;
   totalTokens: number;
+};
+
+export const REVIEW_SEVERITIES = ["blocker", "major", "minor", "nit"] as const;
+export type ReviewSeverity = (typeof REVIEW_SEVERITIES)[number];
+
+export const REVIEW_STATUSES = ["queued", "fetching", "reviewing", "done", "failed"] as const;
+export type ReviewStatus = (typeof REVIEW_STATUSES)[number];
+
+export const REVIEW_VERDICTS = ["approve", "request_changes", "comment"] as const;
+export type ReviewVerdict = (typeof REVIEW_VERDICTS)[number];
+
+export type ReviewSource = "manual" | "mission";
+
+export const REVIEW_CATEGORIES = [
+  "correctness",
+  "security",
+  "data",
+  "errors",
+  "concurrency",
+  "performance",
+  "accessibility",
+  "tests",
+  "design",
+  "maintainability",
+] as const;
+export type ReviewCategory = (typeof REVIEW_CATEGORIES)[number];
+
+/** One problem the reviewer found, with the chain of what it breaks. */
+export type ReviewFinding = {
+  id: string;
+  severity: ReviewSeverity;
+  /** Which lens found it; "maintainability" when the reviewer gave none. */
+  category: ReviewCategory;
+  file: string;
+  /** Line in the new version of the file; null for a file-level finding. */
+  line: number | null;
+  /** The finding's title: what is wrong, in one sentence. */
+  problem: string;
+  /** What the reviewer saw in the code, in a few sentences. */
+  observation: string;
+  /** The lines that show it, quoted from the diff; "" when none. */
+  evidence: string;
+  /** cause -> mechanism -> consequence for the user or the system. */
+  consequence: string;
+  suggestion: string;
+  /** Sent to GitHub as a review comment. */
+  posted: boolean;
+  /** Set aside by the operator: hidden from the counts and never posted. */
+  dismissed: boolean;
+};
+
+/** The reviewer's verdict on the change as a whole (Sage's design gate). */
+export type ReviewDesign = {
+  gate: "pass" | "concern";
+  problem: string;
+  whyItMatters: string;
+  solutionFit: string;
+};
+
+export type ReviewFile = { path: string; additions: number; deletions: number };
+
+/** A row of `code_reviews`: one review of one GitHub pull request. */
+export type CodeReview = {
+  id: string;
+  /** "owner/repo" */
+  repo: string;
+  prNumber: number;
+  prUrl: string;
+  prTitle: string | null;
+  headRef: string | null;
+  baseRef: string | null;
+  files: ReviewFile[];
+  source: ReviewSource;
+  missionId: string | null;
+  taskId: string | null;
+  /** The task attempt (mission_tasks.retries) this review belongs to. */
+  taskAttempt: number | null;
+  agentId: string | null;
+  model: string | null;
+  runtime: AgentRuntime | null;
+  runId: string | null;
+  status: ReviewStatus;
+  verdict: ReviewVerdict | null;
+  summary: string | null;
+  design: ReviewDesign | null;
+  findings: ReviewFinding[];
+  rawOutput: string | null;
+  error: string | null;
+  tokens: number;
+  postedAt: string | null;
+  createdBy: string | null;
+  createdAt: string;
+  updatedAt: string;
 };
 
 export type GatewayServiceStatus = {

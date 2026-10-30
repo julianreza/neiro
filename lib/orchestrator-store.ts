@@ -1,12 +1,13 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { getSupabaseAdmin } from "@/lib/supabase";
-import { asRuntime } from "@/lib/types";
+import { asRuntime, MISSION_MODES } from "@/lib/types";
 import type {
   Agent,
   AgentStage,
   Mission,
   MissionArtifact,
   MissionDetailDTO,
+  MissionMode,
   MissionPhase,
   MissionStatus,
   MissionTask,
@@ -40,6 +41,8 @@ export type MissionPatch = Partial<{
   runId: string | null;
   runAgentId: string | null;
   runStartedAt: string | null;
+  prUrl: string | null;
+  prNumber: number | null;
 }>;
 
 export type TaskPatch = Partial<
@@ -78,9 +81,6 @@ export type NewArtifactRow = {
   dedupeKey: string;
 };
 
-export interface OrchestratorStore {
-  getMissionDetail(missionId: string): Promise<MissionDetailDTO>;
-  /** Missions the tick should advance: status 'running' only. */
 /** Tokens one finished run spent, credited to the agent that ran it. */
 export type TokenUsageRow = {
   runId: string;
@@ -95,6 +95,9 @@ export type TokenUsageRow = {
   runtime?: string | null;
 };
 
+export interface OrchestratorStore {
+  getMissionDetail(missionId: string): Promise<MissionDetailDTO>;
+  /** Missions the tick should advance: status 'running' only. */
   listActiveMissionIds(): Promise<string[]>;
   listEnabledAgents(stage: AgentStage): Promise<Agent[]>;
   /** Every enabled agent, any stage (the router's candidate set). */
@@ -112,9 +115,6 @@ export type TokenUsageRow = {
   insertTasks(rows: NewTaskRow[]): Promise<void>;
   /** Insert an artifact unless one with the same dedupe key exists. */
   insertArtifactOnce(row: NewArtifactRow): Promise<void>;
-  /** Record (message) or clear (null) the mission's last orchestration error. */
-  setMissionError(id: string, message: string | null): Promise<void>;
-}
   /** Record a finished run's tokens; a run id already recorded is ignored. */
   recordTokenUsage(row: TokenUsageRow): Promise<void>;
   /**
@@ -122,6 +122,9 @@ export type TokenUsageRow = {
    * agent_token_usage; null when that table cannot be read.
    */
   agentMissionTokens(missionId: string, agentId: string): Promise<number | null>;
+  /** Record (message) or clear (null) the mission's last orchestration error. */
+  setMissionError(id: string, message: string | null): Promise<void>;
+}
 
 /* ------------------------------------------------------------------ */
 /* Row mappers                                                         */
@@ -203,6 +206,9 @@ export function mapMissionRow(row: Row): Mission {
     lastError: str(row.last_error),
     lastErrorAt: str(row.last_error_at),
     tokenBudget: num(row.token_budget),
+    mode: MISSION_MODES.includes(row.mode as MissionMode) ? (row.mode as MissionMode) : null,
+    prUrl: str(row.pr_url),
+    prNumber: num(row.pr_number),
     createdAt: str(row.created_at) ?? undefined,
     updatedAt: str(row.updated_at) ?? undefined,
   };
@@ -255,6 +261,8 @@ function missionPatchToRow(patch: MissionPatch): Row {
   if (patch.runId !== undefined) row.run_id = patch.runId;
   if (patch.runAgentId !== undefined) row.run_agent_id = patch.runAgentId;
   if (patch.runStartedAt !== undefined) row.run_started_at = patch.runStartedAt;
+  if (patch.prUrl !== undefined) row.pr_url = patch.prUrl;
+  if (patch.prNumber !== undefined) row.pr_number = patch.prNumber;
   return row;
 }
 
@@ -423,14 +431,6 @@ export function createSupabaseStore(client?: SupabaseClient): OrchestratorStore 
       if (error) throw new Error(error.message);
     },
 
-    async setMissionError(id, message) {
-      const { error } = await db()
-        .from("missions")
-        .update({
-          last_error: message,
-          last_error_at: message === null ? null : new Date().toISOString(),
-        })
-        .eq("id", id);
     async recordTokenUsage(row) {
       const base = {
         run_id: row.runId,
@@ -460,6 +460,14 @@ export function createSupabaseStore(client?: SupabaseClient): OrchestratorStore 
       return (data ?? []).reduce((sum, r) => sum + (Number((r as Row).tokens) || 0), 0);
     },
 
+    async setMissionError(id, message) {
+      const { error } = await db()
+        .from("missions")
+        .update({
+          last_error: message,
+          last_error_at: message === null ? null : new Date().toISOString(),
+        })
+        .eq("id", id);
       if (error) throw new Error(error.message);
     },
   };

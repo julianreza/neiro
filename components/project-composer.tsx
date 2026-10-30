@@ -70,6 +70,7 @@ export function ProjectComposer({
           title: objective.split("\n")[0].slice(0, 80),
           prompt: brief,
           pause_after_planning: pauseForPlan,
+          mode,
           workspace_path: workspace.trim() || undefined,
           base_branch: baseBranch.trim() || undefined,
           isolate_workspace: isolate,
@@ -84,14 +85,14 @@ export function ProjectComposer({
         return;
       }
       setPrompt("");
-      toast.success(pauseForPlan ? "Mission launched. It will pause for plan approval." : "Mission launched.");
       onChanged?.();
+      toast.success(pauseForPlan ? "Mission launched. It will pause for plan approval." : "Mission launched.");
       const id = data.mission?.id;
-      router.push(projectHref(projectId, id ? { mission: id } : {}));
       if (onOpen && id) {
         onOpen({ kind: "mission", id });
         return;
       }
+      router.push(projectHref(projectId, id ? { mission: id } : {}));
     } catch {
       toast.error("Network error");
     } finally {
@@ -111,12 +112,12 @@ export function ProjectComposer({
       isLive
       launching={launching}
       onLaunch={launch}
-      advanced={
       answerElsewhere={Boolean(onOpen)}
       onAskChange={(runId) => {
         onChanged?.();
         if (runId) onOpen?.({ kind: "question", id: runId });
       }}
+      advanced={
         <>
           <div className="grid gap-5 p-5 sm:grid-cols-2 lg:grid-cols-3">
             <div className="space-y-2">

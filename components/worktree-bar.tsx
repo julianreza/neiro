@@ -1,7 +1,8 @@
 "use client";
 
 import { useState } from "react";
-import { GitBranch, Trash2 } from "lucide-react";
+import Link from "next/link";
+import { GitBranch, GitPullRequest, ScanSearch, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import {
@@ -22,6 +23,11 @@ type WorktreeBarProps = {
   status: string;
   /** Called after the worktree was deleted, so the parent can reload. */
   onDiscarded: () => void;
+  /** The mission's draft PR (Build / Fix), once it has one. */
+  prUrl?: string | null;
+  prNumber?: number | null;
+  /** The mission's newest code review on /reviews. */
+  reviewHref?: string | null;
 };
 
 const STOPPED = new Set(["cancelled", "completed"]);
@@ -30,7 +36,7 @@ const STOPPED = new Set(["cancelled", "completed"]);
  * Shows the mission's git branch and the rollback action (option B).
  * Only rendered for missions that run in a worktree.
  */
-export function WorktreeBar({ missionId, branch, baseBranch, status, onDiscarded }: WorktreeBarProps) {
+export function WorktreeBar({ missionId, branch, baseBranch, status, onDiscarded, prUrl, prNumber, reviewHref }: WorktreeBarProps) {
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const stopped = STOPPED.has(status);
@@ -68,6 +74,23 @@ export function WorktreeBar({ missionId, branch, baseBranch, status, onDiscarded
           <span className="text-muted-foreground">
             from <code className="code-chip break-all">{baseBranch}</code>
           </span>
+        )}
+        {prUrl && (
+          <a
+            href={prUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center gap-1 font-semibold text-primary hover:underline"
+          >
+            <GitPullRequest className="size-4" aria-hidden="true" />
+            Draft PR{prNumber ? ` #${prNumber}` : ""} ↗
+          </a>
+        )}
+        {reviewHref && (
+          <Link href={reviewHref} className="inline-flex items-center gap-1 font-semibold text-primary hover:underline">
+            <ScanSearch className="size-4" aria-hidden="true" />
+            Open review
+          </Link>
         )}
       </p>
       <div className="flex items-center gap-3">

@@ -1,4 +1,5 @@
 import { getSupabaseAdmin } from "@/lib/supabase";
+import { advanceCodeReviews } from "@/lib/code-review-runner";
 import { advanceActiveMissions } from "@/lib/orchestrator";
 
 export type TickResult = {
@@ -26,5 +27,12 @@ export async function recordTickHeartbeat(): Promise<string> {
 export async function runTick(): Promise<TickResult> {
   const tickedAt = await recordTickHeartbeat();
   const { advancedCount, errors } = await advanceActiveMissions();
+  // Manual code reviews; a failure here never stops the missions above.
+  try {
+    const reviews = await advanceCodeReviews();
+    errors.push(...reviews.errors);
+  } catch (err: unknown) {
+    errors.push(`Code reviews: ${err instanceof Error ? err.message : String(err)}`);
+  }
   return { advancedCount, errors, tickedAt };
 }

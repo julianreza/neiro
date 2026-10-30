@@ -95,10 +95,28 @@ type MissionView = Omit<DemoMission, "tasks"> & {
   /** Mission branch when it runs in a git worktree (live missions only). */
   workBranch?: string | null;
   baseBranch?: string | null;
+  /** Draft PR a Build / Fix mission opened before Final review. */
+  prUrl?: string | null;
+  prNumber?: number | null;
   /** Auto-fix retries this mission allows per task (live missions only). */
   maxRetries?: number;
 };
 
+
+/** A mission's code reviews, newest first: enough to link to /reviews. */
+type ReviewLink = { id: string; taskId: string | null };
+
+function parseReviewLinks(json: unknown): ReviewLink[] {
+  const list = (json as { reviews?: { id?: unknown; taskId?: unknown }[] } | null)?.reviews;
+  if (!Array.isArray(list)) throw new Error("Malformed /api/reviews response");
+  return list
+    .filter((r) => typeof r.id === "string")
+    .map((r) => ({ id: r.id as string, taskId: typeof r.taskId === "string" ? r.taskId : null }));
+}
+
+function reviewHref(reviewId: string): string {
+  return `/reviews?id=${encodeURIComponent(reviewId)}`;
+}
 
 function parseMissionList(json: unknown): MissionView[] {
   const list = (json as { missions?: MissionSummaryDTO[] } | null)?.missions;
@@ -127,6 +145,8 @@ function parseMissionDetail(json: unknown): MissionView | null {
     lastError: m.lastError,
     workBranch: m.workBranch,
     baseBranch: m.baseBranch,
+    prUrl: m.prUrl ?? null,
+    prNumber: m.prNumber ?? null,
     maxRetries: m.maxRetries,
     tasks: m.tasks.map((t) => ({
       id: t.taskKey ?? t.id.slice(0, 8),
@@ -252,6 +272,15 @@ export function MissionWorkspace({
   const loading =
     list.source === "loading" || (isLive && effectiveId !== null && detail.source === "loading");
   const tasks = mission?.tasks ?? [];
+  const reviews = useLiveData<ReviewLink[]>(
+    isLive && mission?.prUrl ? `/api/reviews?missionId=${encodeURIComponent(mission.id)}` : null,
+    [],
+    parseReviewLinks,
+  );
+  const reviewLinks = reviews.source === "live" ? reviews.data : [];
+  // Newest review per task row (the list comes newest first).
+  const reviewByTask = new Map<string, string>();
+  for (const r of reviewLinks) if (r.taskId && !reviewByTask.has(r.taskId)) reviewByTask.set(r.taskId, r.id);
   const hasPrd = Boolean(mission?.artifacts?.some((a) => a.name === "PRD.md"));
   const done = tasks.filter((task) => task.stage === "Done").length;
   // The mission's own retry cap; demo missions use the orchestrator default.
@@ -412,6 +441,30 @@ export function MissionWorkspace({
               </Link>
             </Button>
           )}
+          {isLive && mission && role === "admin" && (
+            <DeleteButton
+              url={`/api/missions/${encodeURIComponent(mission.id)}`}
+              what="Mission"
+              title={`Delete “${mission.title}”?`}
+              disabledReason={
+                mission.status === "running" ? "This mission is still running. Cancel it first, then delete it." : undefined
+              }
+              body={
+                <>
+                  <p>The mission, its tasks and its artifacts are deleted. This can&apos;t be undone.</p>
+                  {mission.workBranch && (
+                    <p>
+                      Its branch <span className="code-chip">{mission.workBranch}</span> stays in git.
+                    </p>
+                  )}
+                </>
+              }
+              onDeleted={() => {
+                if (onDeleted) onDeleted();
+                else router.push(`/projects?project=${encodeURIComponent(project.id)}`);
+              }}
+            />
+          )}
           {isDemo && effectiveId && (
             <Button
               variant="ghost"
@@ -440,33 +493,12 @@ export function MissionWorkspace({
             branch={mission.workBranch}
             baseBranch={mission.baseBranch ?? null}
             status={mission.status}
+            prUrl={mission.prUrl ?? null}
+            prNumber={mission.prNumber ?? null}
+            reviewHref={reviewLinks[0] ? reviewHref(reviewLinks[0].id) : null}
             onDiscarded={refresh}
           />
         )}
-          {isLive && mission && role === "admin" && (
-            <DeleteButton
-              url={`/api/missions/${encodeURIComponent(mission.id)}`}
-              what="Mission"
-              title={`Delete “${mission.title}”?`}
-              disabledReason={
-                mission.status === "running" ? "This mission is still running. Cancel it first, then delete it." : undefined
-              }
-              body={
-                <>
-                  <p>The mission, its tasks and its artifacts are deleted. This can&apos;t be undone.</p>
-                  {mission.workBranch && (
-                    <p>
-                      Its branch <span className="code-chip">{mission.workBranch}</span> stays in git.
-                    </p>
-                  )}
-                </>
-              }
-              onDeleted={() => {
-                if (onDeleted) onDeleted();
-                else router.push(`/projects?project=${encodeURIComponent(project.id)}`);
-              }}
-            />
-          )}
         {mission?.lastError && (
           <Alert variant="destructive" role="alert">
             <AlertTitle>Orchestrator error</AlertTitle>
@@ -648,6 +680,10 @@ export function MissionWorkspace({
                     routeAgents={routeAgents}
                     stageStyle={stageLook}
                     onInspect={setInspected}
+                    reviewHrefFor={(rowId) => {
+                      const id = reviewByTask.get(rowId);
+                      return id ? reviewHref(id) : null;
+                    }}
                   />
                 )}
               </TabsContent>
