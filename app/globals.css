@@ -2191,6 +2191,11 @@ section.console-lane[data-stage] > :first-child h2 {
 .agent-card .cap-pill { border: 1px dashed rgb(255 255 255 / 0.45); color: rgb(255 255 255 / 0.75); }
 .agent-card .cap-pill[data-on="true"] { border-color: transparent; background: #fff; color: #0f172a; font-weight: 600; }
 
+/* Skills section in the agent edit dialog: pressed-in rows. */
+.agent-skills { border-top: 1px solid var(--border); padding-top: 1rem; }
+.agent-skill-row { display: flex; align-items: center; gap: 0.5rem; min-height: 2.5rem; padding: 0.25rem 0.5rem; border-radius: 0.75rem; box-shadow: var(--neu-inset-sm); }
+.agent-skill-list { scrollbar-width: thin; }
+
 /* Bot, built in em so one font-size scales it */
 .agent-bot {
   flex: none; font-size: 17px; width: 7em; height: 8.2em; margin: -0.25em -0.5em 0 0;

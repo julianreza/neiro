@@ -16,6 +16,7 @@ import {
   type Focusable,
 } from "@/components/team-office";
 import { Skeleton } from "@/components/ui/skeleton";
+import { AgentAddons } from "@/components/agent-addons";
 import {
   Bot,
   Copy,
@@ -959,6 +960,25 @@ export function AgentsManager() {
                 </Button>
               </div>
             </form>
+          )}
+          {draft && savedAgent && !readOnly && savedAgent.runtime === "hermes" && (
+            <>
+              {draft.profile.trim() !== savedAgent.profile && (
+                <p className="text-xs text-muted-foreground">
+                  Add-ons below are for profile <code className="code-chip">{savedAgent.profile}</code>. Save first to
+                  manage the new profile.
+                </p>
+              )}
+              <AgentAddons
+                key={`${savedAgent.id}:${savedAgent.profile}`}
+                agentId={savedAgent.id}
+                profile={savedAgent.profile}
+                readOnly={readOnly}
+                sharedWith={agents
+                  .filter((a) => a.id !== savedAgent.id && a.runtime === "hermes" && a.profile === savedAgent.profile)
+                  .map((a) => a.name)}
+              />
+            </>
           )}
         </DialogContent>
       </Dialog>
