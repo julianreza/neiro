@@ -727,7 +727,7 @@ async function stepTask(
       agentName: agent.name,
       stage: task.stage,
       tokens: run.tokens ?? 0,
-      model: agent.model || null,
+      model: agent.model || run.model || null,
       runtime: agent.runtime ?? "hermes",
     });
   }

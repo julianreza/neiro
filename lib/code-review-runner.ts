@@ -192,7 +192,7 @@ async function pollReview(review: CodeReview, d: ReviewRunnerDeps): Promise<bool
       agentName: agent.name,
       stage: REVIEW_TOKEN_STAGE,
       tokens,
-      model: agent.model || null,
+      model: agent.model || run.model || null,
       runtime: agent.runtime ?? "hermes",
     });
   }

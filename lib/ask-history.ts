@@ -77,7 +77,7 @@ export function askStatusFromRun(status: string): Exclude<AskStatus, "running" |
 
 /** The fields to save once a run has finished, or null while it still runs. */
 export function askResultUpdate(
-  run: { status: string; output?: string; tokens?: number; error?: string },
+  run: { status: string; output?: string; tokens?: number; model?: string; error?: string },
   now: Date = new Date(),
 ) {
   const status = askStatusFromRun(run.status);
@@ -86,6 +86,8 @@ export function askResultUpdate(
     status,
     answer: run.output ?? "",
     tokens: Number.isFinite(run.tokens) ? Math.max(0, Math.round(run.tokens ?? 0)) : 0,
+    // The model Hermes really used; an agent with no model runs on its default.
+    ...(run.model ? { model: run.model } : {}),
     error: status === "completed" ? null : (run.error || `The question ended: ${run.status}`),
     finished_at: now.toISOString(),
   };
@@ -183,7 +185,7 @@ export async function recordAskStart(
 export async function recordAskResult(
   supabase: SupabaseClient,
   runId: string,
-  run: { status: string; output?: string; tokens?: number; error?: string },
+  run: { status: string; output?: string; tokens?: number; model?: string; error?: string },
 ) {
   const update = askResultUpdate(run);
   if (!update) return null;

@@ -336,11 +336,33 @@ export type HermesRunStatus = {
   status: string;
   output?: string;
   tokens?: number;
+  /** The model Hermes really ran, read from the run's session once the run ends. */
+  model?: string;
   error?: string;
   pending_controls?: unknown[];
   admission_id?: string;
   execution_generation?: number;
 };
+
+const ENDED_RUN_STATUSES = new Set([
+  "completed", "succeeded", "success", "failed", "error", "cancelled", "canceled", "stopped",
+]);
+
+/** The model a Hermes session ran on, or undefined when Hermes cannot say. */
+export async function getHermesSessionModel(
+  agent: Pick<Agent, "profile" | "url" | "key_enc"> | undefined,
+  sessionId: string,
+): Promise<string | undefined> {
+  try {
+    const res = await hermesFetch(agent, `/api/sessions/${encodeURIComponent(sessionId)}`);
+    if (!res.ok) return undefined;
+    const data = (await res.json().catch(() => ({}))) as { session?: { model?: unknown } };
+    const model = data.session?.model;
+    return typeof model === "string" && model.trim() ? model.trim() : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 export async function getHermesRun(
   agent: Agent,
@@ -381,12 +403,21 @@ export async function getHermesRun(
   }
 
   const pending_controls = Array.isArray(data.pending_controls) ? data.pending_controls : [];
+  const status = typeof data.status === "string" ? data.status : "unknown";
+  // The run itself does not say its model. An agent with no model set runs on
+  // Hermes' default, so read the model from the session, once, when it ends.
+  const ended = ENDED_RUN_STATUSES.has(status.toLowerCase());
+  const model =
+    ended && tokens > 0 && typeof data.session_id === "string"
+      ? await getHermesSessionModel(agent, data.session_id)
+      : undefined;
 
   return {
     run_id: typeof data.run_id === "string" ? data.run_id : runId,
-    status: typeof data.status === "string" ? data.status : "unknown",
+    status,
     output,
     tokens,
+    model,
     error: typeof data.error === "string" ? data.error : undefined,
     pending_controls,
     admission_id: typeof data.admission_id === "string" ? data.admission_id : undefined,
