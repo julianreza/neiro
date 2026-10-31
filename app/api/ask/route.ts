@@ -8,6 +8,9 @@ import { startRun } from "@/lib/agent-runtime";
 import { mapAgentRow } from "@/lib/orchestrator-store";
 import { chatSessionId, recordAskStart } from "@/lib/ask-history";
 import { linkToProject } from "@/lib/projects-store";
+import { FOLLOW_UP_RULE, REPLY_SHAPES } from "@/lib/reply-format";
+import { validateAttachments } from "@/lib/attachments";
+import { loadBotAgents, mentionRoster, teamOf } from "@/lib/bots";
 import { AppConfigError } from "@/lib/types";
 
 const MAX_QUESTION = 20000;
@@ -17,8 +20,13 @@ const MAX_PATH = 500;
 const ASK_RULES = [
   "You are answering one question. This is not a mission: do not plan tasks or delegate.",
   "Read only the files you need to answer.",
-  "Do not create, edit, move, or delete files, and do not run commands that change anything.",
+  "Do not create, edit, move, or delete files.",
+  "You may run read-only commands to check a fact: tests, lint, type checks, `git status` / `log` / `diff` / `show`, grep, ls.",
+  "Never run commands that change files, install packages, change git history or branches, or reach the network.",
+  'When you ran a command, show it as a ```sh block: "$ command", its output, then "exit N".',
   "Reply in the language of the question. Start with the direct answer, then at most 5 short points.",
+  REPLY_SHAPES,
+  FOLLOW_UP_RULE + ' Put it just before the "Files read:" line.',
   'End with one line that starts with "Files read:" followed by the paths you opened, comma separated.',
 ].join("\n");
 
@@ -27,7 +35,16 @@ const CHAT_RULES = [
   "You are answering one question in a chat. There is no project folder.",
   "Do not open, create, edit, move, or delete any file, and do not run commands.",
   "Reply in the language of the question. Start with the direct answer, then at most 5 short points.",
+  REPLY_SHAPES,
+  FOLLOW_UP_RULE + " Put it on the last line.",
 ].join("\n");
+/** The teammates roster, only when the question @mentions a bot. */
+async function teamFor(supabase: ReturnType<typeof getSupabaseAdmin>, agentId: string, question: string) {
+  if (!question.includes("@")) return "";
+  const agents = await loadBotAgents(supabase).catch(() => []);
+  return mentionRoster(agentId, question, teamOf(agents));
+}
+
 export async function GET() {
   await connection();
   return NextResponse.json({ workspace: process.cwd() });
@@ -63,6 +80,9 @@ export async function POST(request: NextRequest) {
       }
     }
 
+    const images = validateAttachments(body?.images);
+    if (!images.ok) return NextResponse.json({ error: images.error }, { status: 400 });
+
     const sessionId =
       typeof body?.session_id === "string" && /^[A-Za-z0-9_-]{1,100}$/.test(body.session_id)
         ? body.session_id
@@ -91,9 +111,12 @@ export async function POST(request: NextRequest) {
 
     const started = await startRun(agent, {
       prompt: workspace ? `Question: ${question}\n\nWorkspace: ${workspace}` : `Question: ${question}`,
-      instructions: [agent.prompt, workspace ? ASK_RULES : CHAT_RULES].filter(Boolean).join("\n\n"),
+      instructions: [agent.prompt, workspace ? ASK_RULES : CHAT_RULES, await teamFor(supabase, agent.id, question)]
+        .filter(Boolean)
+        .join("\n\n"),
       sessionId: hermesSessionId,
       cwd: workspace || undefined,
+      images: images.images.length ? images.images : undefined,
       // A write or command waits for Allow / Deny in the chat.
       approvals: "ask",
     });
@@ -116,7 +139,7 @@ export async function POST(request: NextRequest) {
     await linkToProject(supabase, "ask_questions", started.runId, workspace);
 
     return NextResponse.json(
-      { runId: started.runId, agentId: agent.id, agentName: agent.name },
+      { runId: started.runId, agentId: agent.id, agentName: agent.name, skippedImages: started.skippedImages ?? false },
       { status: 201 },
     );
   } catch (err: unknown) {

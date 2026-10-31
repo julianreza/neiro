@@ -3,8 +3,12 @@
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
-import { AgentMarkdown, CopyButton } from "@/components/agent-markdown";
-import { ReplyTime } from "@/components/reply-parts";
+import { AgentMarkdown } from "@/components/agent-markdown";
+import { AttemptDiff } from "@/components/attempt-diff";
+import { FilesRead, ReplyMeta, StepTrail, took } from "@/components/reply-parts";
+import { ThinkingBlock, WorkSummary, reasoningOf } from "@/components/reply-extras";
+import { useRunSteps } from "@/hooks/use-run-steps";
+import { useSavedSteps } from "@/hooks/use-saved-steps";
 import { Check, ChevronRight, CircleAlert, Clock3, ListTree, RotateCcw } from "lucide-react";
 import { AgentBot, BotRig, agentLook, roleForAgent } from "@/components/agent-bot";
 import { ApprovalAsk, AskHand } from "@/components/approval-ask";
@@ -14,10 +18,12 @@ import { Button } from "@/components/ui/button";
 import { useRole } from "@/hooks/use-role";
 import { normalizeApprovals, type PendingApproval } from "@/lib/approvals";
 import type { DemoTask, RouteAgentOption, TaskStage } from "@/lib/demo-missions";
+import { splitAnswerFiles } from "@/lib/ask-history";
 import { buildTaskThread, stripVerdict } from "@/lib/task-thread";
 import type { ThreadMessage } from "@/lib/task-thread";
-import type { MissionArtifact } from "@/lib/types";
+import type { MissionArtifact, TaskRunUsage } from "@/lib/types";
 import { formatCompactTokens } from "@/lib/utils";
+import { toast } from "sonner";
 
 export type ChatTask = DemoTask & {
   rowId?: string;
@@ -37,8 +43,10 @@ const APPROVAL_POLL_MS = 3000;
 /** Board as chat: tasks on the left, the selected task's conversation on the right. */
 export function TaskChat({
   missionId,
+  initialTaskId,
   tasks,
   artifacts,
+  runUsage = [],
   maxRetries,
   routeAgents,
   stageStyle,
@@ -47,8 +55,11 @@ export function TaskChat({
 }: {
   /** Live mission id; without it (demo) no approvals are read. */
   missionId?: string;
+  initialTaskId?: string | null;
   tasks: ChatTask[];
   artifacts: MissionArtifact[];
+  /** Each finished run's tokens and model, for the reply footers. */
+  runUsage?: TaskRunUsage[];
   maxRetries: number;
   routeAgents: RouteAgentOption[];
   stageStyle: Record<TaskStage, CSSProperties>;
@@ -58,7 +69,7 @@ export function TaskChat({
 }) {
   const fallback =
     tasks.find((t) => WORKING.has(t.stage)) ?? tasks.find((t) => t.stage !== "Done") ?? tasks[0];
-  const [picked, setPicked] = useState<string | null>(null);
+  const [picked, setPicked] = useState<string | null>(() => tasks.find((t) => t.rowId === initialTaskId || t.id === initialTaskId)?.id ?? null);
   const task = tasks.find((t) => t.id === picked) ?? fallback;
   const { approvals, reload } = useApprovals(missionId, tasks.some((t) => WORKING.has(t.stage)));
   const waitingFor = (t: ChatTask) => approvals[t.rowId ?? t.id] ?? [];
@@ -106,6 +117,7 @@ export function TaskChat({
           key={task.id}
           task={task}
           artifacts={artifacts}
+          runUsage={runUsage}
           maxRetries={maxRetries}
           routeAgents={routeAgents}
           stageStyle={stageStyle}
@@ -121,8 +133,76 @@ export function TaskChat({
                 }
               : undefined
           }
+          retry={
+            missionId
+              ? async () => {
+                  const error = await retryTask(missionId, task.rowId ?? task.id);
+                  reload();
+                  return error;
+                }
+              : undefined
+          }
         />
       )}
+    </div>
+  );
+}
+
+/** Send a task that ran out of retries back to the queue. */
+async function retryTask(missionId: string, taskId: string): Promise<string | null> {
+  try {
+    const res = await fetch(`/api/missions/${encodeURIComponent(missionId)}/tasks/${encodeURIComponent(taskId)}/control`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "retry" }),
+    });
+    if (res.ok) return null;
+    const data = (await res.json().catch(() => ({}))) as { error?: string };
+    return data.error ?? `Request failed (${res.status})`;
+  } catch {
+    return "Network error";
+  }
+}
+
+/** Under the conversation: what you can do next with this task. */
+function TaskNext({
+  stage,
+  onInspect,
+  reviewHref,
+  retry,
+}: {
+  stage: TaskStage;
+  onInspect: () => void;
+  reviewHref: string | null;
+  retry?: () => Promise<string | null>;
+}) {
+  const [busy, setBusy] = useState(false);
+  const canRetry = useRole() !== "viewer";
+  return (
+    <div className="task-next follow" role="group" aria-label="Next steps for this task">
+      {stage === "Needs you" && retry && canRetry && (
+        <button
+          type="button"
+          className="follow-chip"
+          disabled={busy}
+          onClick={async () => {
+            setBusy(true);
+            const error = await retry();
+            setBusy(false);
+            if (error) toast.error(error);
+          }}
+        >
+          {busy ? "Retrying…" : "Retry this task"}
+        </button>
+      )}
+      {reviewHref && (
+        <Link href={reviewHref} className="follow-chip">
+          Open the code review
+        </Link>
+      )}
+      <button type="button" className="follow-chip" onClick={onInspect}>
+        Inspect the run
+      </button>
     </div>
   );
 }
@@ -161,12 +241,18 @@ function useApprovals(missionId: string | undefined, working: boolean) {
   return { approvals: working ? approvals : {}, reload };
 }
 
-async function answerTask(missionId: string, taskId: string, requestId: string, approve: boolean): Promise<string | null> {
+async function answerTask(
+  missionId: string,
+  taskId: string,
+  requestId: string,
+  approve: boolean | "always",
+): Promise<string | null> {
+  const action = approve === "always" ? "approve_tool_always" : approve ? "approve_tool" : "deny_tool";
   try {
     const res = await fetch(`/api/missions/${encodeURIComponent(missionId)}/tasks/${encodeURIComponent(taskId)}/control`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action: approve ? "approve_tool" : "deny_tool", requestId }),
+      body: JSON.stringify({ action, requestId }),
     });
     if (res.ok) return null;
     const data = (await res.json().catch(() => ({}))) as { error?: string };
@@ -179,6 +265,7 @@ async function answerTask(missionId: string, taskId: string, requestId: string, 
 function TaskThread({
   task,
   artifacts,
+  runUsage,
   maxRetries,
   routeAgents,
   stageStyle,
@@ -186,16 +273,20 @@ function TaskThread({
   reviewHref,
   approvals,
   answer,
+  retry,
 }: {
   task: ChatTask;
   artifacts: MissionArtifact[];
+  runUsage: TaskRunUsage[];
   maxRetries: number;
   routeAgents: RouteAgentOption[];
   stageStyle: Record<TaskStage, CSSProperties>;
   onInspect: (taskId: string) => void;
   reviewHref: string | null;
   approvals: PendingApproval[];
-  answer?: (approval: PendingApproval, approve: boolean) => Promise<string | null>;
+  answer?: (approval: PendingApproval, approve: boolean | "always") => Promise<string | null>;
+  /** Send a task that ran out of retries back to the queue (live missions). */
+  retry?: () => Promise<string | null>;
 }) {
   const messages = useMemo(
     () =>
@@ -210,8 +301,9 @@ function TaskThread({
           resultOutput: task.resultOutput,
         },
         artifacts,
+        runUsage,
       ),
-    [task, artifacts],
+    [task, artifacts, runUsage],
   );
   const coder = { name: task.agent === "Unassigned" ? "Coding agent" : task.agent, role: roleForAgent(task.agent) };
   const tries = messages.some((m) => m.kind === "coding" && m.attempt > 0);
@@ -287,8 +379,19 @@ function TaskThread({
       <div className="task-chat-body" data-steps={live && showSteps ? "" : undefined}>
         <div ref={scroller} className="task-chat-scroll" role="log" aria-label="Task conversation">
           {messages.map((m) => (
-            <Message key={m.key} m={m} coder={coder} tries={tries} approvals={approvals} answer={answer} />
+            <Message
+              key={m.key}
+              m={m}
+              coder={coder}
+              tries={tries}
+              approvals={approvals}
+              answer={answer}
+              runId={task.runId ?? null}
+              runAgentId={task.runAgentId ?? null}
+              gaveUp={task.stage === "Needs you" && m.kind === "failed-run" && m.attempt === task.retries}
+            />
           ))}
+          <TaskNext stage={task.stage} onInspect={() => onInspect(task.id)} reviewHref={reviewHref} retry={retry} />
         </div>
         {live && showSteps && (
           <div id={`steps-${task.id}`} className="contents">
@@ -313,6 +416,41 @@ function Who({ name, role, working = false, asks = false }: { name: string; role
   );
 }
 
+/** The steps a past run took, saved when its stream ended: "Worked 2m · 14 steps". */
+function SavedWork({ m, files }: { m: { runId?: string; startedAt?: string | null; at?: string }; files: number }) {
+  const steps = useSavedSteps(m.runId);
+  const spent = m.startedAt && m.at ? took(m.startedAt, m.at) : "";
+  return (
+    <>
+      <WorkSummary steps={steps} spent={spent} files={files}>
+        <StepTrail steps={steps} live={false} all />
+      </WorkSummary>
+      <ThinkingBlock text={reasoningOf(steps)} />
+    </>
+  );
+}
+
+/** Footer facts for a saved run: started → saved gives the ⏱ run time. */
+function runMeta(m: {
+  at?: string;
+  startedAt?: string | null;
+  model?: string | null;
+  tokens?: number;
+  inputTokens?: number | null;
+  outputTokens?: number | null;
+  cacheReadTokens?: number | null;
+}) {
+  return {
+    at: m.startedAt ?? m.at,
+    finishedAt: m.startedAt ? m.at : null,
+    model: m.model,
+    tokens: m.tokens,
+    inputTokens: m.inputTokens,
+    outputTokens: m.outputTokens,
+    cacheReadTokens: m.cacheReadTokens,
+  };
+}
+
 function Body({ text }: { text: string }) {
   const long = text.length > FOLD_AT;
   const [open, setOpen] = useState(false);
@@ -326,9 +464,6 @@ function Body({ text }: { text: string }) {
           {open ? "Show less" : "Show all"}
         </button>
       )}
-      <div className="chat-foot">
-        <CopyButton text={text} label="Copy answer" />
-      </div>
     </>
   );
 }
@@ -339,12 +474,19 @@ function Message({
   tries,
   approvals,
   answer,
+  runId,
+  runAgentId,
+  gaveUp = false,
 }: {
   m: ThreadMessage;
   coder: { name: string; role: string };
   tries: boolean;
   approvals: PendingApproval[];
-  answer?: (approval: PendingApproval, approve: boolean) => Promise<string | null>;
+  answer?: (approval: PendingApproval, approve: boolean | "always") => Promise<string | null>;
+  runId: string | null;
+  runAgentId: string | null;
+  /** The last failure: retries ran out and the task waits for a person. */
+  gaveUp?: boolean;
 }) {
   switch (m.kind) {
     case "brief":
@@ -354,7 +496,8 @@ function Message({
           <div className="story-ask-text">{m.text}</div>
         </div>
       );
-    case "coding":
+    case "coding": {
+      const reply = splitAnswerFiles(m.text ?? "");
       return (
         <div className="story" style={agentLook(coder.role)}>
           <Who {...coder} />
@@ -364,19 +507,24 @@ function Message({
                 {coder.name}
                 {tries && ` · ${m.attempt === 0 ? "first try" : `retry ${m.attempt}`}`}
               </span>
+              <SavedWork m={m} files={reply.files.length} />
               {m.text ? (
-                <Body text={m.text} />
+                <Body text={reply.body || m.text} />
               ) : (
                 <p className="text-sm text-muted-foreground">This output was not saved. Older runs kept only the latest.</p>
               )}
+              {m.diff && <AttemptDiff patch={m.diff} />}
             </div>
-            <ReplyTime at={m.at} />
+            <FilesRead files={reply.files} />
+            <ReplyMeta {...runMeta(m)} copyText={reply.body || undefined} />
           </div>
         </div>
       );
+    }
     case "qa":
     case "review": {
       const who = m.kind === "qa" ? QA : REVIEW;
+      const reply = splitAnswerFiles(stripVerdict(m.text));
       return (
         <div className="story" style={agentLook(who.role)}>
           <Who {...who} />
@@ -388,33 +536,60 @@ function Message({
                   {m.verdict.replace("_", " ")}
                 </span>
               </span>
-              <Body text={stripVerdict(m.text) || m.verdict} />
+              <SavedWork m={m} files={reply.files.length} />
+              <Body text={reply.body || m.verdict} />
             </div>
-            <ReplyTime at={m.at} />
+            <FilesRead files={reply.files} />
+            <ReplyMeta {...runMeta(m)} copyText={reply.body || undefined} />
           </div>
         </div>
       );
     }
-    case "failed-run":
+    case "failed-run": {
+      const who = m.stage === "QA check" ? QA : m.stage === "Final review" ? REVIEW : coder;
+      const what = m.stage === "QA check" ? "QA check" : m.stage === "Final review" ? "Review" : "coding run";
       return (
-        <div className="story" style={agentLook(coder.role)}>
-          <Who {...coder} />
+        <div className="story" style={agentLook(who.role)}>
+          <Who {...who} />
           <div className="story-bubble" data-failed="">
             <div className="chat-fail" role="status">
               <p className="chat-fail-head">
                 <CircleAlert aria-hidden="true" />
-                {m.attempt === 0 ? "First coding run failed" : `Coding retry ${m.attempt} failed`}
+                {m.attempt === 0 ? `First ${what} failed` : `${what[0].toUpperCase()}${what.slice(1)} on retry ${m.attempt} failed`}
               </p>
-              <pre className="chat-fail-detail">No output came back.</pre>
+              {m.reason ? (
+                <pre className="fail-reason">{m.reason}</pre>
+              ) : (
+                <pre className="chat-fail-detail">No output came back.</pre>
+              )}
               <p className="chat-fail-note">
-                <RotateCcw aria-hidden="true" /> It ran again on its own.
+                {gaveUp ? (
+                  <>
+                    <CircleAlert aria-hidden="true" /> Out of retries: it waits for you.
+                  </>
+                ) : (
+                  <>
+                    <RotateCcw aria-hidden="true" /> It ran again on its own.
+                  </>
+                )}
               </p>
             </div>
           </div>
         </div>
       );
+    }
     case "now":
-      return <Now stage={m.stage} depends={m.depends} coder={coder} approvals={approvals} answer={answer} />;
+      return (
+        <Now
+          stage={m.stage}
+          depends={m.depends}
+          coder={coder}
+          approvals={approvals}
+          answer={answer}
+          runId={runId}
+          runAgentId={runAgentId}
+        />
+      );
   }
 }
 
@@ -424,12 +599,16 @@ function Now({
   coder,
   approvals,
   answer,
+  runId,
+  runAgentId,
 }: {
   stage: TaskStage;
   depends: string[];
   coder: { name: string; role: string };
   approvals: PendingApproval[];
-  answer?: (approval: PendingApproval, approve: boolean) => Promise<string | null>;
+  answer?: (approval: PendingApproval, approve: boolean | "always") => Promise<string | null>;
+  runId: string | null;
+  runAgentId: string | null;
 }) {
   const role = useRole();
   if (WORKING.has(stage)) {
@@ -444,6 +623,7 @@ function Now({
               approvals={approvals}
               readOnly={!answer || role === "viewer"}
               send={answer ?? (async () => "Not connected")}
+              sendAlways={answer ? (approval) => answer(approval, "always") : undefined}
             />
           </div>
         </div>
@@ -454,11 +634,7 @@ function Now({
         <Who {...who} working />
         <div className="story-bubble task-chat-typing">
           <span className="story-meta">{who.name}</span>
-          <span className="story-thinking" role="status" aria-label={`${who.name} is working`}>
-            <i />
-            <i />
-            <i />
-          </span>
+          <LiveTrail runId={runId} agentId={runAgentId} />
         </div>
       </div>
     );
@@ -476,4 +652,10 @@ function Now({
       {text[stage] ?? stage}
     </p>
   );
+}
+
+/** The working agent's steps under its name, Kiro Crew style. */
+function LiveTrail({ runId, agentId }: { runId: string | null; agentId: string | null }) {
+  const { steps } = useRunSteps(runId, agentId);
+  return <StepTrail steps={steps} live />;
 }

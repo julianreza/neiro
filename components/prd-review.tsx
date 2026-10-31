@@ -108,7 +108,7 @@ export function PrdReview({ projectId, missionId }: { projectId: string; mission
       <div className="p-4 md:p-8">
         <StoryEmpty
           title="Mission not found"
-          body={detail.source === "demo" ? detail.reason : "It may have been removed."}
+          body={detail.source === "demo" || detail.source === "error" ? detail.reason : "It may have been removed."}
         />
       </div>
     );

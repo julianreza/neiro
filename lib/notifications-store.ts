@@ -1,6 +1,8 @@
 import "server-only";
 import { getSupabaseAdmin } from "@/lib/supabase";
-import { webhookPayload } from "@/lib/notifications";
+import { writeDroppingMissing } from "@/lib/missing-column";
+import { webhookFormat, webhookPayload } from "@/lib/notifications";
+import { sendTelegramMessage } from "@/lib/telegram";
 import type { NotificationEvent, NotificationKind, Notifier } from "@/lib/notifications";
 
 export type NotificationDTO = {
@@ -16,7 +18,7 @@ export type NotificationDTO = {
 
 const WEBHOOK_TIMEOUT_MS = 5_000;
 
-async function postWebhook(event: NotificationEvent): Promise<void> {
+async function postWebhook(event: NotificationEvent & { notificationId?: string }): Promise<void> {
   const url = process.env.NEIRO_NOTIFY_WEBHOOK_URL?.trim();
   if (!url) return;
   if (!/^https:\/\//i.test(url) && !/^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?\//i.test(url)) {
@@ -26,7 +28,9 @@ async function postWebhook(event: NotificationEvent): Promise<void> {
   const res = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(webhookPayload(event, process.env.NEIRO_PUBLIC_URL)),
+    body: JSON.stringify(
+      webhookPayload(event, process.env.NEIRO_PUBLIC_URL, webhookFormat(process.env.NEIRO_NOTIFY_WEBHOOK_FORMAT)),
+    ),
     signal: AbortSignal.timeout(WEBHOOK_TIMEOUT_MS),
   });
   if (!res.ok) throw new Error(`webhook answered ${res.status}`);
@@ -37,22 +41,40 @@ async function postWebhook(event: NotificationEvent): Promise<void> {
  * inserted the row sends the webhook, so a repeat never pings twice.
  */
 export const supabaseNotifier: Notifier = async (event) => {
-  const { data, error } = await getSupabaseAdmin()
-    .from("notifications")
-    .upsert(
-      {
-        kind: event.kind,
-        mission_id: event.missionId,
-        task_id: event.taskId ?? null,
-        title: event.title.slice(0, 300),
-        body: event.body.slice(0, 2000),
-        dedupe_key: event.dedupeKey.slice(0, 300),
-      },
-      { onConflict: "dedupe_key", ignoreDuplicates: true }
-    )
-    .select("id");
+  let inserted: { id: string }[] = [];
+  const row: Record<string, unknown> = {
+    kind: event.kind,
+    mission_id: event.missionId,
+    task_id: event.taskId ?? null,
+    title: event.title.slice(0, 300),
+    body: event.body.slice(0, 2000),
+    dedupe_key: event.dedupeKey.slice(0, 300),
+  };
+  // notifications.actions comes from 20261031000000_hermes_full_suite.sql.
+  if (event.actions?.length) row.actions = event.actions;
+  const { error } = await writeDroppingMissing(
+    row,
+    ["actions"],
+    async (values) => {
+      const res = await getSupabaseAdmin()
+        .from("notifications")
+        .upsert(values, { onConflict: "dedupe_key", ignoreDuplicates: true })
+        .select("id");
+      inserted = (res.data ?? []) as { id: string }[];
+      return { error: res.error };
+    },
+    "notifications",
+  );
   if (error) throw new Error(error.message);
-  if ((data?.length ?? 0) > 0) await postWebhook(event);
+  if (inserted.length > 0) {
+    const sent = { ...event, notificationId: inserted[0].id };
+    // Webhook and Telegram are independent: one failing never blocks the other.
+    const [hook] = await Promise.allSettled([
+      postWebhook(sent),
+      sendTelegramMessage(`${event.title}\n${event.body}`, { actions: event.actions, notificationId: sent.notificationId }),
+    ]);
+    if (hook.status === "rejected") throw hook.reason;
+  }
 };
 
 export async function listNotifications(limit = 50): Promise<{ items: NotificationDTO[]; unread: number }> {

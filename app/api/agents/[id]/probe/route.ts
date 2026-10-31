@@ -1,7 +1,9 @@
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
-import { probeHermesAgent, listHermesCapabilitiesInventory } from "@/lib/hermes";
+import { getHermesDetailedInventory, getHermesServerCapabilities, probeHermesAgent } from "@/lib/hermes";
+import { probeDTO } from "@/lib/agent-capabilities";
+import { mapAgentRow } from "@/lib/orchestrator-store";
 import { listCliRuntime } from "@/lib/cli-runtime";
 import { AppConfigError, asRuntime } from "@/lib/types";
 import type { Agent } from "@/lib/types";
@@ -28,20 +30,7 @@ export async function POST(_request: NextRequest, context: RouteContext) {
       return NextResponse.json({ error: "Agent not found" }, { status: 404 });
     }
 
-    const typedAgent: Agent = {
-      id: agent.id,
-      name: agent.name,
-      role: agent.role,
-      stage: agent.stage,
-      specialty: agent.specialty || "",
-      model: agent.model || "",
-      profile: agent.profile || "default",
-      prompt: agent.prompt || "",
-      url: agent.url || "",
-      key_enc: agent.key_enc,
-      enabled: agent.enabled,
-      activeRun: agent.active_run ?? false,
-    };
+    const typedAgent: Agent = mapAgentRow(agent);
 
     const runtime = asRuntime(agent.runtime);
     if (runtime !== "hermes") {
@@ -62,23 +51,14 @@ export async function POST(_request: NextRequest, context: RouteContext) {
       );
     }
 
-    const probe = await probeHermesAgent(typedAgent);
-    let capabilities: string[] = [];
-    try {
-      capabilities = await listHermesCapabilitiesInventory(typedAgent);
-    } catch {
-      // capabilities inventory is optional / best-effort
-    }
-
-    return NextResponse.json(
-      {
-        ok: probe.ok,
-        latencyMs: probe.latencyMs,
-        error: probe.error,
-        capabilities,
-      },
-      { status: 200 }
-    );
+    const [probe, caps, inventory] = await Promise.all([
+      probeHermesAgent(typedAgent),
+      getHermesServerCapabilities(typedAgent),
+      getHermesDetailedInventory(typedAgent),
+    ]);
+    const dto = probeDTO(probe, caps, inventory);
+    // `capabilities` stays a list of names for older callers.
+    return NextResponse.json({ ...dto, capabilities: dto.inventory, flags: dto.capabilities }, { status: 200 });
   } catch (err: unknown) {
     if (err instanceof AppConfigError) {
       return NextResponse.json(

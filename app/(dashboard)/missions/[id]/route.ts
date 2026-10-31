@@ -21,6 +21,10 @@ export async function GET(request: NextRequest, ctx: RouteContext<"/missions/[id
     if (!projectId) return NextResponse.redirect(fallback);
     const target = new URL(`/projects/${encodeURIComponent(projectId)}`, request.url);
     target.searchParams.set("mission", id);
+    for (const key of ["task", "artifact"]) {
+      const value = request.nextUrl.searchParams.get(key);
+      if (value) target.searchParams.set(key, value);
+    }
     return NextResponse.redirect(target);
   } catch {
     return NextResponse.redirect(fallback);

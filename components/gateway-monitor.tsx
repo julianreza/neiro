@@ -1,17 +1,19 @@
 "use client";
 
 import { useState } from "react";
-import Image from "next/image";
-import { Cable, Check, Copy, Lock, RefreshCw, Search, Terminal, Unplug } from "lucide-react";
+import { Activity, Box, Cable, Check, ChevronDown, Clock3, Copy, Database, Lock, RefreshCw, Search, Server, Terminal, Unplug } from "lucide-react";
+import type { LucideIcon } from "lucide-react";
 import { toast } from "sonner";
 import type { GatewayStatusDTO } from "@/lib/types";
-import { DataSourceBadge } from "@/components/data-source-badge";
+import { DataSourceBadge, DataSourceFailure } from "@/components/data-source-badge";
+import { LiveAgentCapabilities } from "@/components/live-agent-capabilities";
 import {
   AgentBot,
   agentLook,
   followPointer,
   resetPointer,
 } from "@/components/agent-bot";
+import { modelSource } from "@/lib/model-catalog";
 import { useLiveData } from "@/hooks/use-live-data";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -153,6 +155,14 @@ const cronSample =
   '# Example only: replace both placeholders on your VPS. Not deployed.\n* * * * * curl --fail --silent --show-error -X POST \\\n  -H "Authorization: Bearer <DASHBOARD_SECRET>" \\\n  "<NEIRO_URL>/api/orchestrator/tick"';
 
 type ModelRow = (typeof models)[number];
+type CliCatalog = { installed: boolean; reason?: string; models: { id: string; name: string; group: string }[] };
+const emptyCli: CliCatalog = { installed: false, models: [] };
+function parseCliCatalog(json: unknown): CliCatalog {
+  const info = (json as { ohmypi?: CliCatalog } | null)?.ohmypi;
+  if (!info || typeof info.installed !== "boolean" || !Array.isArray(info.models)) throw new Error("Malformed runtime response");
+  return info;
+}
+
 
 function parseStatus(json: unknown): GatewayStatusDTO | null {
   const body = json as Partial<GatewayStatusDTO> | null;
@@ -175,14 +185,15 @@ function parseModels(json: unknown): ModelRow[] {
 }
 
 type Vital = {
+  id: string;
+  icon: LucideIcon;
   name: string;
   connected: boolean;
   detail: string;
   note: string;
-  envKeys: string;
   keys: { name: string; description: string; secret?: boolean }[];
 };
-type VitalState = "alive" | "down" | "unset" | "checking";
+type VitalState = "alive" | "down" | "unset" | "checking" | "unknown";
 
 function vitalState(vital: Vital, loading: boolean): VitalState {
   if (loading) return "checking";
@@ -195,147 +206,77 @@ const stateLabel: Record<VitalState, string> = {
   down: "No response",
   unset: "Not configured",
   checking: "Checking…",
+  unknown: "Unavailable",
 };
 
-const sceneArt: Record<string, { scene: string; stage?: string; layers: { src: string; w: number; h: number; className: string }[] }> = {
-  "Supabase Postgres": {
-    scene: "service-scene-supabase",
-    layers: [{ src: "/gateway/supabase-bolt.png", w: 387, h: 400, className: "service-art service-art-bolt" }],
-  },
-  "Hermes Agent VPS": {
-    scene: "service-scene-hermes",
-    stage: "service-stage-hermes",
-    layers: [
-      { src: "/gateway/hermes-girl.png", w: 571, h: 608, className: "service-art service-art-girl" },
-      { src: "/gateway/hermes-moon.png", w: 180, h: 172, className: "service-art service-art-moon" },
-    ],
-  },
-};
-
-function ServicePanel({
-  vitals,
-  loading,
-  onCopy,
-}: {
+function ServicePanel({ vitals, loading, unavailable, onCopy }: {
   vitals: Vital[];
   loading: boolean;
+  unavailable: boolean;
   onCopy: (value: string, label: string) => void;
 }) {
-  const aliveCount = vitals.filter((v) => !loading && v.connected).length;
   return (
-    <section aria-labelledby="setup-heading" className="space-y-4">
-      <div className="flex flex-wrap items-end justify-between gap-4">
-        <div className="space-y-1">
-          <h2 id="setup-heading" className="scroll-mt-24 text-lg font-semibold">
-            Connections
-          </h2>
-          <p className="text-sm text-muted-foreground">
-            Each service, its health, and the keys it needs on the server.
-          </p>
-        </div>
-        <p className="vitals-count" aria-live="polite">
-          <span className="vitals-count-num">{loading ? "–" : aliveCount}</span>
-          <span className="text-muted-foreground">/{vitals.length} connected</span>
-        </p>
+    <section aria-labelledby="setup-heading" className="gateway-section">
+      <div className="gateway-section-heading">
+        <div><h2 id="setup-heading">Connections</h2><p>Live status of your infrastructure services.</p></div>
       </div>
-      <ul className="grid gap-4 lg:grid-cols-2">
+      <ul className="gateway-services">
         {vitals.map((vital) => {
-          const state = vitalState(vital, loading);
-          const art = sceneArt[vital.name];
+          const state = unavailable ? "unknown" : vitalState(vital, loading);
           const broken = state === "down" || state === "unset";
+          const Icon = vital.icon;
           return (
-            <li
-              key={vital.name}
-              className="service-card vital-row"
-              data-state={state}
-              onPointerMove={followPointer}
-              onPointerLeave={resetPointer}
-            >
-              <div className={`service-scene ${art?.scene ?? ""}`} aria-hidden="true">
-                <span className="service-signal">
-                  <i />
-                  <i />
-                  <i />
-                  <i />
-                </span>
-                <div className={`service-stage ${art?.stage ?? ""}`}>
-                  {art?.layers.map((layer) => (
-                    <Image
-                      key={layer.src}
-                      src={layer.src}
-                      alt=""
-                      width={layer.w}
-                      height={layer.h}
-                      className={layer.className}
-                      draggable={false}
-                    />
-                  ))}
+            <li key={vital.id} className="gateway-service vital-row" data-state={state}>
+              <details key={state} className="gateway-disclosure gateway-service-disclosure" open={broken || undefined}>
+                <summary>
+                  <span className="gateway-service-icon"><Icon aria-hidden="true" /></span>
+                  <span className="gateway-service-info">
+                    <span className="gateway-service-name">{vital.name}</span>
+                    <span className="gateway-muted">{vital.note}</span>
+                    {!loading && <span className="gateway-service-detail">{unavailable ? "Could not check this service." : vital.detail}</span>}
+                  </span>
+                  <span className="gateway-status" data-state={state}><i aria-hidden="true" />{stateLabel[state]}</span>
+                  <span className="gateway-service-toggle">Configuration <ChevronDown aria-hidden="true" /></span>
+                </summary>
+                <div className="gateway-service-config">
+                  <ul className="gateway-keys">
+                    {vital.keys.map((key) => (
+                      <li key={key.name}>
+                        <code title={key.description}>{key.name}</code>
+                        {key.secret && <span className="secret-pill"><Lock className="size-3" aria-hidden="true" /> Secret</span>}
+                        <Button variant="ghost" size="sm" className="ml-auto min-h-10" aria-label={`Copy key name ${key.name}`} onClick={() => onCopy(key.name, "Key name")}><Copy aria-hidden="true" /></Button>
+                      </li>
+                    ))}
+                  </ul>
+                  <p className="gateway-muted">Set credentials in your server environment. Secret values are never displayed here.</p>
                 </div>
-              </div>
-              <div className="space-y-3 p-4">
-                <div className="space-y-1">
-                  <h3 className="text-base font-semibold tracking-tight">{vital.name}</h3>
-                  <p className="text-sm text-muted-foreground">
-                    <span className="service-signal-text font-semibold">{stateLabel[state]}</span>
-                    {" · "}
-                    {vital.detail}
-                  </p>
-                  <p className="text-xs text-muted-foreground">{vital.note}</p>
-                </div>
-                {broken && (
-                  <p className="flex items-center gap-1.5 text-xs font-medium text-[var(--vital)]">
-                    <Cable className="size-3.5" aria-hidden="true" />
-                    Set these keys on the server, then refresh.
-                  </p>
-                )}
-                <ul className="space-y-1.5">
-                  {vital.keys.map((key) => (
-                    <li key={key.name} className="flex items-center gap-2">
-                      <code className="code-chip min-w-0 truncate font-medium" title={`${key.name}: ${key.description}`}>
-                        {key.name}
-                      </code>
-                      {key.secret && (
-                        <span className="secret-pill">
-                          <Lock className="size-3" aria-hidden="true" />
-                          Secret
-                        </span>
-                      )}
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        className="ml-auto min-h-10"
-                        aria-label={`Copy key name ${key.name}`}
-                        onClick={() => onCopy(key.name, "Key name")}
-                      >
-                        <Copy aria-hidden="true" />
-                      </Button>
-                    </li>
-                  ))}
-                </ul>
-              </div>
+              </details>
             </li>
           );
         })}
       </ul>
-      <p className="text-xs text-muted-foreground">
-        Configure credentials in the server deployment environment, never in
-        this UI. This demo does not collect, store, or display secrets.
-      </p>
     </section>
   );
 }
 
 export function GatewayMonitor() {
   const [category, setCategory] = useState<Category>("all");
-  const [showAllModels, setShowAllModels] = useState(false);
+  const [expandedSources, setExpandedSources] = useState<string[]>([]);
   const [query, setQuery] = useState("");
   const status = useLiveData<GatewayStatusDTO | null>("/api/gateway/status", null, parseStatus);
   const modelList = useLiveData<ModelRow[]>("/api/agents/models", models, parseModels);
+  const cli = useLiveData<CliCatalog>("/api/agents/runtimes", emptyCli, parseCliCatalog);
   const liveStatus = status.source === "live" ? status.data : null;
-  const displayModels: ModelRow[] = modelList.source === "loading" ? [] : modelList.data;
-  const modelsAreSample = modelList.source !== "live";
+  const hermesModels = modelList.source === "live" || modelList.source === "demo" ? modelList.data : [];
+  const cliModels: ModelRow[] = cli.source === "live" && cli.data.installed && !cli.data.reason
+    ? cli.data.models.map((m) => ({ id: m.id, name: m.name.split("/").pop() || m.name, type: "chat", provider: m.group.replace(/^.*·\s*/, "") })) : [];
+  const displayModels = [...hermesModels, ...cliModels];
+  const modelsAreSample = modelList.source === "demo";
   const statusLoading = status.source === "loading";
   const anyDemo = status.source === "demo" || modelList.source === "demo";
+  const [liveCaps, setLiveCaps] = useState(false);
+  const [sampleCaps, setSampleCaps] = useState(false);
+  const showLiveCaps = !anyDemo && liveCaps;
   // Plain-language summary for the badge; raw reasons stay in the banner's
   // technical-detail line so operators can still debug.
   const demoReason =
@@ -354,17 +295,27 @@ export function GatewayMonitor() {
   function refreshStatus() {
     status.reload();
     modelList.reload();
+    cli.reload();
     toast.info("Re-checking gateway status");
   }
 
-  const filtered = displayModels.filter(
-    (model) =>
-      (category === "all" || model.type === category) &&
-      `${model.name} ${model.id} ${model.provider}`
-        .toLowerCase()
-        .includes(query.trim().toLowerCase()),
-  );
-  const families = groupModels(filtered);
+  const runtimes = [
+    { key: "hermes", name: "Hermes", models: hermesModels, sample: modelList.source === "demo", state: modelList.source === "loading" ? "Loading models…" : modelList.source === "demo" || modelList.source === "error" ? `Live catalog unavailable: ${modelList.reason}` : "" },
+    { key: "ohmypi", name: "Oh My Pi", models: cliModels, sample: false, state: cli.source === "loading" ? "Loading models…" : cli.source === "demo" || cli.source === "error" ? `Unavailable: ${cli.reason}` : !cli.data.installed ? "Not installed" : cli.data.reason ? `Unavailable: ${cli.data.reason}` : "" },
+  ];
+  const search = query.trim().toLowerCase();
+  const filteredRuntimes = runtimes.map((runtime) => {
+    const filtered = runtime.models.filter((model) => (category === "all" || model.type === category) && `${runtime.name} ${modelSource(model.id, model.provider)} ${model.name} ${model.id} ${model.provider}`.toLowerCase().includes(search));
+    const sources = new Map<string, ModelRow[]>();
+    for (const model of filtered) {
+      const source = modelSource(model.id, model.provider);
+      sources.set(source, [...(sources.get(source) ?? []), model]);
+    }
+    return { ...runtime, filtered, sources: [...sources.entries()] };
+  });
+  const filteredCount = filteredRuntimes.reduce((sum, runtime) => sum + runtime.filtered.length, 0);
+  const liveModelCount = (modelList.source === "live" ? hermesModels.length : 0) + cliModels.length;
+  const partialModels = modelList.source !== "live" || cli.source !== "live" || !cli.data.installed || Boolean(cli.data.reason);
   const presentCategories = categories.filter(
     (item) => item === "all" || displayModels.some((model) => model.type === item),
   );
@@ -381,16 +332,17 @@ export function GatewayMonitor() {
 
   const vitals: Vital[] = [
     {
+      id: "supabase",
+      icon: Database,
       name: "Supabase Postgres",
       connected: liveStatus?.supabase?.status === "connected",
       detail:
         liveStatus?.supabase?.status === "connected"
-          ? `Connected (${liveStatus?.supabase?.latencyMs ?? 0}ms)`
+          ? `Connected${liveStatus?.supabase?.latencyMs != null ? ` (${liveStatus.supabase.latencyMs}ms)` : ""}`
           : statusLoading
             ? "Checking…"
             : liveStatus?.supabase?.error || "Database disconnected",
       note: "Missions, tasks DAG, and agent registry state.",
-      envKeys: "SUPABASE_URL",
       keys: [
         { name: "SUPABASE_URL", description: "Project URL for persistent dashboard data." },
         {
@@ -401,16 +353,17 @@ export function GatewayMonitor() {
       ],
     },
     {
+      id: "hermes",
+      icon: Server,
       name: "Hermes Agent VPS",
       connected: liveStatus?.hermes?.status === "connected",
       detail:
         liveStatus?.hermes?.status === "connected"
-          ? `Agent runtime ready (${modelsAreSample ? "" : `${displayModels.length} models, `}${liveStatus?.hermes?.latencyMs ?? 0}ms)`
+          ? `Agent runtime ready${liveStatus?.hermes?.latencyMs != null ? ` (${liveStatus.hermes.latencyMs}ms)` : ""}`
           : statusLoading
             ? "Checking…"
             : liveStatus?.hermes?.error || "Hermes VPS unreachable",
       note: "Agent runtime. Runs every model; the model provider is set in Hermes.",
-      envKeys: "HERMES_DEFAULT_URL",
       keys: [
         { name: "HERMES_DEFAULT_URL", description: "Default Hermes agent endpoint on your VPS." },
         {
@@ -423,17 +376,22 @@ export function GatewayMonitor() {
   ];
 
   return (
-    <div className="min-w-0 space-y-8 p-4 md:p-8">
-      <div className="flex flex-wrap items-start justify-between gap-4">
-        <div className="space-y-2">
+    <div className="gateway-page min-w-0 p-4 md:p-8">
+      <div className="gateway-header flex flex-wrap items-start justify-between gap-4">
+        <div className="gateway-heading">
+          <span className="gateway-heading-icon"><Activity aria-hidden="true" /></span>
+          <div className="space-y-2">
           <p className="eyebrow">
             Infrastructure{anyDemo ? " / demo" : ""}
           </p>
           <h1 className="text-3xl font-semibold tracking-tight">Gateway</h1>
           <p className="flex max-w-2xl flex-wrap items-center gap-2 text-sm text-muted-foreground">
             Inspect the connection map, model routes, and agent capabilities.
-            <DataSourceBadge source={anyDemo ? "demo" : "live"} reason={demoReason} />
+            <DataSourceBadge source={anyDemo ? "demo" : "live"} reason={demoReason} lastUpdated={status.source === "live" ? status.lastUpdated : undefined} staleReason={status.source === "live" ? status.staleReason : undefined} />
+            {modelList.source === "live" && <DataSourceBadge source="live" lastUpdated={modelList.lastUpdated} staleReason={modelList.staleReason} />}
+            {cli.source === "live" && <DataSourceBadge source="live" lastUpdated={cli.lastUpdated} staleReason={cli.staleReason} />}
           </p>
+          </div>
         </div>
         <Button
           variant="outline"
@@ -450,48 +408,35 @@ export function GatewayMonitor() {
       </div>
 
       {anyDemo && (
-        <div role="status" className="flex gap-3 rounded-lg border bg-muted/30 p-4 text-sm">
-          <Unplug
-            className="mt-0.5 size-4 shrink-0 text-muted-foreground"
-            aria-hidden="true"
-          />
-          <div className="space-y-1">
-            <p>
-              <span className="font-medium">Showing sample data.</span>{" "}
-              {status.source === "demo"
-                ? "Couldn't check live connections. "
-                : ""}
-              {modelList.source === "demo"
-                ? "Couldn't load live models, so the catalog below is a sample."
-                : ""}{" "}
-              <a href="#setup-heading" className="font-medium underline underline-offset-4">
-                See what to configure
-              </a>
-            </p>
-            {technicalDetail && (
-              <p className="font-mono text-xs text-muted-foreground">
-                Technical detail: {technicalDetail}
-              </p>
-            )}
+        <div role="status" className="gateway-notice">
+          <Unplug className="size-4 shrink-0" aria-hidden="true" />
+          <div><p><strong>Some live data is unavailable.</strong> Sample data is clearly labelled below. <a href="#setup-heading">View connections</a></p>
+            {technicalDetail && <details><summary>Technical details</summary><p>{technicalDetail}</p></details>}
           </div>
         </div>
       )}
-      <ServicePanel loading={statusLoading} vitals={vitals} onCopy={(v, l) => void copy(v, l)} />
+      <div className="gateway-metrics" aria-label="Gateway overview">
+        <div><span><Activity aria-hidden="true" /> Connections</span><strong>{status.source === "live" ? `${vitals.filter((v) => v.connected).length} / ${vitals.length}` : "—"}</strong><small>services connected</small></div>
+        <div><span><Box aria-hidden="true" /> Models</span><strong>{modelList.source === "live" || (cli.source === "live" && cli.data.installed && !cli.data.reason) ? liveModelCount : "—"}</strong><small>{partialModels ? "available routes · partial" : "available routes"}</small></div>
+        <div><span><Clock3 aria-hidden="true" /> Last checked</span><strong className="gateway-metric-time">{liveStatus?.checkedAt && !Number.isNaN(Date.parse(liveStatus.checkedAt)) ? new Date(liveStatus.checkedAt).toLocaleString() : "—"}</strong><small>connection status</small></div>
+      </div>
+      <ServicePanel loading={statusLoading} unavailable={status.source === "demo" || status.source === "error"} vitals={vitals} onCopy={(v, l) => void copy(v, l)} />
 
-      <section className="min-w-0 space-y-4" aria-labelledby="models-heading">
+      <div className="gateway-content">
+      <section className="gateway-section gateway-models min-w-0" aria-labelledby="models-heading">
         <div>
           <h2 id="models-heading" className="text-lg font-semibold">
-            {modelsAreSample ? "Sample model catalog" : "Model catalog"}
+            Model catalog
           </h2>
           <p className="text-sm text-muted-foreground">
-            Click a model to copy its ID.
-            {modelsAreSample ? " Sample IDs only; availability is not verified." : ""}
+            Click a variant to copy its model ID.
+            {modelsAreSample ? " Hermes sample IDs are not verified." : ""}
           </p>
         </div>
-        <div className="space-y-3">
-          <div className="relative max-w-xl">
+        <div className="gateway-toolbar">
+          <div className="relative gateway-search">
             <Label htmlFor="model-search" className="sr-only">
-              {modelsAreSample ? "Search sample models" : "Search models"}
+              Search models
             </Label>
             <Search
               className="pointer-events-none absolute top-3 left-3 size-4 text-muted-foreground"
@@ -500,7 +445,7 @@ export function GatewayMonitor() {
             <Input
               id="model-search"
               className="h-10 pl-9"
-              placeholder="Search name, ID, or provider"
+              placeholder="Search runtime, source, model, or ID"
               value={query}
               onChange={(event) => setQuery(event.target.value)}
             />
@@ -520,95 +465,55 @@ export function GatewayMonitor() {
             ))}
           </div>
           )}
+        <p className="text-xs text-muted-foreground" aria-live="polite">{filteredCount} matching models</p>
         </div>
-        <p className="text-xs text-muted-foreground" aria-live="polite">
-          {modelList.source === "loading"
-            ? "Loading models…"
-            : `${filtered.length} ${modelsAreSample ? "sample " : ""}${filtered.length === 1 ? "model" : "models"} in ${families.length} ${families.length === 1 ? "family" : "families"}`}
-        </p>
-        {filtered.length > 0 ? (
-          <>
-          <ul className="family-list">
-            {(showAllModels ? families : families.slice(0, MODEL_PREVIEW)).map((family) => (
-              <li key={family.key} className="family-row" data-brand={family.brand}>
-                <div className="flex min-w-0 items-center gap-3">
-                  <span className="family-bar" aria-hidden="true" />
-                  <div className="min-w-0">
-                    <h3 className="truncate font-semibold">{family.name}</h3>
-                    <p className="text-xs text-muted-foreground">
-                      {family.provider} · {family.variants.length}{" "}
-                      {family.variants.length === 1 ? "variant" : "variants"}
-                    </p>
-                  </div>
-                </div>
-                <ul className="flex flex-wrap gap-1.5" aria-label={`${family.name} variants`}>
-                  {family.variants.map(({ label, model }) => (
-                    <li key={model.id}>
-                      <button
-                        type="button"
-                        className="variant-chip"
-                        title={model.id}
-                        aria-label={`Copy model ID ${model.id}`}
-                        onClick={() =>
-                          void copy(model.id, modelsAreSample ? "Sample model ID" : "Model ID")
-                        }
-                      >
-                        {label}
-                        <Copy className="size-3" aria-hidden="true" />
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-              </li>
-            ))}
-          </ul>
-          {families.length > MODEL_PREVIEW && (
-            <div className="flex justify-center">
-              <Button
-                variant="outline"
-                className="min-h-10"
-                aria-expanded={showAllModels}
-                onClick={() => setShowAllModels((value) => !value)}
-              >
-                {showAllModels ? "Show fewer" : `Show all ${families.length} families`}
-              </Button>
-            </div>
-          )}
-          </>
-        ) : (
-          modelList.source !== "loading" && (
-            <div className="space-y-3 rounded-xl border p-8 text-center">
-              <Search className="mx-auto size-6 text-muted-foreground" aria-hidden="true" />
-              <h3 className="font-medium">No models match</h3>
-              <p className="text-sm text-muted-foreground">
-                {modelsAreSample
-                  ? "Try another name or category. This list is a fixed demo catalog."
-                  : "Try another name or category."}
-              </p>
-              <Button
-                variant="outline"
-                onClick={() => {
-                  setCategory("all");
-                  setQuery("");
-                }}
-              >
-                Clear filters
-              </Button>
-            </div>
-          )
-        )}
+        {filteredRuntimes.map((runtime) => (
+          <details className="catalog-runtime" key={runtime.key} open>
+            <summary>{runtime.name} <span>{runtime.filtered.length} models{runtime.sample ? " · sample" : ""}</span></summary>
+            {runtime.state && <p className="catalog-message" role="status">{runtime.state}</p>}
+            {runtime.sources.map(([source, items]) => {
+              const key = `${runtime.key}:${source}`;
+              const families = groupModels(items);
+              const showAll = expandedSources.includes(key);
+              return (
+                <details className="catalog-source" key={`${key}:${Boolean(search)}`} open={search ? true : undefined}>
+                  <summary><span className="catalog-source-label">Source</span> {source} <span>{items.length} models</span></summary>
+                  <ul className="family-list">
+                    {(showAll ? families : families.slice(0, MODEL_PREVIEW)).map((family) => (
+                      <li key={family.key} className="family-row" data-brand={family.brand}>
+                        <div className="flex min-w-0 items-center gap-3"><span className="family-bar" aria-hidden="true" /><div className="min-w-0"><h3 className="truncate font-semibold">{family.name}</h3><p className="text-xs text-muted-foreground">{family.variants.length} {family.variants.length === 1 ? "variant" : "variants"}</p></div></div>
+                        <ul className="flex flex-wrap gap-1.5" aria-label={`${family.name} variants`}>
+                          {family.variants.map(({ label, model }) => <li key={model.id}><button type="button" className="variant-chip" title={model.id} aria-label={`Copy model ID ${model.id}`} onClick={() => void copy(model.id, runtime.sample ? "Sample model ID" : "Model ID")}>{label}<Copy className="size-3" aria-hidden="true" /></button></li>)}
+                        </ul>
+                      </li>
+                    ))}
+                  </ul>
+                  {families.length > MODEL_PREVIEW && <Button variant="outline" className="min-h-10" aria-expanded={showAll} onClick={() => setExpandedSources((items) => showAll ? items.filter((item) => item !== key) : [...items, key])}>{showAll ? "Show fewer" : `Show all ${families.length} families`}</Button>}
+                </details>
+              );
+            })}
+            {!runtime.state && !runtime.filtered.length && <p className="catalog-message">No models match.</p>}
+          </details>
+        ))}
+        {!filteredCount && (search || category !== "all") && <Button variant="outline" onClick={() => { setCategory("all"); setQuery(""); }}>Clear filters</Button>}
+
       </section>
 
-      <section className="min-w-0 space-y-4" aria-labelledby="capabilities-heading">
+      {[status, modelList, cli].map((item, index) => item.source === "error" ? <DataSourceFailure key={index} reason={item.reason} retry={item.reload} showDemo={index === 1 ? item.showDemo : undefined} /> : null)}
+      <section className="gateway-section gateway-capabilities min-w-0" aria-labelledby="capabilities-heading">
         <div>
-          <h2 id="capabilities-heading" className="text-lg font-semibold">
-            Sample agent capabilities
+          <h2 id="capabilities-heading" className="flex items-center gap-2 text-lg font-semibold">
+            {sampleCaps && !showLiveCaps ? "Sample agent capabilities" : "Agent capabilities"}
+            {sampleCaps && !showLiveCaps && <DataSourceBadge source="demo" reason="Sample assignments" />}
           </h2>
           <p className="text-sm text-muted-foreground">
-            Example assignments, not discovered runtime permissions.
+            {sampleCaps && !showLiveCaps ? "Example assignments, not discovered runtime permissions." : "Read from each Hermes agent: skills, toolsets, MCP servers and server features."}
           </p>
         </div>
-        <ul className="grid gap-3 md:grid-cols-3">
+        {!anyDemo && !statusLoading && modelList.source !== "loading" && <LiveAgentCapabilities onState={setLiveCaps} />}
+        {!showLiveCaps && !sampleCaps && <button type="button" className="text-sm text-primary underline" onClick={() => setSampleCaps(true)}>View demo</button>}
+        {!showLiveCaps && sampleCaps && (
+        <ul className="gateway-sample-agents grid gap-3">
           {capabilities.map((agent) => (
             <li
               key={agent.name}
@@ -648,8 +553,12 @@ export function GatewayMonitor() {
             </li>
           ))}
         </ul>
+        )}
       </section>
 
+      </div>
+      <details className="gateway-deployment gateway-disclosure">
+        <summary><span><Terminal aria-hidden="true" /> Deployment setup <small>Cron example</small></span><ChevronDown aria-hidden="true" /></summary>
       <section className="space-y-4" aria-labelledby="cron-heading">
         <div>
           <h2 id="cron-heading" className="text-lg font-semibold">
@@ -697,6 +606,7 @@ export function GatewayMonitor() {
           </p>
         </div>
       </section>
+      </details>
     </div>
   );
 }

@@ -21,13 +21,21 @@ import {
 } from "@/lib/hermes";
 import {
   createSession as createAgentSession,
+  forkSession as forkAgentSession,
+  getCapabilities as getAgentCapabilities,
   getRun as getAgentRun,
+  resolveUnknownRun as resolveAgentUnknownRun,
   startRun as startAgentRun,
   type RunStartInput,
 } from "@/lib/agent-runtime";
+import { REPLY_SHAPES } from "@/lib/reply-format";
+import { watchRunSteps } from "@/lib/run-steps-recorder";
+import { diffWorkspace, snapshotWorkspace } from "@/lib/workspace-diff";
+import type { HermesServerCapabilities } from "@/lib/hermes";
 import {
   extractGateVerdict,
   extractPlanFromOrchestratorOutput,
+  extractSkillBlock,
   truncateMiddle,
 } from "@/lib/orchestrator-parsers";
 import {
@@ -35,6 +43,7 @@ import {
   type MissionGuard,
   type OrchestratorStore,
   type TaskGuard,
+  type TaskPatch,
 } from "@/lib/orchestrator-store";
 import {
   createLayaRouter,
@@ -53,7 +62,7 @@ import type {
 } from "@/lib/types";
 import { budgetBlock } from "@/lib/budget";
 import { nextPrdVersion, prdKey, prdNotesFor, prdTitle, prdVersions } from "@/lib/prd";
-import { safeNotify, shortHash } from "@/lib/notifications";
+import { approvalActions, safeNotify, shortHash } from "@/lib/notifications";
 import type { Notifier } from "@/lib/notifications";
 import { supabaseNotifier } from "@/lib/notifications-store";
 import { buildReviewPrompt, parseReviewOutput, reviewPassed, type ParsedReview } from "@/lib/code-review";
@@ -78,6 +87,14 @@ export interface HermesClient {
   startRun(agent: Agent, input: RunStartInput): Promise<HermesStartRunResult>;
   getRun(agent: Agent, runId: string): Promise<HermesRunStatus>;
   createSession(agent: Agent, title: string): Promise<string>;
+  /** Releases a run Hermes reports as "unknown". Missing = cannot recover. */
+  resolveUnknownRun?(
+    agent: Agent,
+    runId: string,
+    details: { admissionId: string; executionGeneration: number },
+  ): Promise<boolean>;
+  forkSession?(agent: Agent, sessionId: string, title?: string): Promise<string>;
+  getCapabilities?(agent: Agent): Promise<HermesServerCapabilities>;
 }
 
 export type OrchestratorDeps = {
@@ -106,6 +123,19 @@ export type OrchestratorDeps = {
   github?: MissionGitHub;
   /** The admin's edited review rules (null = default). Omit for the stored ones. */
   reviewRules?: () => Promise<string | null>;
+  /**
+   * Listen to a started run's steps and save them (run_steps). Omit for the
+   * real listener; when a custom store is passed (tests) it defaults to none.
+   */
+  watchRun?: ((agent: Agent, runId: string) => void) | null;
+  /**
+   * Git snapshots of the mission folder, for each coding attempt's diff.
+   * Omit for real git; when a custom store is passed (tests) it defaults to none.
+   */
+  workspace?: {
+    snapshot: typeof snapshotWorkspace;
+    diff: typeof diffWorkspace;
+  } | null;
 };
 
 export type MissionGitHub = {
@@ -118,6 +148,9 @@ const realHermes: HermesClient = {
   startRun: startAgentRun,
   getRun: getAgentRun,
   createSession: createAgentSession,
+  resolveUnknownRun: resolveAgentUnknownRun,
+  forkSession: forkAgentSession,
+  getCapabilities: getAgentCapabilities,
 };
 
 function resolveDeps(deps?: Partial<OrchestratorDeps>): OrchestratorDeps {
@@ -132,6 +165,13 @@ function resolveDeps(deps?: Partial<OrchestratorDeps>): OrchestratorDeps {
     reviews: deps?.reviews !== undefined ? deps.reviews : deps?.store ? null : createCodeReviewStore(),
     github: deps?.github ?? { ensureMissionPr: realEnsureMissionPr, fetchPr: realFetchPr },
     reviewRules: deps?.reviewRules ?? (deps?.store ? async () => null : loadReviewRulesText),
+    watchRun: deps?.watchRun !== undefined ? deps.watchRun : deps?.store ? null : watchRunSteps,
+    workspace:
+      deps?.workspace !== undefined
+        ? deps.workspace
+        : deps?.store
+          ? null
+          : { snapshot: snapshotWorkspace, diff: diffWorkspace },
   };
 }
 
@@ -168,6 +208,46 @@ export function classifyRun(status: string): RunOutcome {
   if (FAILURE_STATUSES.has(s)) return "failure";
   return "pending";
 }
+
+/**
+ * Hermes long-term memory scope (X-Hermes-Session-Key): every agent on the
+ * same project shares one, so what one learns the next can recall.
+ */
+export function memoryKey(m: Pick<MissionDetailDTO, "id" | "projectId">): string {
+  return m.projectId ? `neiro:project:${m.projectId}` : `neiro:mission:${m.id}`;
+}
+
+/** Hermes lost track of this run (a crash between admission and finish). */
+export const isUnknownRun = (run: HermesRunStatus): boolean => run.status.toLowerCase() === "unknown";
+
+export type UnknownRunVerdict = "resolved" | "unresolved" | "unsupported";
+
+/**
+ * Releases a run Hermes reports as "unknown", so it can be started again
+ * without the hung one ever finishing twice. `unsupported` = no recovery
+ * details, or this Hermes cannot resolve unknown runs.
+ */
+async function resolveUnknown(agent: Agent, run: HermesRunStatus, d: OrchestratorDeps): Promise<UnknownRunVerdict> {
+  if (!run.admission_id || typeof run.execution_generation !== "number" || !d.hermes.resolveUnknownRun) {
+    return "unsupported";
+  }
+  if (d.hermes.getCapabilities) {
+    const caps = await d.hermes.getCapabilities(agent).catch(() => null);
+    if (caps?.available && caps.features.run_unknown_resolution === false) return "unsupported";
+  }
+  const ok = await d.hermes
+    .resolveUnknownRun(agent, run.run_id, {
+      admissionId: run.admission_id,
+      executionGeneration: run.execution_generation,
+    })
+    .catch(() => false);
+  return ok ? "resolved" : "unresolved";
+}
+
+const UNKNOWN_RUN_REASON: Record<Exclude<UnknownRunVerdict, "resolved">, string> = {
+  unresolved: "Hermes could not resolve a run left in an unknown state",
+  unsupported: "Run state is unknown and Hermes cannot recover it",
+};
 
 const isClaim = (runId: string | null): runId is string =>
   runId !== null && runId.startsWith(CLAIM_PREFIX);
@@ -300,7 +380,7 @@ export async function advanceMission(
       await stepTasks(detail, d, ctx);
       break;
     case "summarizing":
-      await stepSummarize(detail, d);
+      await stepSummarize(detail, d, ctx);
       break;
     case "done":
       break;
@@ -444,6 +524,9 @@ async function stepMissionRun(m: MissionDetailDTO, d: OrchestratorDeps, ctx: Pas
       started = await d.hermes.startRun(agent, {
         prompt: phase === "planning" ? planPrompt(m) : specPrompt(m),
         cwd: m.agentWorkspacePath || m.workspacePath || undefined,
+        sessionKey: memoryKey(m),
+        // Screenshots go to the planner, which writes them into the tasks.
+        images: phase === "planning" && m.attachments?.length ? m.attachments : undefined,
         // The claim token makes each attempt distinct (a failed run is not
         // replayed) while a retried start of the same claim stays deduped.
         idempotencyKey: `${phase}-${m.id}-${token.slice(CLAIM_PREFIX.length)}`,
@@ -459,7 +542,9 @@ async function stepMissionRun(m: MissionDetailDTO, d: OrchestratorDeps, ctx: Pas
       return;
     }
 
-    await d.store.updateMissionIf(m.id, claimGuard, { runId: started.runId });
+    const saved = await d.store.updateMissionIf(m.id, claimGuard, { runId: started.runId });
+    // Keep the plan / spec run's steps too, with no one watching.
+    if (saved) d.watchRun?.(agent, started.runId);
     return; // read the run on a later tick
   }
 
@@ -480,8 +565,19 @@ async function stepMissionRun(m: MissionDetailDTO, d: OrchestratorDeps, ctx: Pas
   }
 
   const run = await d.hermes.getRun(agent, m.runId);
+  if (isUnknownRun(run)) {
+    const verdict = await resolveUnknown(agent, run, d);
+    // Released: the next tick starts the phase again. Otherwise keep the run
+    // and say why, so the operator can stop or retry it.
+    if (verdict === "resolved") await d.store.updateMissionIf(m.id, guard, clearRun);
+    else ctx.problems.push(`${phase} run: ${UNKNOWN_RUN_REASON[verdict]}`);
+    return;
+  }
   const outcome = classifyRun(run.status);
-  if (outcome === "pending") return;
+  if (outcome === "pending") {
+    d.watchRun?.(agent, m.runId);
+    return;
+  }
 
   const output = (run.output ?? "").trim();
   if (outcome === "failure" || !output) {
@@ -517,6 +613,8 @@ async function stepMissionRun(m: MissionDetailDTO, d: OrchestratorDeps, ctx: Pas
       kind: "task_plan",
       content: output,
       dedupeKey: `plan:${m.id}`,
+      runId: m.runId,
+      runStartedAt: m.runStartedAt,
     });
     await d.store.updateMissionIf(m.id, guard, { phase: "spec", ...clearRun });
     return;
@@ -530,6 +628,8 @@ async function stepMissionRun(m: MissionDetailDTO, d: OrchestratorDeps, ctx: Pas
     kind: "prd",
     content: output,
     dedupeKey: prdKey(m.id, version),
+    runId: m.runId,
+    runStartedAt: m.runStartedAt,
   });
   await enterExecuting(m, guard, d);
 }
@@ -550,6 +650,7 @@ async function enterExecuting(m: MissionDetailDTO, guard: MissionGuard, d: Orche
       title: "Plan ready for your approval",
       body: m.title,
       dedupeKey: `plan:${m.id}`,
+      actions: [{ id: "approve_plan", label: "Approve plan", target: m.id }],
     });
   }
 }
@@ -558,18 +659,61 @@ async function enterExecuting(m: MissionDetailDTO, guard: MissionGuard, d: Orche
 /* Summary                                                             */
 /* ------------------------------------------------------------------ */
 
-async function stepSummarize(m: MissionDetailDTO, d: OrchestratorDeps) {
+export const SKILL_PROMPT_LINES = [
+  "After the summary, write a reusable skill from what worked in this mission.",
+  "Put it in one fenced block that starts with ```skill and ends with ```.",
+  "Inside: a SKILL.md with YAML frontmatter (--- name: <kebab-case>, description: <one line> ---),",
+  "then numbered steps another agent can follow next time. No secrets, no file contents.",
+];
+
+function summaryPrompt(m: MissionDetailDTO): string {
+  const tasks = m.tasks
+    .map((t) => `- ${t.title}: ${truncateMiddle(t.resultOutput ?? t.result ?? "", 600)}`)
+    .join("\n");
+  return [
+    `Summarize the finished mission "${m.title}" for the operator in at most 10 lines.`,
+    `Goal: ${truncateMiddle(m.prompt, 2000)}`,
+    "",
+    "Tasks and what they delivered:",
+    truncateMiddle(tasks, MAX_PROMPT_CONTEXT_CHARS),
+    "",
+    ...SKILL_PROMPT_LINES,
+  ].join("\n");
+}
+
+async function stepSummarize(m: MissionDetailDTO, d: OrchestratorDeps, ctx?: PassContext) {
+  const staticSummary = `Mission completed. ${m.tasks.length} tasks reached Done. See the recorded QA and review results for verification.`;
+  let summary = staticSummary;
+
+  // Learn a skill: one orchestrator run writes the summary and a SKILL.md.
+  if (m.learnSkillOnDone) {
+    const outcome = await stepSkillRun(m, d, ctx);
+    if (outcome === "waiting") return;
+    if (outcome) {
+      summary = outcome.summary || staticSummary;
+      if (outcome.skill) {
+        await d.store.insertArtifactOnce({
+          missionId: m.id,
+          title: `Learned skill: ${outcome.skill.name}`,
+          kind: "learned_skill",
+          content: outcome.skill.content,
+          dedupeKey: `skill:${m.id}`,
+        });
+      }
+    }
+  }
+
   await d.store.insertArtifactOnce({
     missionId: m.id,
     title: "Mission Summary",
     kind: "mission_summary",
-    content: `Mission completed successfully. All ${m.tasks.length} tasks passed QA and final review.`,
+    content: summary,
     dedupeKey: `summary:${m.id}`,
   });
   const done = await d.store.updateMissionIf(
     m.id,
-    { phase: "summarizing", runId: null, status: "running" },
-    { phase: "done" satisfies MissionPhase, status: "completed" },
+    { phase: "summarizing", runId: m.runId, status: "running" },
+    { phase: "done" satisfies MissionPhase, status: "completed", completedAt: d.now().toISOString(), runId: null, runAgentId: null, runStartedAt: null },
   );
   if (done) {
     await safeNotify(d.notify, {
@@ -580,6 +724,66 @@ async function stepSummarize(m: MissionDetailDTO, d: OrchestratorDeps) {
       dedupeKey: `done:${m.id}`,
     });
   }
+}
+
+/**
+ * The summarizing run of a learn-a-skill mission. "waiting" while it runs;
+ * null when there is no agent or the run failed (the mission still finishes,
+ * just without a skill).
+ */
+async function stepSkillRun(
+  m: MissionDetailDTO,
+  d: OrchestratorDeps,
+  ctx?: PassContext,
+): Promise<"waiting" | { summary: string; skill: ReturnType<typeof extractSkillBlock> } | null> {
+  const guard: MissionGuard = { phase: "summarizing", runId: m.runId, status: "running" };
+  if (m.runId === null) {
+    const agent =
+      (await pickStageAgent("orchestrator", undefined, d)) ?? (await pickStageAgent("reviewer", undefined, d));
+    if (!agent) return null;
+    const token = CLAIM_PREFIX + d.newId();
+    const claimed = await d.store.updateMissionIf(m.id, guard, {
+      runId: token,
+      runAgentId: agent.id,
+      runStartedAt: d.now().toISOString(),
+    });
+    if (!claimed) return "waiting";
+    const claimGuard: MissionGuard = { phase: "summarizing", runId: token };
+    try {
+      const started = await d.hermes.startRun(agent, {
+        prompt: summaryPrompt(m),
+        cwd: m.agentWorkspacePath || m.workspacePath || undefined,
+        sessionKey: memoryKey(m),
+        idempotencyKey: `summary-${m.id}-${token.slice(CLAIM_PREFIX.length)}`,
+      });
+      if (started.kind === "deferred") {
+        await d.store.updateMissionIf(m.id, claimGuard, { runId: null, runAgentId: null, runStartedAt: null });
+        return "waiting";
+      }
+      await d.store.updateMissionIf(m.id, claimGuard, { runId: started.runId });
+    } catch (err: unknown) {
+      ctx?.problems.push(`Could not start the summary run: ${errorMessage(err)}`);
+      // Give up on the skill rather than block the mission.
+      await d.store.updateMissionIf(m.id, claimGuard, { runId: null, runAgentId: null, runStartedAt: null });
+      return null;
+    }
+    return "waiting";
+  }
+  if (isClaim(m.runId)) {
+    if (isStale(m.runStartedAt, d.now())) {
+      await d.store.updateMissionIf(m.id, guard, { runId: null, runAgentId: null, runStartedAt: null });
+    }
+    return "waiting";
+  }
+  const agent = await findRunAgent(m.runAgentId, ["orchestrator", "reviewer"], d);
+  if (!agent) return null;
+  const run = await d.hermes.getRun(agent, m.runId);
+  const outcome = classifyRun(run.status);
+  if (outcome === "pending" && !isUnknownRun(run)) return "waiting";
+  if (outcome !== "success") return null;
+  const output = (run.output ?? "").trim();
+  const summary = output.replace(/```skill[\s\S]*?```/i, "").trim();
+  return { summary, skill: extractSkillBlock(output) };
 }
 
 /* ------------------------------------------------------------------ */
@@ -669,10 +873,10 @@ async function stepTask(
   if (task.runId === null) {
     const agent = await pickTaskAgent(task.stage, task, d);
     if (!agent) {
-      if (task.stage === "QA check") {
-        await d.store.updateTaskIf(task.id, guard, { stage: "Final review" });
-      } else if (task.stage === "Final review") {
-        await d.store.updateTaskIf(task.id, guard, { stage: "Done" });
+      if (task.stage === "QA check" || task.stage === "Final review") {
+        const qa = task.stage === "QA check";
+        await d.store.insertArtifactOnce({ missionId: m.id, taskId: task.id, title: `${qa ? "QA" : "Review"} skipped: ${task.title}`, kind: "gate_skipped", content: `No enabled ${qa ? "QA" : "review"} agent was available.`, dedupeKey: `${qa ? "qa" : "review"}:${task.id}:${task.retries}` });
+        await d.store.updateTaskIf(task.id, guard, { stage: qa ? "Final review" : "Done" });
       } else {
         ctx.problems.push(`No enabled worker agent for task "${task.title}"`);
       }
@@ -710,11 +914,29 @@ async function stepTask(
   }
 
   const run = await d.hermes.getRun(agent, task.runId);
+  if (isUnknownRun(run)) {
+    const verdict = await resolveUnknown(agent, run, d);
+    if (verdict === "resolved") {
+      // Released on the server: count it as a failed attempt so the next
+      // tick schedules a fresh run, never a second copy of the hung one.
+      await recordAttemptFailure(m, task, d, "The run stopped answering and was released on the server.");
+      await failAttempt(m, task, guard, task.tokens, d, { pendingControls: [] });
+    } else {
+      await parkTask(m, task, guard, UNKNOWN_RUN_REASON[verdict], d, ctx);
+    }
+    return;
+  }
   const outcome = classifyRun(run.status);
-  if (outcome === "pending") return;
+  if (outcome === "pending") {
+    // Keep its steps for the task chat, even with no one watching (cron).
+    d.watchRun?.(agent, task.runId);
+    await trackPendingControls(m, task, guard, run, d);
+    return;
+  }
 
   const output = (run.output ?? "").trim();
   const tokens = task.tokens + (run.tokens ?? 0);
+  const facts = runFacts(task, run);
 
   // Credit this run's tokens to the agent that ran it. Before the task
   // moves on, so a failed write is retried by the next tick.
@@ -727,8 +949,12 @@ async function stepTask(
       agentName: agent.name,
       stage: task.stage,
       tokens: run.tokens ?? 0,
-      model: agent.model || run.model || null,
+      // After a provider fallback the run's own model is the true one.
+      model: run.runtime?.model || agent.model || run.model || null,
       runtime: agent.runtime ?? "hermes",
+      inputTokens: run.input_tokens,
+      outputTokens: run.output_tokens,
+      cacheReadTokens: run.cache_read_tokens,
     });
   }
 
@@ -741,11 +967,13 @@ async function stepTask(
         tokens: run.tokens ?? 0,
       });
     }
-    await failAttempt(m, task, guard, tokens, d);
+    await recordAttemptFailure(m, task, d, run.error || (output ? `The run ended with status "${run.status}".` : "The agent returned an empty answer."));
+    await failAttempt(m, task, guard, tokens, d, facts);
     return;
   }
 
   if (task.stage === "Coding") {
+    await recordAttemptDiff(m, task, d);
     // Every attempt's output is kept, so the task chat can show old attempts.
     await d.store.insertArtifactOnce({
       missionId: m.id,
@@ -754,11 +982,14 @@ async function stepTask(
       kind: "coding_output",
       content: output,
       dedupeKey: `code:${task.id}:${task.retries}`,
+      runId: task.runId,
+      runStartedAt: task.runStartedAt,
     });
     await d.store.updateTaskIf(task.id, guard, {
       stage: "QA check",
       resultOutput: output,
       tokens,
+      ...facts,
       ...clearRun,
     });
     return;
@@ -772,6 +1003,8 @@ async function stepTask(
     kind: isQa ? "qa_report" : "review_report",
     content: output,
     dedupeKey: `${isQa ? "qa" : "review"}:${task.id}:${task.retries}`,
+    runId: task.runId,
+    runStartedAt: task.runStartedAt,
   });
 
   const verdict = isQa
@@ -788,24 +1021,146 @@ async function stepTask(
   }
 
   if (!passed) {
-    await failAttempt(m, task, guard, tokens, d);
+    await failAttempt(m, task, guard, tokens, d, facts);
     return;
   }
 
   await d.store.updateTaskIf(task.id, guard, {
     stage: isQa ? "Final review" : "Done",
     tokens,
+    ...facts,
     ...clearRun,
   });
 }
 
+/** Cache tokens and the real provider/model of a finished run, added to the task. */
+export function runFacts(task: MissionTask, run: HermesRunStatus): TaskPatch {
+  const patch: TaskPatch = { pendingControls: [] };
+  if (run.cache_read_tokens) patch.cacheReadTokens = (task.cacheReadTokens ?? 0) + run.cache_read_tokens;
+  if (run.cache_write_tokens) patch.cacheWriteTokens = (task.cacheWriteTokens ?? 0) + run.cache_write_tokens;
+  const model = run.runtime?.model ?? run.model;
+  if (run.runtime?.provider) patch.runtimeProvider = run.runtime.provider;
+  if (model) patch.runtimeModel = model;
+  return patch;
+}
+
+/**
+ * A run waiting on approvals: keep its controls on the task (so the card,
+ * Needs you and chat apps can answer them) and announce each new request once.
+ */
+async function trackPendingControls(
+  m: MissionDetailDTO,
+  task: MissionTask,
+  guard: TaskGuard,
+  run: HermesRunStatus,
+  d: OrchestratorDeps,
+) {
+  const controls = run.controls ?? [];
+  const before = (task.pendingControls ?? []).map((c) => c.requestId).join("|");
+  const after = controls.map((c) => c.requestId).join("|");
+  if (before === after) return;
+  const saved = await d.store
+    .updateTaskIf(task.id, guard, {
+      pendingControls: controls,
+      admissionId: run.admission_id ?? null,
+      executionGeneration: run.execution_generation ?? null,
+    })
+    .catch(() => false);
+  if (!saved) return;
+  const known = new Set((task.pendingControls ?? []).map((c) => c.requestId));
+  for (const control of controls) {
+    if (control.kind !== "approval" || known.has(control.requestId)) continue;
+    const what = control.command ? `${control.tool ?? "a tool"}: ${control.command}` : (control.tool ?? "a tool");
+    await safeNotify(d.notify, {
+      kind: "task_needs_you",
+      missionId: m.id,
+      taskId: task.id,
+      title: "An agent asks to use a tool",
+      body: `"${task.title}" wants to run ${what}`,
+      dedupeKey: `approval:${task.id}:${control.requestId}`,
+      actions: approvalActions(task.id, control),
+    });
+  }
+}
+
+/** Parks a task in Needs you (run released) and tells the operator why. */
+async function parkTask(
+  m: MissionDetailDTO,
+  task: MissionTask,
+  guard: TaskGuard,
+  reason: string,
+  d: OrchestratorDeps,
+  ctx: PassContext,
+) {
+  const parked = await d.store.updateTaskIf(task.id, guard, {
+    stage: "Needs you",
+    runId: null,
+    runAgentId: null,
+    runStartedAt: null,
+    pendingControls: [],
+  });
+  if (!parked) return;
+  ctx.problems.push(`${task.title}: ${reason}`);
+  await safeNotify(d.notify, {
+    kind: "task_needs_you",
+    missionId: m.id,
+    taskId: task.id,
+    title: "A task needs you",
+    body: `"${task.title}": ${reason}.`,
+    dedupeKey: `unknown:${task.id}:${task.retries}`,
+    actions: [{ id: "retry_task", label: "Retry task", target: task.id }],
+  });
+}
+
 /** Failed gate or run: retry while under the mission's cap, else escalate. */
+/** Save what this coding attempt changed (a git diff) for the task chat. */
+async function recordAttemptDiff(m: MissionDetailDTO, task: MissionTask, d: OrchestratorDeps) {
+  if (!d.workspace) return;
+  try {
+    const snap = m.artifacts.find((a) => a.dedupeKey === `snap:${task.id}:${task.retries}`)?.content ?? null;
+    const diff = await d.workspace.diff(m.agentWorkspacePath || m.workspacePath, snap);
+    if (!diff) return;
+    await d.store.insertArtifactOnce({
+      missionId: m.id,
+      taskId: task.id,
+      title: `Changes: ${task.title}`,
+      kind: "code_diff",
+      content: diff.truncated ? `${diff.patch}\n… (diff cut, too long to show)` : diff.patch,
+      dedupeKey: `diff:${task.id}:${task.retries}`,
+      runId: task.runId,
+      runStartedAt: task.runStartedAt,
+    });
+  } catch (err: unknown) {
+    // A diff is extra: the task still moves on without it.
+    console.warn("[orchestrator] could not record the attempt's diff", errorMessage(err));
+  }
+}
+
+/** Save why a run failed, so the task chat says more than "failed". */
+async function recordAttemptFailure(m: MissionDetailDTO, task: MissionTask, d: OrchestratorDeps, reason: string) {
+  try {
+    await d.store.insertArtifactOnce({
+      missionId: m.id,
+      taskId: task.id,
+      title: `${task.stage} failed: ${task.title}`,
+      kind: "run_failure",
+      content: reason.slice(0, MAX_ERROR_CHARS),
+      dedupeKey: `fail:${task.id}:${task.retries}:${TASK_STAGE_KEY[task.stage] ?? task.stage}`,
+      runId: task.runId,
+      runStartedAt: task.runStartedAt,
+    });
+  } catch (err: unknown) {
+    console.warn("[orchestrator] could not record the failure reason", errorMessage(err));
+  }
+}
+
 async function failAttempt(
   m: MissionDetailDTO,
   task: MissionTask,
   guard: TaskGuard,
   tokens: number,
   d: OrchestratorDeps,
+  facts: TaskPatch = {},
 ) {
   const clearRun = { runId: null, runAgentId: null, runStartedAt: null };
   if (task.retries < m.maxRetries) {
@@ -814,10 +1169,11 @@ async function failAttempt(
       stage: task.routingStatus ? "Routed" : "Queued",
       retries: task.retries + 1,
       tokens,
+      ...facts,
       ...clearRun,
     });
   } else {
-    const escalated = await d.store.updateTaskIf(task.id, guard, { stage: "Needs you", tokens, ...clearRun });
+    const escalated = await d.store.updateTaskIf(task.id, guard, { stage: "Needs you", tokens, ...facts, ...clearRun });
     if (escalated) {
       await safeNotify(d.notify, {
         kind: "task_needs_you",
@@ -826,6 +1182,7 @@ async function failAttempt(
         title: "A task needs you",
         body: `"${task.title}" failed ${task.retries + 1} time(s) in ${task.stage}.`,
         dedupeKey: `needs:${task.id}:${task.retries}`,
+        actions: [{ id: "retry_task", label: "Retry task", target: task.id }],
       });
     }
   }
@@ -905,6 +1262,7 @@ async function routeTask(
         title: "Pick an agent for a task",
         body: `"${task.title}": ${outcome.reason ?? "Laya wants a human to choose."}`,
         dedupeKey: `routing:${task.id}`,
+        actions: [{ id: "approve_route", label: "Approve route", target: task.id }],
       });
     }
   } catch (err: unknown) {
@@ -1082,6 +1440,23 @@ function rejectionLines(m: MissionDetailDTO, task: MissionTask): string[] {
   ];
 }
 
+/** The task chat shows these paths under each reply (splitAnswerFiles). */
+const FILES_READ_RULE =
+  'End with one line that starts with "Files read:" followed by the paths you opened, comma separated.';
+const FILES_READ_BEFORE_VERDICT =
+  'Just before the verdict line, add one line that starts with "Files read:" followed by the paths you opened, comma separated.';
+
+/** The operator's newest "try this instead" note from a session fork. */
+export function latestForkNote(m: Pick<MissionDetailDTO, "artifacts">, taskId: string): string | null {
+  const notes = m.artifacts.filter((a) => a.kind === "fork_note" && a.taskId === taskId);
+  return notes.length ? notes[notes.length - 1].content : null;
+}
+
+function forkNoteLines(m: MissionDetailDTO, task: MissionTask): string[] {
+  const note = latestForkNote(m, task.id);
+  return note ? ["", "Try this approach instead:", truncateMiddle(note, 4000)] : [];
+}
+
 function taskPrompt(m: MissionDetailDTO, task: MissionTask): string {
   const deliverable = truncateMiddle(task.resultOutput ?? "", MAX_PROMPT_CONTEXT_CHARS);
   switch (task.stage) {
@@ -1092,6 +1467,9 @@ function taskPrompt(m: MissionDetailDTO, task: MissionTask): string {
         `Requirements: ${task.result || task.title}`,
         ...workspaceLines(m, "Coding"),
         ...rejectionLines(m, task),
+        ...forkNoteLines(m, task),
+        REPLY_SHAPES,
+        FILES_READ_RULE,
       ]
         .filter(Boolean)
         .join("\n");
@@ -1104,6 +1482,7 @@ function taskPrompt(m: MissionDetailDTO, task: MissionTask): string {
         "",
         `Deliverable:\n${deliverable}`,
         "",
+        FILES_READ_BEFORE_VERDICT,
         "End your response with VERDICT: PASS or VERDICT: FAIL.",
       ].join("\n");
     default:
@@ -1113,6 +1492,7 @@ function taskPrompt(m: MissionDetailDTO, task: MissionTask): string {
         "",
         `Deliverable:\n${deliverable}`,
         "",
+        FILES_READ_BEFORE_VERDICT,
         "End with VERDICT: APPROVED or VERDICT: CHANGES_REQUESTED.",
       ].join("\n");
   }
@@ -1185,11 +1565,32 @@ async function startTaskRun(
     }
   }
 
+  // Before the coding agent touches anything: remember the folder's state,
+  // so the task chat can show exactly what this attempt changed.
+  if (task.stage === "Coding" && d.workspace) {
+    try {
+      const snap = await d.workspace.snapshot(m.agentWorkspacePath || m.workspacePath);
+      if (snap) {
+        await d.store.insertArtifactOnce({
+          missionId: m.id,
+          taskId: task.id,
+          title: `Workspace before: ${task.title}`,
+          kind: "workspace_snapshot",
+          content: snap,
+          dedupeKey: `snap:${task.id}:${task.retries}`,
+        });
+      }
+    } catch (err: unknown) {
+      console.warn("[orchestrator] could not snapshot the workspace", errorMessage(err));
+    }
+  }
+
   let started: HermesStartRunResult;
   try {
     started = await d.hermes.startRun(agent, {
       prompt: review?.prompt ?? taskPrompt(m, task),
       sessionId,
+      sessionKey: memoryKey(m),
       cwd: m.agentWorkspacePath || m.workspacePath || undefined,
       idempotencyKey: `${TASK_STAGE_KEY[task.stage]}-${task.id}-${task.retries}`,
     });
@@ -1210,6 +1611,8 @@ async function startTaskRun(
     agentName: agent.name,
     model: agent.model,
   });
+
+  if (updated) d.watchRun?.(agent, started.runId);
 
   if (updated && review?.reviewId && d.reviews) {
     try {

@@ -1,5 +1,10 @@
 "use client";
 
+import { useState } from "react";
+import { toast } from "sonner";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import type { ProjectDefaults } from "@/lib/project-defaults";
 import { Settings } from "lucide-react";
 import { DeleteButton } from "@/components/delete-button";
 import { CopyButton } from "@/components/agent-markdown";
@@ -19,11 +24,25 @@ export function ProjectSettings({
   project,
   canDelete,
   onDeleted,
+  onDefaultsChanged,
 }: {
   project: Project;
   canDelete: boolean;
   onDeleted: () => void;
+  onDefaultsChanged: (defaults: ProjectDefaults) => void;
 }) {
+  const [defaults, setDefaults] = useState<ProjectDefaults>(project.defaults);
+  const [saving, setSaving] = useState(false);
+  async function saveDefaults() {
+    setSaving(true);
+    try {
+      const response = await fetch(`/api/projects/${encodeURIComponent(project.id)}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ defaults }) });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "Could not save defaults");
+      onDefaultsChanged(data.defaults);
+      toast.success("Project defaults saved");
+    } catch (err) { toast.error(err instanceof Error ? err.message : "Could not save defaults"); } finally { setSaving(false); }
+  }
   return (
     <Dialog>
       <DialogTrigger asChild>
@@ -32,7 +51,7 @@ export function ProjectSettings({
           Settings
         </Button>
       </DialogTrigger>
-      <DialogContent className="sm:max-w-lg">
+      <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-lg">
         <DialogHeader>
           <DialogTitle>{project.name} settings</DialogTitle>
           <DialogDescription>Where this project lives.</DialogDescription>
@@ -59,6 +78,20 @@ export function ProjectSettings({
             </div>
           )}
         </dl>
+
+        <section className="space-y-3" aria-labelledby="defaults-title">
+          <h3 id="defaults-title" className="font-semibold">Mission defaults</h3>
+          <p className="text-xs text-muted-foreground">Applied to new missions in this project. Each mission can override them.</p>
+          <div className="grid grid-cols-2 gap-3">
+            <div className="space-y-1"><Label htmlFor="project-default-branch">Base branch</Label><Input id="project-default-branch" value={String(defaults.base_branch ?? "")} disabled={!canDelete} placeholder="Current branch" onChange={(e) => setDefaults({ ...defaults, base_branch: e.target.value || null })} /></div>
+            <div className="space-y-1"><Label htmlFor="project-default-budget">Token budget</Label><Input id="project-default-budget" type="number" min="0" max="1000000000" value={String(defaults.token_budget ?? "")} disabled={!canDelete} placeholder="No limit" onChange={(e) => setDefaults({ ...defaults, token_budget: e.target.value === "" ? null : Number(e.target.value) })} /></div>
+            <div className="space-y-1"><Label htmlFor="project-default-workers">Parallel workers</Label><Input id="project-default-workers" type="number" min="1" max="10" value={String(defaults.max_parallel_workers ?? 3)} disabled={!canDelete} onChange={(e) => setDefaults({ ...defaults, max_parallel_workers: Number(e.target.value) })} /></div>
+            <div className="space-y-1"><Label htmlFor="project-default-retries">Max auto-fix retries</Label><Input id="project-default-retries" type="number" min="0" max="5" value={String(defaults.max_retries ?? 2)} disabled={!canDelete} onChange={(e) => setDefaults({ ...defaults, max_retries: Number(e.target.value) })} /></div>
+          </div>
+          <label className="flex items-center gap-2 text-sm"><input type="checkbox" disabled={!canDelete} checked={defaults.pause_after_planning === true} onChange={(e) => setDefaults({ ...defaults, pause_after_planning: e.target.checked })} />Pause after PRD review</label>
+          <label className="flex items-center gap-2 text-sm"><input type="checkbox" disabled={!canDelete} checked={defaults.isolate_workspace !== false} onChange={(e) => setDefaults({ ...defaults, isolate_workspace: e.target.checked })} />Work on a new branch</label>
+          {canDelete && <Button type="button" size="sm" disabled={saving} onClick={() => void saveDefaults()}>{saving ? "Saving…" : "Save defaults"}</Button>}
+        </section>
 
         {canDelete && (
           <section className="project-danger" aria-labelledby="project-danger-title">

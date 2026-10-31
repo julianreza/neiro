@@ -15,11 +15,14 @@ export function ApprovalAsk({
   agentName,
   approvals,
   send,
+  sendAlways,
   readOnly = false,
 }: {
   agentName: string;
   approvals: PendingApproval[];
   send: (approval: PendingApproval, approve: boolean) => Promise<string | null>;
+  /** "Always allow": shown only when the agent's server offers it. */
+  sendAlways?: (approval: PendingApproval) => Promise<string | null>;
   readOnly?: boolean;
 }) {
   const [busy, setBusy] = useState<string | null>(null);
@@ -27,9 +30,11 @@ export function ApprovalAsk({
   if (!ask) return null;
   const more = approvals.length - 1;
 
-  async function decide(approve: boolean) {
+  const canAlways = Boolean(sendAlways && ask.choices?.includes("always"));
+
+  async function decide(approve: boolean | "always") {
     setBusy(ask.requestId);
-    const error = await send(ask, approve);
+    const error = approve === "always" && sendAlways ? await sendAlways(ask) : await send(ask, approve !== false);
     setBusy(null);
     if (error) toast.error(error);
     else toast.success(approve ? `${agentName} can go on` : `${agentName} was told no`);
@@ -50,6 +55,16 @@ export function ApprovalAsk({
           <Button onClick={() => void decide(true)} disabled={busy !== null}>
             Allow
           </Button>
+          {canAlways && (
+            <Button
+              variant="secondary"
+              onClick={() => void decide("always")}
+              disabled={busy !== null}
+              title={`Allow ${ask.tool} from now on, without asking`}
+            >
+              Always allow
+            </Button>
+          )}
           <Button variant="outline" onClick={() => void decide(false)} disabled={busy !== null}>
             Deny
           </Button>

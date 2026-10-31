@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   FileText,
   Layers3,
@@ -20,9 +20,9 @@ import {
 } from "@/lib/demo-missions";
 import type { DemoMission, DemoTask, RouteAgentOption, TaskStage } from "@/lib/demo-missions";
 import { RoutingGateCard } from "@/components/task-routing";
-import type { MissionArtifact, MissionDetailDTO, MissionPhase, MissionSummaryDTO } from "@/lib/types";
+import type { MissionArtifact, MissionDetailDTO, MissionPhase, MissionSummaryDTO, TaskRunUsage } from "@/lib/types";
 import { useLiveData } from "@/hooks/use-live-data";
-import { DataSourceBadge } from "@/components/data-source-badge";
+import { DataSourceBadge, DataSourceFailure } from "@/components/data-source-badge";
 import {
   AgentBot,
   agentLook,
@@ -36,7 +36,7 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { RunInspectorSheet } from "@/components/run-inspector-sheet";
+import { RunInspectorSheet, type InspectorFacts } from "@/components/run-inspector-sheet";
 import { WorktreeBar } from "@/components/worktree-bar";
 import { DeleteButton } from "@/components/delete-button";
 import { useRole } from "@/hooks/use-role";
@@ -44,8 +44,12 @@ import {
   MarkdownArtifactViewer,
   type ArtifactFile,
 } from "@/components/markdown-artifact-viewer";
+import { taskActivity } from "@/lib/mission-activity";
+import { timeAgo } from "@/lib/client-api";
 import { prdHref } from "@/lib/client-api";
 import { TaskChat } from "@/components/task-chat";
+import { AgentMarkdown } from "@/components/agent-markdown";
+import type { missionResult } from "@/lib/mission-result";
 
 /** Status label next to the mission title, in History's colours. */
 const MISSION_PILL: Record<MissionView["status"], { tone: StoryTone; label: string }> = {
@@ -83,15 +87,20 @@ type TaskView = DemoTask & {
   /** The live run (not a `claim:` token) and the agent running it. */
   runId?: string | null;
   runAgentId?: string | null;
+  /** Run facts for the inspector (live mode only). */
+  facts?: InspectorFacts;
 };
 
 type MissionView = Omit<DemoMission, "tasks"> & {
   tasks: TaskView[];
   phase?: MissionPhase;
+  phaseChangedAt?: string | null;
   lastError?: string | null;
   artifacts?: ArtifactFile[];
   /** Every saved artifact, for the task chat (live missions only). */
   rawArtifacts?: MissionArtifact[];
+  /** Each finished run's tokens and model (live missions only). */
+  runUsage?: TaskRunUsage[];
   /** Mission branch when it runs in a git worktree (live missions only). */
   workBranch?: string | null;
   baseBranch?: string | null;
@@ -100,6 +109,8 @@ type MissionView = Omit<DemoMission, "tasks"> & {
   prNumber?: number | null;
   /** Auto-fix retries this mission allows per task (live missions only). */
   maxRetries?: number;
+  result?: ReturnType<typeof missionResult>;
+  activity?: ReturnType<typeof taskActivity>[];
 };
 
 
@@ -127,6 +138,7 @@ function parseMissionList(json: unknown): MissionView[] {
     prompt: m.prompt,
     status: m.status,
     phase: m.phase,
+    phaseChangedAt: m.phaseChangedAt,
     lastError: m.lastError,
     maxRetries: m.maxRetries,
     tasks: [],
@@ -170,13 +182,29 @@ function parseMissionDetail(json: unknown): MissionView | null {
       routeNeedsHuman: t.routeNeedsHuman ?? null,
       routeConfidence: t.routeConfidence ?? null,
       routeReason: t.routeReason ?? null,
+      facts: {
+        cacheReadTokens: t.cacheReadTokens ?? 0,
+        cacheWriteTokens: t.cacheWriteTokens ?? 0,
+        runtimeProvider: t.runtimeProvider ?? null,
+        runtimeModel: t.runtimeModel ?? null,
+        subagentRuns: t.subagentRuns ?? [],
+        canFork: Boolean(t.sessionId) && !t.runId && t.stage !== "Done",
+      },
     })),
+    result: m.result,
+    activity: m.tasks.map((task) => taskActivity(task, m.tasks, m.activity)),
     rawArtifacts: m.artifacts,
+    runUsage: m.runUsage ?? [],
     // Coding outputs live in the task chat, not in the Artifacts list.
-    artifacts: m.artifacts.filter((a) => a.kind !== "coding_output").map((a) => ({
-      name: `${a.kind.toUpperCase()}.md`,
+    // Fork notes are instructions to the agent, shown in the task chat.
+    artifacts: m.artifacts.filter((a) => a.kind !== "coding_output" && a.kind !== "fork_note" && a.kind !== "workspace_snapshot" && a.kind !== "run_failure").map((a) => ({
+      id: a.id,
+      name: a.kind === "learned_skill" ? "SKILL.md" : `${a.kind.toUpperCase()}.md`,
       label: a.title,
       content: a.content,
+      runId: a.runId ?? null,
+      startedAt: a.runStartedAt ?? null,
+      at: a.createdAt,
     })),
   };
 }
@@ -255,6 +283,14 @@ export function MissionWorkspace({
     null,
     parseMissionDetail,
   );
+  const reloadDetail = detail.reload;
+  useEffect(() => {
+    if (!isLive || !effectiveId) return;
+    const timer = window.setInterval(() => {
+      if (!document.hidden) reloadDetail();
+    }, 15_000);
+    return () => window.clearInterval(timer);
+  }, [isLive, effectiveId, reloadDetail]);
   const [inspected, setInspected] = useState<string | null>(null);
   const agentList = useLiveData<RouteAgentOption[]>("/api/agents", demoRouteAgents, parseRouteAgents);
   // Live missions only offer live agents: demo agents could not be assigned for real.
@@ -322,6 +358,20 @@ export function MissionWorkspace({
     if (!ok) toast.error(String(data.error));
     else toast.success(`${id}: ${label}`);
     refresh();
+  }
+
+  /** Branch a task's Hermes session and code again with the operator's note. */
+  async function forkTask(id: string, instructions: string, keepOriginal: boolean): Promise<boolean> {
+    const task = tasks.find((t) => t.id === id);
+    if (!mission || !task?.rowId) return false;
+    const { ok, data } = await postJson(
+      `/api/missions/${encodeURIComponent(mission.id)}/tasks/${encodeURIComponent(task.rowId)}/control`,
+      { action: "fork_session", instructions, createBranchTask: keepOriginal },
+    );
+    if (!ok) toast.error(String(data.error));
+    else toast.success(keepOriginal ? `${id}: forked into a new task` : `${id}: forked, coding again`);
+    refresh();
+    return ok;
   }
 
   /** Routing gate: "Setujui" (agent = null) or "Ganti agen" (agent chosen). */
@@ -416,12 +466,15 @@ export function MissionWorkspace({
               <StoryPill tone={MISSION_PILL[mission.status].tone}>{MISSION_PILL[mission.status].label}</StoryPill>
             )}
           </h1>
+          {mission?.phaseChangedAt && <p className="mt-1 text-xs text-muted-foreground">Phase changed {timeAgo(mission.phaseChangedAt)}</p>}
           {!embedded && (
             <p className="mt-2 flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
               <span className="code-chip" title={project.path}>{project.path}</span>
               <DataSourceBadge
                 source={list.source}
                 reason={list.source === "demo" ? list.reason : undefined}
+                lastUpdated={list.source === "live" ? list.lastUpdated : undefined}
+                staleReason={list.source === "live" ? list.staleReason : undefined}
               />
             </p>
           )}
@@ -505,7 +558,8 @@ export function MissionWorkspace({
             <AlertDescription>{mission.lastError}</AlertDescription>
           </Alert>
         )}
-        {isLive && detail.source === "demo" && (
+        {list.source === "error" && <DataSourceFailure reason={list.reason} retry={list.reload} showDemo={list.showDemo} />}
+        {isLive && detail.source === "error" && (
           <Alert variant="destructive" role="alert">
             <AlertTitle>Could not load this mission</AlertTitle>
             <AlertDescription>{detail.reason}</AlertDescription>
@@ -516,7 +570,7 @@ export function MissionWorkspace({
             <Skeleton className="h-14 w-full" />
             <Skeleton className="h-64 w-full" />
           </div>
-        ) : mission ? (
+        ) : list.source === "error" || detail.source === "error" ? null : mission ? (
           <>
             {mission.status === "awaiting_plan_approval" && (
               <div
@@ -552,9 +606,11 @@ export function MissionWorkspace({
                 </div>
               </div>
             )}
-            <Tabs defaultValue="board">
+            <Tabs key={mission.id} defaultValue={typeof window !== "undefined" && new URLSearchParams(window.location.search).has("artifact") ? "artifacts" : typeof window !== "undefined" && new URLSearchParams(window.location.search).has("task") ? "board" : mission.status === "completed" ? "result" : "board"}>
+
               <div className="flex items-center justify-between gap-2 border-b pb-3">
                 <TabsList>
+                  <TabsTrigger value="result">Result</TabsTrigger>
                   <TabsTrigger value="board">
                     <Layers3 className="size-3.5" />
                     Board{" "}
@@ -576,7 +632,19 @@ export function MissionWorkspace({
                   </span>
                 )}
               </div>
+              <TabsContent value="result" className="mt-5 space-y-5">
+                {mission.result ? <>
+                  <div><h3 className="font-semibold">Mission summary</h3>{mission.result.summary ? <AgentMarkdown text={mission.result.summary} /> : <p className="text-sm text-muted-foreground">No summary recorded yet.</p>}</div>
+                  <p className="text-sm text-muted-foreground">{mission.status === "completed" ? "Completed" : "In progress"} · {mission.result.retries} retries · QA passed {mission.result.qaPassed}/{mission.result.qaKnown} known · {mission.result.durationMs === null ? "Duration unavailable" : `${Math.round(mission.result.durationMs / 60000)} min including waiting`}</p>
+                  <div><h3 className="font-semibold">Verification by task</h3><ul className="divide-y">{mission.result.tasks.map((task) => <li key={task.id} className="flex flex-wrap justify-between gap-2 py-2 text-sm"><span>{task.title}</span><span>QA: {task.qa} · Review: {task.review}</span></li>)}</ul>{mission.result.tasks.length === 0 && <p className="text-sm text-muted-foreground">No tasks recorded.</p>}</div>
+                  <div><h3 className="font-semibold">Recorded changes</h3>{mission.result.files.length ? <ul className="list-inside list-disc break-all text-sm">{mission.result.files.map((file) => <li key={file}>{file}</li>)}</ul> : <p className="text-sm text-muted-foreground">No changes recorded.</p>}{mission.result.filesMayBeIncomplete && <p className="text-sm text-muted-foreground">A recorded diff was truncated; this list may be incomplete.</p>}</div>
+                  {mission.lastError && <p className="text-sm">Outstanding issue: {mission.lastError}</p>}
+                  {mission.prUrl && <a href={mission.prUrl} target="_blank" rel="noopener noreferrer" className="text-sm text-primary underline">Open draft PR</a>}
+                </> : <p className="text-sm text-muted-foreground">Result is unavailable for this mission.</p>}
+              </TabsContent>
               <TabsContent value="board" className="mt-5">
+                {mission.activity && mission.activity.length > 0 && <section aria-label="Task activity" className="mb-5 space-y-2"><h3 className="text-sm font-semibold">Task activity</h3><ul className="divide-y">{mission.activity.map((item) => <li key={item.id} className="flex flex-wrap justify-between gap-2 py-2 text-sm"><span>{item.title}</span><span className="text-muted-foreground">{item.label}{item.at && ` · Last activity ${timeAgo(item.at)}`}{item.stale && " · No recent activity"}{item.unavailable && " · Activity unavailable"}</span></li>)}</ul></section>}
+
                 {tasks.length === 0 && (
                   <div
                     role="status"
@@ -674,8 +742,10 @@ export function MissionWorkspace({
                 ) : (
                   <TaskChat
                     missionId={isLive ? mission.id : undefined}
+                    initialTaskId={typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("task") : null}
                     tasks={tasks}
                     artifacts={mission.rawArtifacts ?? []}
+                    runUsage={mission.runUsage ?? []}
                     maxRetries={maxRetriesShown}
                     routeAgents={routeAgents}
                     stageStyle={stageLook}
@@ -690,6 +760,7 @@ export function MissionWorkspace({
               <TabsContent value="artifacts" className="mt-5">
                 <MarkdownArtifactViewer
                   title={mission.title}
+                  initialArtifactId={typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("artifact") : null}
                   files={isLive ? mission.artifacts : undefined}
                 />
               </TabsContent>
@@ -730,6 +801,8 @@ export function MissionWorkspace({
         task={tasks.find((task) => task.id === inspected) ?? null}
         onClose={() => setInspected(null)}
         onUpdate={updateTask}
+        facts={isLive ? (tasks.find((task) => task.id === inspected)?.facts ?? null) : null}
+        onFork={isLive ? forkTask : undefined}
       />
     </div>
   );

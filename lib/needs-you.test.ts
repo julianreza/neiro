@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { buildNeedsYou } from "./needs-you";
+import { buildNeedsYou, roomNeedsYou } from "./needs-you";
 import { parseMissionCreateBody } from "./mission-input";
 
 const base = { lastError: null, lastErrorAt: null };
@@ -59,4 +59,27 @@ test("mission input accepts an optional token_budget", () => {
   const none = parseMissionCreateBody({ prompt: "Do it" });
   assert.ok(none.ok && none.value.tokenBudget === null);
   assert.equal(parseMissionCreateBody({ prompt: "Do it", token_budget: -5 }).ok, false);
+});
+
+test("roomNeedsYou constructs room items and issues categorization matches failed/error/budget", () => {
+  const rooms = roomNeedsYou([
+    { id: "room-1", name: "War Room", updatedAt: "2026-10-30T10:00:00Z" },
+  ]);
+  assert.equal(rooms.length, 1);
+  assert.equal(rooms[0].kind, "room_needs_you");
+  assert.equal(rooms[0].missionId, "room-1");
+  assert.equal(rooms[0].missionTitle, "War Room");
+
+  const allItems = [
+    ...rooms,
+    { kind: "task_failed", missionId: "m1", missionTitle: "M1", taskId: "t1", taskTitle: "T1", detail: "failed", since: null },
+    { kind: "mission_error", missionId: "m2", missionTitle: "M2", taskId: null, taskTitle: null, detail: "err", since: null },
+    { kind: "budget", missionId: "m3", missionTitle: "M3", taskId: null, taskTitle: null, detail: "budget", since: null },
+    { kind: "plan_approval", missionId: "m4", missionTitle: "M4", taskId: null, taskTitle: null, detail: "plan", since: null },
+    { kind: "pick_agent", missionId: "m5", missionTitle: "M5", taskId: "t5", taskTitle: "T5", detail: "pick", since: null },
+  ];
+
+  const issues = allItems.filter((item) => ["task_failed", "mission_error", "budget"].includes(item.kind));
+  assert.equal(issues.length, 3);
+  assert.deepEqual(issues.map((i) => i.kind), ["task_failed", "mission_error", "budget"]);
 });

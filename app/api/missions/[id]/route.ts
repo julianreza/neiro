@@ -4,6 +4,8 @@ import type { NextRequest } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { mapArtifactRow, mapMissionRow, mapTaskRow } from "@/lib/orchestrator-store";
 import { AppConfigError } from "@/lib/types";
+import { missionResult } from "@/lib/mission-result";
+import { loadRunActivity } from "@/lib/run-steps-store";
 import { parseTokenBudget } from "@/lib/budget";
 import type { MissionDetailDTO } from "@/lib/types";
 
@@ -91,7 +93,12 @@ export async function GET(_request: NextRequest, context: RouteContext) {
       artifacts: (artifacts || []).map((a) => mapArtifactRow(a as Record<string, unknown>)),
     };
 
-    return NextResponse.json({ mission: detail }, { status: 200 });
+    try {
+      detail.activity = await loadRunActivity([detail.runId, ...detail.tasks.map((task) => task.runId)].filter((id): id is string => Boolean(id)));
+    } catch (err) {
+      console.warn("[run-activity] unavailable", err);
+    }
+    return NextResponse.json({ mission: { ...detail, result: missionResult(detail) } }, { status: 200 });
   } catch (err: unknown) {
     if (err instanceof AppConfigError) {
       return NextResponse.json(

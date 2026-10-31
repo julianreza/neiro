@@ -17,8 +17,22 @@ test("parseMissionCreateBody applies defaults", () => {
       isolateWorkspace: true,
       tokenBudget: null,
       mode: null,
+      learnSkillOnDone: false,
+      attachments: [],
     },
   });
+});
+
+test("parseMissionCreateBody keeps learn-a-skill and checks attachments", () => {
+  const ok = parseMissionCreateBody({
+    prompt: "x",
+    learn_skill_on_done: true,
+    attachments: [{ name: "a.png", dataUrl: "data:image/png;base64,QUJD" }],
+  });
+  assert.equal(ok.ok && ok.value.learnSkillOnDone, true);
+  assert.equal(ok.ok && ok.value.attachments.length, 1);
+  assert.equal(parseMissionCreateBody({ prompt: "x", learn_skill_on_done: "yes" }).ok, false);
+  assert.equal(parseMissionCreateBody({ prompt: "x", attachments: [{ dataUrl: "data:text/html;base64,QUJD" }] }).ok, false);
 });
 
 test("parseMissionCreateBody keeps the composer mode", () => {

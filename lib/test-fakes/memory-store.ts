@@ -224,6 +224,8 @@ export class MemoryStore implements OrchestratorStore {
       kind: row.kind,
       content: row.content,
       dedupeKey: row.dedupeKey,
+      runId: row.runId ?? null,
+      runStartedAt: row.runStartedAt ?? null,
     });
   }
 

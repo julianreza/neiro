@@ -1,3 +1,4 @@
+import type { ProjectDefaults } from "@/lib/project-defaults";
 import type { MissionStatus, MissionSummaryDTO } from "@/lib/types";
 
 /**
@@ -16,6 +17,7 @@ export type Project = {
   id: string;
   path: string;
   name: string;
+  defaults: ProjectDefaults;
   /** Base branch of the newest mission, when it named one. */
   baseBranch: string | null;
   missions: MissionSummaryDTO[];
@@ -51,6 +53,7 @@ export function groupProjects(missions: MissionSummaryDTO[], saved: SavedProject
       id: s.id,
       path: s.path,
       name: s.name || projectName(s.path),
+      defaults: s.defaults ?? {},
       baseBranch: null,
       missions: [],
       running: 0,
@@ -103,6 +106,7 @@ export type SavedProject = {
   name: string;
   git: boolean;
   createdAt: string | null;
+  defaults?: ProjectDefaults;
 };
 
 export const PROJECTS_TABLE = "projects";
@@ -121,6 +125,7 @@ export function mapProjectRow(row: Record<string, unknown>): SavedProject {
     path,
     name: String(row.name ?? "") || projectName(path),
     git: row.git === true,
+    defaults: row.mission_defaults && typeof row.mission_defaults === "object" && !Array.isArray(row.mission_defaults) ? row.mission_defaults as ProjectDefaults : {},
     createdAt: typeof row.created_at === "string" ? row.created_at : null,
   };
 }

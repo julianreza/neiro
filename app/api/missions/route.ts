@@ -1,9 +1,11 @@
+import { missionPreflight } from "@/lib/mission-preflight";
 import { NextResponse } from "next/server";
 import { connection } from "next/server";
 import type { NextRequest } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { advanceMission, reportAdvanceError } from "@/lib/orchestrator";
 import { mapMissionRow } from "@/lib/orchestrator-store";
+import { resolveProjectDefaults } from "@/lib/project-defaults-server";
 import { parseMissionCreateBody } from "@/lib/mission-input";
 import { prepareMissionWorkspace } from "@/lib/worktree";
 import { linkToProject } from "@/lib/projects-store";
@@ -103,7 +105,9 @@ export async function GET(request: NextRequest) {
     }
 
     const summaries: MissionSummaryDTO[] = (missions || []).map((row: Record<string, unknown>) => {
-      const m = mapMissionRow(row);
+      // Images stay on the detail route; lists only say how many there are.
+      const { attachments: _images, ...m } = mapMissionRow(row);
+      void _images;
       const stats = statsByMission.get(m.id) || {
         totalTasks: 0,
         completedTasks: 0,
@@ -144,11 +148,21 @@ export async function GET(request: NextRequest) {
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json().catch(() => null);
-    const parsed = parseMissionCreateBody(body);
+    let effectiveBody: unknown;
+    try {
+      effectiveBody = await resolveProjectDefaults(body);
+    } catch (err: unknown) {
+      return NextResponse.json({ error: err instanceof Error ? err.message : "Could not load project defaults" }, { status: 400 });
+    }
+    const parsed = parseMissionCreateBody(effectiveBody);
     if (!parsed.ok) {
       return NextResponse.json({ error: parsed.error }, { status: 400 });
     }
     const input = parsed.value;
+    const readiness = await missionPreflight(input);
+    if (readiness.checks.some((check) => check.status === "blocked")) {
+      return NextResponse.json({ error: "Mission is not ready to start.", ...readiness }, { status: 409 });
+    }
 
     const missionId = `mission-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 
@@ -200,13 +214,16 @@ export async function POST(request: NextRequest) {
         ...(input.tokenBudget !== null ? { token_budget: input.tokenBudget } : {}),
         // Same for the mode (migration 20261030000400_code_reviews.sql).
         ...(input.mode !== null ? { mode: input.mode } : {}),
+        // 20261031000000_hermes_full_suite.sql; only sent when used.
+        ...(input.learnSkillOnDone ? { learn_skill_on_done: true } : {}),
+        ...(input.attachments.length ? { attachments: input.attachments } : {}),
         ...workspaceColumns,
       })
       .select()
       .single();
 
     if (createErr) {
-      const hint = /agent_workspace_path|work_branch|worktree_path|repo_root|base_branch|token_budget|\bmode\b/.test(createErr.message)
+      const hint = /agent_workspace_path|work_branch|worktree_path|repo_root|base_branch|token_budget|\bmode\b|learn_skill_on_done|attachments/.test(createErr.message)
         ? " Run the Supabase migrations (bun run db:push) first."
         : "";
       return NextResponse.json({ error: createErr.message + hint }, { status: 500 });

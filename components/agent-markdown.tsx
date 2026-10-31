@@ -5,14 +5,27 @@ import type { ReactNode } from "react";
 import Markdown from "react-markdown";
 import type { Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { Check, Copy, FileCode, FolderGit2, GitBranch, GitCommitHorizontal, GitPullRequest, Link2 } from "lucide-react";
+import { Check, ChevronDown, Copy, FileCode, FolderGit2, GitBranch, GitCommitHorizontal, GitPullRequest, Link2 } from "lucide-react";
 import { toast } from "sonner";
 import { chipTokens } from "@/lib/chip-tokens";
+import {
+  ChangedFiles,
+  CommandCard,
+  FollowUps,
+  MermaidBlock,
+  Quote,
+  TaskList,
+  TestStrip,
+  ThinkingBlock,
+  diffAnchor,
+  plainCallout,
+} from "@/components/reply-extras";
+import { diffCounts, diffFileName, diffFiles, pathLine, shellRun, splitOptions, splitThinking, testCounts } from "@/lib/reply-text";
 
 type ChipKind = "hash" | "branch" | "file" | "tree";
 
 const BRANCH = /^(?:(?:feat|feature|fix|hotfix|chore|docs|release|neiro|codex|kiro)\/|(?:main|master|HEAD|origin\/main)$)/;
-const FILE = /\.(?:tsx?|jsx?|mjs|css|md|json|sql|ya?ml|py|sh|toml|lock)$/;
+const FILE = /\.(?:tsx?|jsx?|mjs|css|md|json|sql|ya?ml|py|sh|toml|lock)(?::\d+(?:[-–]\d+)?){0,2}$/;
 
 function chipKind(text: string): ChipKind | null {
   if (/^[0-9a-f]{7,40}$/.test(text) && /[0-9]/.test(text) && /[a-f]/.test(text)) return "hash";
@@ -96,7 +109,75 @@ export function CopyButton({ text, label, className = "" }: { text: string; labe
   );
 }
 
-type HastNode = { type?: string; value?: string; children?: HastNode[] };
+const FOLD_LINES = 14;
+const HASH_LANGS = /^(py|python|sh|bash|shell|zsh|ya?ml|toml|diff|patch)$/;
+
+/**
+ * A fenced code block as a card, like Kiro Crew's file view: a header with
+ * the language and line count (or +/- for a diff), line numbers, and long
+ * blocks folded to their first lines. The header folds the whole block.
+ */
+export function CodeBlock({ code, lang }: { code: string; lang: string }) {
+  const lines = code.split("\n");
+  const diff = lang === "diff" || lang === "patch";
+  const long = lines.length > FOLD_LINES;
+  const [all, setAll] = useState(false);
+  const [shut, setShut] = useState(false);
+  const shown = long && !all ? lines.slice(0, FOLD_LINES) : lines;
+  const { adds, dels } = diff ? diffCounts(code) : { adds: 0, dels: 0 };
+  const file = diff ? diffFileName(code) : null;
+  const hash = HASH_LANGS.test(lang);
+  return (
+    <div className="code-card" data-shut={shut || undefined} id={file ? diffAnchor(file) : undefined}>
+      <div className="code-card-head">
+        <button type="button" className="code-card-toggle" aria-expanded={!shut} onClick={() => setShut((v) => !v)}>
+          <ChevronDown aria-hidden="true" className="code-card-chevron" />
+          <FileCode aria-hidden="true" />
+          <span>{file ?? (lang || "code")}</span>
+        </button>
+        <span className="code-card-count">
+          {diff ? (
+            <>
+              <span data-tone="add">+{adds}</span>
+              {dels > 0 && <span data-tone="del">−{dels}</span>}
+            </>
+          ) : (
+            `${lines.length} ${lines.length === 1 ? "line" : "lines"}`
+          )}
+        </span>
+        <CopyButton text={code} label="Copy code" />
+      </div>
+      {!shut && (
+        <div className="code-card-body" data-folded={long && !all ? "" : undefined}>
+          <pre>
+            <code>
+              {shown.map((line, i) => {
+                const mark = diff ? (line.startsWith("+") ? "add" : line.startsWith("-") ? "del" : line.startsWith("@@") ? "hunk" : undefined) : undefined;
+                const parts = diff ? [] : highlight(line, hash);
+                return (
+                  <span key={i} className="code-line" data-diff={mark}>
+                    <span className="code-ln" aria-hidden="true">
+                      {i + 1}
+                    </span>
+                    <span className="code-text">{diff ? line || " " : parts.length ? parts : " "}</span>
+                  </span>
+                );
+              })}
+            </code>
+          </pre>
+        </div>
+      )}
+      {long && !shut && (
+        <button type="button" className="code-card-more" aria-expanded={all} onClick={() => setAll((v) => !v)}>
+          <ChevronDown aria-hidden="true" data-up={all || undefined} />
+          {all ? "Show less" : `Show ${lines.length - FOLD_LINES} more lines`}
+        </button>
+      )}
+    </div>
+  );
+}
+
+type HastNode = { type?: string; value?: string; children?: HastNode[]; properties?: { className?: unknown } };
 function hastText(node: HastNode | undefined): string {
   if (!node) return "";
   if (node.type === "text") return node.value ?? "";
@@ -134,8 +215,23 @@ function LinkCard({ href }: { href: string }) {
   );
 }
 
-export function AgentMarkdown({ text }: { text: string }) {
-  const source = chipTokens(text);
+export function AgentMarkdown({
+  text,
+  onOption,
+  optionsDisabled,
+  thinkingSpent,
+}: {
+  text: string;
+  /** Show the reply's "[OPTIONS: …]" line as buttons; without it the line is dropped. */
+  onOption?: (option: string) => void;
+  optionsDisabled?: boolean;
+  /** "12s" for the thinking block's "Thought for 12s". */
+  thinkingSpent?: string;
+}) {
+  const { thinking, body: unthought } = splitThinking(text);
+  const { body, options } = splitOptions(unthought);
+  const changed = diffFiles(body);
+  const source = chipTokens(body);
   const firstLine = source.split("\n").findIndex((line) => line.trim() !== "") + 1;
 
   const components: Components = {
@@ -150,16 +246,48 @@ export function AgentMarkdown({ text }: { text: string }) {
         </a>
       );
     },
-    pre({ node, children, ...rest }) {
-      const code = hastText(node as HastNode | undefined).replace(/\n$/, "");
+    pre({ node }) {
+      const hast = node as HastNode | undefined;
+      const code = hastText(hast).replace(/\n$/, "");
+      const cls = hast?.children?.[0]?.properties?.className;
+      const names = Array.isArray(cls) ? cls.map(String) : typeof cls === "string" ? [cls] : [];
+      const lang = (names.map((n) => /^language-([\w+-]+)/.exec(n)?.[1]).find(Boolean) ?? "").toLowerCase();
+      const card = <CodeBlock code={code} lang={lang} />;
+      if (lang === "mermaid") return <MermaidBlock code={code} fallback={card} />;
+      const run = shellRun(code, lang);
+      const tests = lang === "diff" || lang === "patch" ? null : testCounts(code);
+      const strip = tests ? <TestStrip pass={tests.pass} fail={tests.fail} /> : null;
+      if (run) {
+        return (
+          <>
+            <CommandCard run={run} />
+            {strip}
+          </>
+        );
+      }
       return (
-        <div className="chat-pre">
-          <pre {...rest}>{children}</pre>
-          <CopyButton text={code} label="Copy code" className="chat-pre-copy" />
-        </div>
+        <>
+          {strip}
+          {card}
+        </>
+      );
+    },
+    blockquote({ node, children }) {
+      void node;
+      return <Quote>{children}</Quote>;
+    },
+    ul({ node, className, children, ...rest }) {
+      if (className?.includes("contains-task-list")) return <TaskList node={node}>{children}</TaskList>;
+      return (
+        <ul className={className} {...rest}>
+          {children}
+        </ul>
       );
     },
     p({ node, children, ...rest }) {
+      // "Warning: …" written as a plain paragraph still gets the warning box.
+      const boxed = plainCallout(children);
+      if (boxed) return boxed;
       const isLead = node?.position?.start.line === firstLine;
       return <p {...rest}>{isLead ? leadParagraph(children) : children}</p>;
     },
@@ -177,6 +305,7 @@ export function AgentMarkdown({ text }: { text: string }) {
       }
       const kind = chipKind(raw);
       const Icon = kind ? ICONS[kind] : null;
+      if (kind === "file") return <FileChip text={raw} />;
       return (
         <code className={className} data-kind={kind ?? undefined} {...rest}>
           {Icon && <Icon aria-hidden="true" className="chat-chip-icon" />}
@@ -187,8 +316,43 @@ export function AgentMarkdown({ text }: { text: string }) {
   };
 
   return (
-    <Markdown remarkPlugins={[remarkGfm]} components={components}>
-      {source}
-    </Markdown>
+    <>
+      <ThinkingBlock text={thinking} spent={thinkingSpent} />
+      <ChangedFiles files={changed} />
+      <Markdown remarkPlugins={[remarkGfm]} components={components}>
+        {source}
+      </Markdown>
+      {onOption && <FollowUps options={options} onPick={onOption} disabled={optionsDisabled} />}
+    </>
+  );
+}
+
+/** A file path chip ("lib/x.ts:42"): click copies the path and line. */
+export function FileChip({ text, label }: { text: string; label?: string }) {
+  const [done, setDone] = useState(false);
+  const { path } = pathLine(text);
+  const where = text.slice(path.length);
+  async function copy() {
+    try {
+      await navigator.clipboard.writeText(text);
+      setDone(true);
+      setTimeout(() => setDone(false), 1200);
+    } catch {
+      toast.error("Clipboard unavailable. Select and copy the path instead.");
+    }
+  }
+  return (
+    <button
+      type="button"
+      className="file-chip"
+      data-done={done || undefined}
+      title={done ? "Copied" : `Copy ${text}`}
+      aria-label={done ? `Copied ${text}` : `Copy path ${text}`}
+      onClick={() => void copy()}
+    >
+      {done ? <Check aria-hidden="true" /> : <FileCode aria-hidden="true" />}
+      <span>{label ?? path}</span>
+      {where && <span className="file-chip-line">{where}</span>}
+    </button>
   );
 }

@@ -275,3 +275,27 @@ function createFallbackPlan(fallbackPrompt: string): ParsedPlan {
     ],
   };
 }
+
+export type LearnedSkill = { name: string; description: string; content: string };
+
+/**
+ * The SKILL.md a summarizing run wrote in a ```skill fence. Null unless its
+ * YAML frontmatter has both `name` and `description` (agentskills.io shape).
+ */
+export function extractSkillBlock(output: string): LearnedSkill | null {
+  const fence = /```skill[^\n]*\n([\s\S]*?)```/i.exec(output);
+  if (!fence) return null;
+  const content = fence[1].trim();
+  const front = /^---\s*\n([\s\S]*?)\n---\s*(?:\n|$)/.exec(content);
+  if (!front) return null;
+  const field = (key: string) => {
+    const m = new RegExp(`^${key}\\s*:\\s*(.+)$`, "m").exec(front[1]);
+    return m ? m[1].trim().replace(/^["']|["']$/g, "") : "";
+  };
+  const name = field("name");
+  const description = field("description");
+  if (!name || !description) return null;
+  const body = content.slice(front[0].length).trim();
+  if (!body) return null;
+  return { name: name.slice(0, 80), description: description.slice(0, 400), content: `${content}\n` };
+}

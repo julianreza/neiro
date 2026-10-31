@@ -2,7 +2,13 @@
 
 import { useLayoutEffect, useRef, useState } from "react";
 
-export type Wire = { id: string; color: string; live: boolean };
+export type Wire = {
+  id: string;
+  color: string;
+  live: boolean;
+  /** The lane's agent is handing work to a sub-agent or another bot right now. */
+  delegating?: boolean;
+};
 
 type Geometry = {
   w: number;
@@ -83,7 +89,7 @@ export function TeamWires({ wires }: { wires: Wire[] }) {
               d={d}
               pathLength={100}
               fill="none"
-              className="wire-spark"
+              className={wires[i].delegating ? "wire-spark wire-delegating" : "wire-spark"}
               style={{
                 stroke: wires[i].color,
                 color: wires[i].color,

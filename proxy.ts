@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 import { getRequestSession, roleAllows } from "./lib/auth";
 import { sessionRoles } from "./lib/session-roles";
+import { BOT_WEBHOOK_PATH, checkBotSecret } from "./lib/bot-webhook";
 
 /** Request headers the proxy sets for route handlers; never trusted from clients. */
 export const SESSION_HEADERS = { sub: "x-neiro-user", role: "x-neiro-role" } as const;
@@ -45,11 +46,21 @@ export const config = {
   matcher: ["/((?!_next/static|_next/image|favicon.ico).*)"],
 };
 
+/** POST /api/bot/webhook carrying the right NEIRO_BOT_WEBHOOK_SECRET header. */
+export function isBotWebhookRequest(request: Pick<NextRequest, "method" | "headers" | "nextUrl">): boolean {
+  return (
+    request.method === "POST" &&
+    request.nextUrl.pathname === BOT_WEBHOOK_PATH &&
+    checkBotSecret(request.headers) === "ok"
+  );
+}
+
 export async function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
-  // Allow login page, auth API endpoints and public static SVGs without session
-  if (isExemptPath(pathname)) {
+  // Allow login page, auth API endpoints and public static SVGs without session.
+  // The bot webhook goes through only with its shared secret (no cookie).
+  if (isExemptPath(pathname) || isBotWebhookRequest(request)) {
     const headers = new Headers(request.headers);
     headers.delete(SESSION_HEADERS.sub);
     headers.delete(SESSION_HEADERS.role);

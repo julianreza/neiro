@@ -2,7 +2,7 @@
 
 import { useRef, useState, type FormEvent } from "react";
 import { useLiveData } from "@/hooks/use-live-data";
-import { DataSourceBadge } from "@/components/data-source-badge";
+import { DataSourceBadge, DataSourceFailure } from "@/components/data-source-badge";
 import {
   AgentBot,
   agentLook,
@@ -17,6 +17,7 @@ import {
 } from "@/components/team-office";
 import { Skeleton } from "@/components/ui/skeleton";
 import { AgentAddons } from "@/components/agent-addons";
+import { AgentProbe } from "@/components/agent-probe";
 import {
   Bot,
   Copy,
@@ -40,7 +41,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { ModelPicker, type RuntimeModels } from "@/components/model-picker";
-import { asRuntime, OHMYPI_EFFORTS, type AgentRuntime } from "@/lib/types";
+import { asRuntime, OHMYPI_EFFORTS, REASONING_EFFORTS, type AgentRuntime } from "@/lib/types";
 import { Label } from "@/components/ui/label";
 import { Picker } from "@/components/ui/picker";
 import { Switch } from "@/components/ui/switch";
@@ -75,6 +76,10 @@ type Agent = {
   runtime: AgentRuntime;
   /** Oh My Pi thinking level; empty = the CLI default. */
   effort: string;
+  /** Hermes reasoning effort; empty = the profile default. */
+  reasoningEffort: string;
+  /** Hermes service tier; empty = the provider default. */
+  serviceTier: string;
 };
 
 const RUNTIME_LABEL: Record<AgentRuntime, { name: string; hint: string }> = {
@@ -218,6 +223,8 @@ const starters: Agent[] = [
     enabled: true,
     runtime: "hermes" as const,
     effort: "",
+    reasoningEffort: "",
+    serviceTier: "",
   };
 });
 
@@ -236,6 +243,8 @@ function blankAgent(): Agent {
     activeRun: false,
     runtime: "hermes",
     effort: "",
+    reasoningEffort: "",
+    serviceTier: "",
   };
 }
 
@@ -260,6 +269,8 @@ function parseAgents(json: unknown): Agent[] {
     tokenBudget: Number(row.token_budget ?? row.tokenBudget) > 0 ? Number(row.token_budget ?? row.tokenBudget) : null,
     runtime: asRuntime(row.runtime),
     effort: typeof row.effort === "string" ? row.effort : "",
+    reasoningEffort: typeof row.reasoning_effort === "string" ? row.reasoning_effort : "",
+    serviceTier: typeof row.service_tier === "string" ? row.service_tier : "",
   }));
 }
 
@@ -281,7 +292,7 @@ async function sendJson(url: string, method: string, body?: unknown): Promise<st
 export function AgentsManager() {
   const live = useLiveData<Agent[]>("/api/agents", starters, parseAgents);
   const readOnly = live.source !== "live";
-  const agents: Agent[] = live.source === "loading" ? [] : live.data;
+  const agents: Agent[] = live.source === "live" || live.source === "demo" ? live.data : [];
   const [draft, setDraft] = useState<Agent | null>(null);
   const savedAgent = agents.find((agent) => agent.id === draft?.id);
   const unsavedEndpoint = draft && draft.url.trim() !== (savedAgent?.url ?? "").trim();
@@ -396,11 +407,20 @@ export function AgentsManager() {
       prompt: draft.prompt.trim(),
       url: draft.runtime === "hermes" ? draft.url.trim() : "",
       effort: draft.runtime === "ohmypi" ? draft.effort : "",
+      reasoningEffort: draft.runtime === "hermes" ? draft.reasoningEffort : "",
+      serviceTier: draft.runtime === "hermes" ? draft.serviceTier.trim() : "",
     };
+    // Effort and tier are sent only when set or cleared, so saving still
+    // works on a database without 20261031000000_hermes_full_suite.sql.
+    const before = agents.find((a) => a.id === saved.id);
+    const { reasoningEffort, serviceTier, ...rest } = saved;
+    const payload: Record<string, unknown> = { ...rest };
+    if (reasoningEffort || before?.reasoningEffort) payload.reasoningEffort = reasoningEffort;
+    if (serviceTier || before?.serviceTier) payload.serviceTier = serviceTier;
 
     const error = isNew
-      ? await sendJson("/api/agents", "POST", saved)
-      : await sendJson(`/api/agents/${encodeURIComponent(saved.id)}`, "PATCH", saved);
+      ? await sendJson("/api/agents", "POST", payload)
+      : await sendJson(`/api/agents/${encodeURIComponent(saved.id)}`, "PATCH", payload);
     if (error) {
       setFormError(`Could not save: ${error}`);
       return;
@@ -580,6 +600,7 @@ export function AgentsManager() {
           </span>
           <div className="min-w-0 space-y-2">
             <h1 className="text-3xl font-semibold tracking-tight">AI team</h1>
+            <p className="text-sm text-muted-foreground">Configure agents, models, and capabilities for your team.</p>
             <p className="team-hero-bubble" aria-live="polite">
               <Hand className="team-hero-wave size-4 shrink-0" aria-hidden="true" />
               <span>{greeting}</span>
@@ -629,6 +650,8 @@ export function AgentsManager() {
         </div>
       </header>
 
+      {live.source === "error" && <DataSourceFailure reason={live.reason} retry={live.reload} showDemo={live.showDemo} />}
+      {live.source === "live" && <DataSourceBadge source="live" lastUpdated={live.lastUpdated} staleReason={live.staleReason} />}
       {live.source === "demo" && (
         <div
           role="status"
@@ -657,7 +680,7 @@ export function AgentsManager() {
         </div>
       )}
 
-      {live.source === "loading" ? null : visible.length === 0 ? (
+      {live.source === "loading" || live.source === "error" ? null : visible.length === 0 ? (
         <section className="flex min-h-64 flex-col items-center justify-center gap-4 border border-dashed p-8 text-center">
           <Bot className="size-8 text-muted-foreground" />
           <div>
@@ -792,6 +815,40 @@ export function AgentsManager() {
                       }
                     />
                   </div>
+                )}
+                {draft.runtime === "hermes" && (
+                  <>
+                    <div className="space-y-2">
+                      <Label htmlFor="agent-reasoning">Reasoning effort</Label>
+                      <Picker
+                        id="agent-reasoning"
+                        value={draft.reasoningEffort}
+                        placeholder="Profile default"
+                        options={[
+                          { value: "", label: "Profile default" },
+                          ...REASONING_EFFORTS.map((effort) => ({ value: effort })),
+                        ]}
+                        onChange={(reasoningEffort) => setDraft({ ...draft, reasoningEffort })}
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="agent-tier">Service tier</Label>
+                      <Input
+                        id="agent-tier"
+                        maxLength={40}
+                        placeholder="Provider default"
+                        autoCapitalize="off"
+                        autoCorrect="off"
+                        spellCheck={false}
+                        value={draft.serviceTier}
+                        onChange={(event) => setDraft({ ...draft, serviceTier: event.target.value.toLowerCase() })}
+                        aria-describedby="agent-tier-help"
+                      />
+                      <p id="agent-tier-help" className="text-xs text-muted-foreground">
+                        Optional, e.g. flex or priority, when the provider offers tiers.
+                      </p>
+                    </div>
+                  </>
                 )}
                 {draft.runtime === "ohmypi" && (
                   <div className="space-y-2">
@@ -1039,7 +1096,22 @@ export function AgentsManager() {
           if (!open) setPreview(null);
         }}
       >
-        <DialogContent onCloseAutoFocus={restoreFocus}>
+        <DialogContent onCloseAutoFocus={restoreFocus} className="max-h-[90dvh] overflow-y-auto">
+          {live.source === "live" && preview ? (
+            <>
+              <DialogHeader>
+                <DialogTitle>{preview.name}: capabilities</DialogTitle>
+                <DialogDescription>
+                  Live probe of {preview.runtime === "hermes" ? `Hermes profile ${preview.profile}` : "the Oh My Pi CLI"}.
+                </DialogDescription>
+              </DialogHeader>
+              <AgentProbe key={preview.id} agentId={preview.id} />
+              <Button className="min-h-10" variant="outline" onClick={() => setPreview(null)}>
+                Close preview
+              </Button>
+            </>
+          ) : (
+          <>
           <DialogHeader>
             <DialogTitle>{preview?.name}: demo capability preview</DialogTitle>
             <DialogDescription>
@@ -1087,6 +1159,8 @@ export function AgentsManager() {
           >
             Close preview
           </Button>
+          </>
+          )}
         </DialogContent>
       </Dialog>
     </div>

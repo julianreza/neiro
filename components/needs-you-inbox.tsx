@@ -18,6 +18,7 @@ const KIND: Record<NeedsYouKind, { label: string; dot: string }> = {
   budget: { label: "Budget reached", dot: "bg-orange-500" },
   task_failed: { label: "Task failed", dot: "bg-red-500" },
   mission_error: { label: "Mission stuck", dot: "bg-red-500" },
+  room_needs_you: { label: "Room waiting", dot: "bg-violet-500" },
 };
 
 const POLL_MS = 15_000;
@@ -230,7 +231,11 @@ function NeedsYouRow({
       <div className="flex flex-wrap items-center gap-2">
         <Button asChild variant="ghost" size="sm">
           {/* Plain link: /missions/<id> is a redirect, not a page. */}
-          <a href={missionHref(item.missionId)}>Open mission</a>
+          {item.kind === "room_needs_you" ? (
+            <a href={`/bots?room=${encodeURIComponent(item.missionId)}`}>Open room</a>
+          ) : (
+            <a href={missionHref(item.missionId)}>Open mission</a>
+          )}
         </Button>
         {canAct && item.kind === "plan_approval" && (
           <Button size="sm" disabled={busy} onClick={onApprovePlan}>

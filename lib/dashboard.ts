@@ -67,6 +67,7 @@ export type ActivityItem = {
 };
 
 export type DashboardSnapshot = PipeSnapshot & {
+  summary: { activeMissions: number; completedTasks24h: number | null };
   missions: MissionRow[];
   activity: ActivityItem[];
   /** Tokens of tasks last updated on each of the last TOKEN_DAYS local days, oldest first; the last one is today. */
@@ -237,7 +238,7 @@ export function buildDashboard(
   }
 
   const activity = tasks
-    .filter((t) => Number.isFinite(time(t.updatedAt)))
+    .filter((t) => Number.isFinite(time(t.updatedAt)) && time(t.updatedAt) <= now && time(t.updatedAt) >= now - DAY_MS)
     .sort((a, b) => time(b.updatedAt) - time(a.updatedAt))
     .slice(0, MAX_ACTIVITY)
     .map((t) => ({ id: t.id, missionId: t.missionId, title: t.title, at: t.updatedAt as string, ...ACTIVITY[t.stage] }));
@@ -248,6 +249,7 @@ export function buildDashboard(
   const sum = (ns: number[]) => ns.reduce((a, b) => a + b, 0);
   return {
     ...pipe,
+    summary: { activeMissions: missions.filter((m) => m.status === "running" || m.status === "awaiting_plan_approval").length, completedTasks24h: pipe.counts.done },
     missions: rows,
     activity,
     tokens,

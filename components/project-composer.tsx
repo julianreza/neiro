@@ -1,13 +1,18 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useRef, useState, type RefObject } from "react";
+import { useEffect, useRef, useState, type RefObject } from "react";
 import { toast } from "sonner";
 import { MissionComposer } from "@/components/mission-composer";
 import { Input } from "@/components/ui/input";
+import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import type { PreflightCheck } from "@/lib/mission-preflight";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { projectHref } from "@/lib/client-api";
+import type { ProjectDefaults } from "@/lib/project-defaults";
+import type { ImageAttachment } from "@/lib/types";
 
 function parseIntOr(value: string, fallback: number): number {
   const n = Number.parseInt(value, 10);
@@ -21,12 +26,14 @@ function parseIntOr(value: string, fallback: number): number {
 export function ProjectComposer({
   projectId,
   path,
+  defaults,
   inputRef,
   onChanged,
   onOpen,
 }: {
   projectId: string;
   path: string;
+  defaults: ProjectDefaults;
   inputRef?: RefObject<HTMLTextAreaElement | null>;
   /** Called when a question or mission starts or finishes, so lists can refresh. */
   onChanged?: () => void;
@@ -38,13 +45,19 @@ export function ProjectComposer({
   const input = inputRef ?? ownRef;
   const [prompt, setPrompt] = useState("");
   const [workspace, setWorkspace] = useState(path);
-  const [pause, setPause] = useState(false);
-  const [baseBranch, setBaseBranch] = useState("");
-  const [isolate, setIsolate] = useState(true);
-  const [workers, setWorkers] = useState("3");
-  const [retries, setRetries] = useState("2");
-  const [tokenBudget, setTokenBudget] = useState("");
+  const [pause, setPause] = useState(defaults.pause_after_planning === true);
+  const [baseBranch, setBaseBranch] = useState(typeof defaults.base_branch === "string" ? defaults.base_branch : "");
+  const [isolate, setIsolate] = useState(defaults.isolate_workspace !== false);
+  const [workers, setWorkers] = useState(String(defaults.max_parallel_workers ?? 3));
+  const [retries, setRetries] = useState(String(defaults.max_retries ?? 2));
+  const [tokenBudget, setTokenBudget] = useState(defaults.token_budget == null ? "" : String(defaults.token_budget));
+  const [learnSkill, setLearnSkill] = useState(false);
+  const [images, setImages] = useState<ImageAttachment[]>([]);
   const [launching, setLaunching] = useState(false);
+  const [pending, setPending] = useState<{ checks: PreflightCheck[]; body: Record<string, unknown>; pause: boolean; signature: string } | null>(null);
+  const inputSignature = JSON.stringify([projectId, prompt, workspace, pause, baseBranch, isolate, workers, retries, tokenBudget, learnSkill, images]);
+  const latestInput = useRef(inputSignature);
+  useEffect(() => { latestInput.current = inputSignature; }, [inputSignature]);
 
   async function launch(mode: "build" | "fix" | "plan" = "build", context?: string) {
     if (!prompt.trim()) {
@@ -63,36 +76,31 @@ export function ProjectComposer({
     const pauseForPlan = mode === "plan" || pause;
     setLaunching(true);
     try {
-      const res = await fetch("/api/missions", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
+      const body = {
+          project_id: projectId,
           title: objective.split("\n")[0].slice(0, 80),
           prompt: brief,
           pause_after_planning: pauseForPlan,
           mode,
           workspace_path: workspace.trim() || undefined,
-          base_branch: baseBranch.trim() || undefined,
+          base_branch: baseBranch.trim() || null,
           isolate_workspace: isolate,
           max_parallel_workers: parseIntOr(workers, 3),
           max_retries: parseIntOr(retries, 2),
-          token_budget: parseIntOr(tokenBudget, 0) || undefined,
-        }),
-      });
-      const data = (await res.json().catch(() => ({}))) as { error?: unknown; mission?: { id?: string } };
-      if (!res.ok) {
-        toast.error(typeof data.error === "string" ? data.error : `Request failed (${res.status})`);
+          token_budget: parseIntOr(tokenBudget, 0),
+          learn_skill_on_done: learnSkill || undefined,
+          attachments: images.length ? images : undefined,
+        };
+      const check = await fetch("/api/missions/preflight", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+      const readiness = await check.json().catch(() => ({})) as { error?: string; checks?: PreflightCheck[] };
+      if (!check.ok || !readiness.checks) { toast.error(readiness.error ?? "Could not check readiness"); return; }
+      if (latestInput.current !== inputSignature) { toast.error("Mission settings changed. Check readiness again."); return; }
+      if (readiness.checks.some((item) => item.status !== "pass")) {
+        setPending({ checks: readiness.checks, body, pause: pauseForPlan, signature: inputSignature });
         return;
       }
-      setPrompt("");
-      onChanged?.();
-      toast.success(pauseForPlan ? "Mission launched. It will pause for plan approval." : "Mission launched.");
-      const id = data.mission?.id;
-      if (onOpen && id) {
-        onOpen({ kind: "mission", id });
-        return;
-      }
-      router.push(projectHref(projectId, id ? { mission: id } : {}));
+      await createMission(body, pauseForPlan);
+
     } catch {
       toast.error("Network error");
     } finally {
@@ -100,7 +108,30 @@ export function ProjectComposer({
     }
   }
 
+  async function createMission(body: Record<string, unknown>, pauseForPlan: boolean) {
+    setLaunching(true);
+    try {
+      const res = await fetch("/api/missions", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+      const data = (await res.json().catch(() => ({}))) as { error?: string; mission?: { id?: string }; checks?: PreflightCheck[] };
+      if (!res.ok) {
+        if (data.checks) setPending({ checks: data.checks, body, pause: pauseForPlan, signature: latestInput.current });
+        else toast.error(data.error ?? `Request failed (${res.status})`);
+        return;
+      }
+      setPending(null);
+      setPrompt("");
+      setImages([]);
+      onChanged?.();
+      toast.success(pauseForPlan ? "Mission launched. It will pause for plan approval." : "Mission launched.");
+      const id = data.mission?.id;
+      if (onOpen && id) { onOpen({ kind: "mission", id }); return; }
+      router.push(projectHref(projectId, id ? { mission: id } : {}));
+    } catch { toast.error("Network error"); }
+    finally { setLaunching(false); }
+  }
+
   return (
+    <>
     <MissionComposer
       prompt={prompt}
       onPromptChange={setPrompt}
@@ -112,6 +143,8 @@ export function ProjectComposer({
       isLive
       launching={launching}
       onLaunch={launch}
+      images={images}
+      onImagesChange={setImages}
       answerElsewhere={Boolean(onOpen)}
       onAskChange={(runId) => {
         onChanged?.();
@@ -183,6 +216,20 @@ export function ProjectComposer({
             </div>
             <div className="flex items-center gap-3">
               <Switch
+                id="learn-skill"
+                checked={learnSkill}
+                onCheckedChange={setLearnSkill}
+                aria-describedby="learn-skill-help"
+              />
+              <div>
+                <Label htmlFor="learn-skill">Learn a skill when done</Label>
+                <p id="learn-skill-help" className="text-xs text-muted-foreground">
+                  The summary also drafts a SKILL.md from what worked. Nothing is installed.
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center gap-3">
+              <Switch
                 id="isolate-workspace"
                 checked={isolate}
                 onCheckedChange={setIsolate}
@@ -202,5 +249,19 @@ export function ProjectComposer({
         </>
       }
     />
+    <Dialog open={pending !== null} onOpenChange={(open) => { if (!open && !launching) setPending(null); }}>
+      <DialogContent>
+        <DialogHeader><DialogTitle>Mission readiness</DialogTitle><DialogDescription>Review the checks before starting this mission.</DialogDescription></DialogHeader>
+        <ul className="max-h-80 space-y-3 overflow-y-auto text-sm">
+          {pending?.checks.map((check) => <li key={check.id} className="border-b pb-2"><strong className="capitalize">{check.status}</strong>: {check.reason} {check.href && <a className="text-primary underline" href={check.href}>Open</a>}</li>)}
+        </ul>
+        {pending && pending.signature !== inputSignature && <p className="text-sm text-destructive">Mission settings changed. Close this dialog and check again.</p>}
+        <DialogFooter>
+          <Button variant="outline" disabled={launching} onClick={() => setPending(null)}>Close</Button>
+          <Button disabled={launching || !pending || pending.signature !== inputSignature || pending.checks.some((check) => check.status === "blocked")} onClick={() => { if (pending && latestInput.current === pending.signature) void createMission(pending.body, pending.pause); }}>Continue without verification</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+    </>
   );
 }

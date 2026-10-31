@@ -14,7 +14,7 @@ const TOKEN = new RegExp(
   [
     `\\b[0-9a-f]{7,40}\\b`, // commit hash
     `\\b${BRANCH_PREFIX}\\/[\\w.-]*\\w(?:\\/[\\w.-]*\\w)*`, // branch name (no trailing dot)
-    `(?:\\.{0,2}\\/)?(?:[\\w-]+\\/)*[\\w-]+\\.${FILE_EXT}\\b`, // file or path
+    `(?:\\.{0,2}\\/)?(?:[\\w-]+\\/)*[\\w-]+\\.${FILE_EXT}\\b(?::\\d+(?:[-–]\\d+)?){0,2}`, // file or path, maybe :line or :from-to
     `\\b(?:main|master|HEAD|origin\\/main|worktree)\\b`, // git words
   ].join("|"),
   "g",

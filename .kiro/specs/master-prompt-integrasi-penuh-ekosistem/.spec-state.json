@@ -1,0 +1,60 @@
+{
+  "phase": "done",
+  "decisions": [
+    {
+      "id": "agent-skills-columns",
+      "title": "Hermes mengabaikan skills/toolsets per run. Simpan kolom agents.skills/toolsets?",
+      "options": [
+        "Tidak, kelola per profil lewat Skills/Add-ons yang ada",
+        "Ya, simpan sebagai catatan saja"
+      ],
+      "recommended": "Tidak, kelola per profil lewat Skills/Add-ons yang ada",
+      "answer": "Tidak, kelola per profil lewat Skills/Add-ons yang ada"
+    },
+    {
+      "id": "inbound-bots",
+      "title": "Perintah masuk dari chat app: platform mana dulu?",
+      "options": [
+        "Telegram dulu; Slack/Discord hanya tombol keluar",
+        "Telegram, Slack, dan Discord sekaligus"
+      ],
+      "recommended": "Telegram dulu; Slack/Discord hanya tombol keluar",
+      "answer": "Telegram dulu; Slack/Discord hanya tombol keluar"
+    },
+    {
+      "id": "delivery-split",
+      "title": "Spec besar. Dikerjakan bagaimana?",
+      "options": [
+        "Satu spec, 4 tahap, commit per tahap",
+        "Pecah jadi beberapa spec terpisah"
+      ],
+      "recommended": "Satu spec, 4 tahap, commit per tahap",
+      "answer": "Satu spec, 4 tahap, commit per tahap"
+    },
+    {
+      "id": "room-turn-route",
+      "title": "Giliran bot di Group room dijalankan di mana?",
+      "options": [
+        "Di runTick (tahan restart), pesan masuk lewat /api/rooms/[roomId]/messages",
+        "Di route /api/rooms/[roomId]/turn yang menunggu semua giliran"
+      ],
+      "recommended": "Di runTick (tahan restart), pesan masuk lewat /api/rooms/[roomId]/messages",
+      "answer": "Di runTick (tahan restart), pesan masuk lewat /api/rooms/[roomId]/messages"
+    },
+    {
+      "id": "bot-mode-layout",
+      "title": "Tata letak Bot Mode di /chat",
+      "options": [
+        "1 Tab di sidebar",
+        "2 Rel robot + daftar",
+        "3 Dek tiga kolom"
+      ],
+      "recommended": "2 Rel robot + daftar",
+      "answer": "2 Rel robot + daftar"
+    }
+  ],
+  "blocking": null,
+  "context": {
+    "template": "lib/hermes.ts + lib/orchestrator.ts + components/chat-view.tsx (adapter, orchestrator, dan chat yang sudah ada)"
+  }
+}

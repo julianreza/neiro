@@ -13,9 +13,13 @@ import { HermesSkillError } from "@/lib/hermes-skills";
 const PASS_ENV = ["HOME", "PATH", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "TMPDIR"];
 
 function cleanEnv(): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = { NO_COLOR: "1", TERM: "dumb" };
-  for (const key of PASS_ENV) if (process.env[key]) env[key] = process.env[key];
-  return env;
+  const env: Record<string, string> = { NO_COLOR: "1", TERM: "dumb" };
+  for (const key of PASS_ENV) {
+    const value = process.env[key];
+    if (value) env[key] = value;
+  }
+  // Next types NODE_ENV as required; the gateway gets a clean env without it on purpose.
+  return env as NodeJS.ProcessEnv;
 }
 
 function restartCli(interrupt: boolean): Promise<string> {

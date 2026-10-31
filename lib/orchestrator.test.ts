@@ -50,6 +50,20 @@ test("F1: two concurrent ticks on one Queued task start exactly one coding run",
   assert.ok(after.runId && !after.runId.startsWith("claim:"));
 });
 
+test("a started task run is handed to the step listener, once, with its real run id", async () => {
+  const { store, deps } = setup();
+  const watched: string[] = [];
+  deps.watchRun = (_agent, runId) => watched.push(runId);
+  store.seedAgent("workers");
+  const mission = store.seedMission({ phase: "executing" });
+  const task = store.seedTask(mission.id, { taskKey: "T1" });
+
+  await Promise.all([advanceMission(mission.id, deps), advanceMission(mission.id, deps)]);
+
+  const runId = store.tasks.get(task.id)!.runId;
+  assert.deepEqual(watched, [runId]);
+});
+
 test("F1: concurrent ticks on a failed QA run bump retries once and write one report", async () => {
   const { store, hermes, deps } = setup();
   store.seedAgent("qa");

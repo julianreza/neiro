@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { connection } from "next/server";
 import type { NextRequest } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
-import { getRun, stopRun, submitRunApproval } from "@/lib/agent-runtime";
+import { findPendingControl, getRun, stopRun, submitRunApproval } from "@/lib/agent-runtime";
 import { normalizeApprovals } from "@/lib/approvals";
 import { mapAgentRow } from "@/lib/orchestrator-store";
 import { recordAskResult, recordAskStopped } from "@/lib/ask-history";
@@ -52,6 +52,11 @@ export async function GET(request: NextRequest, context: RouteContext) {
       status: run.status,
       output: run.output ?? "",
       tokens: run.tokens ?? 0,
+      // The model the run really used; an agent with no model runs on the default.
+      model: run.model || agent.model || null,
+      inputTokens: run.input_tokens ?? null,
+      outputTokens: run.output_tokens ?? null,
+      cacheReadTokens: run.cache_read_tokens ?? null,
       error: run.error ?? null,
       approvals: normalizeApprovals(run.pending_controls),
     });
@@ -74,7 +79,11 @@ export async function POST(request: NextRequest, context: RouteContext) {
     const requestId = typeof body.requestId === "string" && body.requestId.length <= 200 ? body.requestId : undefined;
     const agent = await loadAgent(request);
     if (agent instanceof NextResponse) return agent;
-    const answered = await submitRunApproval(agent, runId, body.approve, requestId ? { requestId } : undefined);
+    const control = await findPendingControl(agent, runId, requestId).catch(() => null);
+    const answered = await submitRunApproval(agent, runId, body.approve, {
+      requestId: control?.requestId ?? requestId,
+      executionGeneration: control?.executionGeneration ?? null,
+    });
     return answered
       ? NextResponse.json({ ok: true })
       : NextResponse.json({ error: "The agent did not take the answer. It may have stopped waiting." }, { status: 409 });

@@ -1,4 +1,4 @@
-import type { Agent, MissionDetailDTO } from "@/lib/types";
+import type { Agent, MissionDetailDTO, MissionTask } from "@/lib/types";
 
 /**
  * Token budgets. `mission.tokenBudget` caps all task tokens in one mission;
@@ -20,6 +20,26 @@ export function agentTokensUsed(m: MissionDetailDTO, agentId: string): number {
   return m.tasks
     .filter((t) => t.agentId === agentId)
     .reduce((sum, t) => sum + (Number(t.tokens) || 0), 0);
+}
+
+/**
+ * Prompt tokens Hermes served from its cache, over a mission's tasks.
+ * `readShare` is the part of all tokens read from cache, in percent with one
+ * decimal (0 when nothing was spent).
+ */
+export function cacheSummary(
+  tasks: Pick<MissionTask, "tokens" | "cacheReadTokens" | "cacheWriteTokens">[],
+): { readTokens: number; writeTokens: number; readShare: number } {
+  let total = 0;
+  let readTokens = 0;
+  let writeTokens = 0;
+  for (const t of tasks) {
+    total += Number(t.tokens) || 0;
+    readTokens += Number(t.cacheReadTokens) || 0;
+    writeTokens += Number(t.cacheWriteTokens) || 0;
+  }
+  const readShare = total > 0 ? Math.round((readTokens / total) * 1000) / 10 : 0;
+  return { readTokens, writeTokens, readShare };
 }
 
 export type BudgetBlock = { scope: "mission" | "agent"; used: number; limit: number; message: string };

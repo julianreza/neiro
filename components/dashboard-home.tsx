@@ -2,15 +2,21 @@
 
 import { useEffect, useState } from "react";
 import type { CSSProperties } from "react";
-import { DataSourceBadge } from "@/components/data-source-badge";
+import { CircleCheck, ClipboardList, Activity, RefreshCw } from "lucide-react";
+import Link from "next/link";
+import { missionHref, timeAgo } from "@/lib/client-api";
+import type { NeedsYouItem } from "@/lib/needs-you";
+import type { GatewayStatusDTO } from "@/lib/types";
+import { DataSourceBadge, DataSourceFailure } from "@/components/data-source-badge";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useLiveData } from "@/hooks/use-live-data";
-import { PIPE_STAGES, TOKEN_DAYS } from "@/lib/dashboard";
+import { PIPE_LABELS, TOKEN_DAYS } from "@/lib/dashboard";
 import type { AgentTokens, DashboardSnapshot } from "@/lib/dashboard";
 
 const POLL_MS = 15_000;
 
 const demoSnapshot: DashboardSnapshot = {
+  summary: { activeMissions: 0, completedTasks24h: null },
   counts: { plan: 1, spec: 1, code: 2, qa: 1, review: 0, done: 7 },
   items: [],
   missions: [],
@@ -57,6 +63,10 @@ function parseSnapshot(json: unknown): DashboardSnapshot {
   }
   return {
     ...body,
+    summary: {
+      activeMissions: Number(body.summary?.activeMissions) || 0,
+      completedTasks24h: typeof body.summary?.completedTasks24h === "number" ? body.summary.completedTasks24h : null,
+    },
     agentTokens: Array.isArray(body.agentTokens) ? body.agentTokens : [],
     modelTokens: Array.isArray(body.modelTokens) ? body.modelTokens : [],
     runtimeTokens: Array.isArray(body.runtimeTokens) ? body.runtimeTokens : [],
@@ -64,15 +74,37 @@ function parseSnapshot(json: unknown): DashboardSnapshot {
   } as DashboardSnapshot;
 }
 
-function usePolled<T>(url: string, demo: T, parse: (json: unknown) => T) {
+function usePolled<T>(url: string, demo: T, parse: (json: unknown) => T, interval = POLL_MS) {
   const live = useLiveData(url, demo, parse);
   const { reload } = live;
   useEffect(() => {
-    const timer = setInterval(() => {
-      if (document.visibilityState === "visible") reload();
-    }, POLL_MS);
-    return () => clearInterval(timer);
-  }, [reload]);
+    let timer: number | null = null;
+    const start = () => {
+      clearInterval(timer as number);
+      timer = window.setInterval(() => {
+        if (typeof document !== "undefined" && document.visibilityState === "visible") {
+          reload();
+        }
+      }, interval);
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") {
+        reload();
+        start();
+      } else {
+        clearInterval(timer as number);
+        timer = null;
+      }
+    };
+    if (typeof document !== "undefined" && document.visibilityState === "visible") {
+      start();
+    }
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      clearInterval(timer as number);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, [reload, interval]);
   return live;
 }
 
@@ -265,44 +297,318 @@ function FillRow({ name, tokens, total, color, index, mono = false }: {
   );
 }
 
+type Attention = { items: NeedsYouItem[]; count: number };
+const emptyAttention: Attention = { items: [], count: 0 };
+function parseAttention(json: unknown): Attention {
+  const value = json as Attention;
+  if (!Array.isArray(value?.items) || typeof value.count !== "number") throw new Error("Invalid attention data");
+  return value;
+}
+function parseHealth(json: unknown): GatewayStatusDTO {
+  const value = json as GatewayStatusDTO;
+  if (!value?.supabase || !value?.defaultHermes || !value?.cron) throw new Error("Invalid health data");
+  return value;
+}
+type RuntimeInfo = { ohmypi: { installed: boolean; reason?: string } };
+function parseRuntime(json: unknown): RuntimeInfo {
+  const value = json as RuntimeInfo;
+  if (typeof value?.ohmypi?.installed !== "boolean") throw new Error("Invalid runtime data");
+  return value;
+}
+const kindLabel: Record<NeedsYouItem["kind"], string> = { plan_approval: "Approve plan", task_failed: "Task failed", pick_agent: "Pick an agent", budget: "Budget reached", mission_error: "Mission stuck", room_needs_you: "Room waiting" };
+
 export function DashboardHome() {
   const board = usePolled("/api/dashboard", demoSnapshot, parseSnapshot);
-  const snap = board.source === "loading" ? null : board.data;
+  const attention = usePolled("/api/needs-you", emptyAttention, parseAttention);
+  const health = usePolled<GatewayStatusDTO | null>("/api/gateway/status", null, parseHealth, 60_000);
+  const runtime = usePolled<RuntimeInfo | null>("/api/agents/runtimes", null, parseRuntime, 60_000);
+  const snap = board.source === "live" || board.source === "demo" ? board.data : null;
+  const live = board.source === "live" ? board.data : null;
+  const needs = attention.source === "live" ? attention.data : null;
+  const issues = needs
+    ? needs.items.filter((item) => ["task_failed", "mission_error", "budget"].includes(item.kind)).length
+    : undefined;
 
-  const open = snap ? PIPE_STAGES.filter((s) => s !== "done").reduce((n, s) => n + snap.counts[s], 0) : 0;
-  const waiting = snap?.items.filter((i) => i.waiting).length ?? 0;
+  const getSupabaseState = (): string => {
+    if (health.source === "loading") return "Unknown";
+    if (health.source === "live" && health.data) {
+      return health.data.supabase.status === "connected" ? "Connected" : "Unavailable";
+    }
+    return "Unknown";
+  };
+
+  const getHermesState = (): string => {
+    if (health.source === "loading") return "Unknown";
+    if (health.source === "live" && health.data) {
+      return health.data.defaultHermes.ok || health.data.hermes?.status === "connected" ? "Connected" : "Unavailable";
+    }
+    return "Unknown";
+  };
+
+  const getSchedulerState = (): string => {
+    if (health.source === "loading") return "Unknown";
+    if (health.source === "live" && health.data) {
+      return health.data.cron.healthy ? "Healthy" : "Unavailable";
+    }
+    return "Unknown";
+  };
+
+  const getOmpState = (): string => {
+    if (runtime.source === "loading") return "Unknown";
+    if (runtime.source === "live" && runtime.data) {
+      return runtime.data.ohmypi.installed ? "Installed" : "Unavailable";
+    }
+    return "Unknown";
+  };
+
+  const healthRows: [string, string][] = [
+    ["Supabase", getSupabaseState()],
+    ["Hermes", getHermesState()],
+    ["Scheduler", getSchedulerState()],
+    ["Oh My Pi", getOmpState()],
+  ];
+
+  const refresh = () => {
+    board.reload();
+    attention.reload();
+    health.reload();
+    runtime.reload();
+  };
 
   return (
-    <div className="w-full px-4 py-6 md:px-8">
-      <div className="flex flex-wrap items-baseline justify-between gap-2">
+    <div className="dashboard-page w-full px-4 py-6 md:px-8">
+      <header className="dashboard-header">
         <div>
           <h1 className="text-2xl font-semibold">Dashboard</h1>
-          <p className="text-sm text-muted-foreground">
-            {snap === null
-              ? "Loading…"
-              : open === 0
-                ? "Nothing is running right now."
-                : `${open} in progress${waiting > 0 ? `, ${waiting} waiting for you` : ""}.`}
-          </p>
+          <p className="text-sm text-muted-foreground">Monitor your work and what needs your attention.</p>
+          {board.source === "demo" && <DataSourceBadge source="demo" reason={board.reason} />}
+          {board.source === "error" && (
+            <DataSourceFailure reason={board.reason} retry={board.reload} showDemo={board.showDemo} />
+          )}
+          {board.source === "live" && (
+            <DataSourceBadge source="live" lastUpdated={board.lastUpdated} staleReason={board.staleReason} />
+          )}
+          {[attention, health, runtime].map((item, i) =>
+            item.source === "live" && item.staleReason ? (
+              <DataSourceBadge key={i} source="live" lastUpdated={item.lastUpdated} staleReason={item.staleReason} />
+            ) : null
+          )}
         </div>
-        {board.source === "demo" && <DataSourceBadge source="demo" reason={board.reason} />}
+        <button type="button" className="dashboard-refresh" onClick={refresh}>
+          <RefreshCw aria-hidden="true" /> Refresh
+        </button>
+      </header>
+
+      <div className="dashboard-stats">
+        {[
+          ["Active missions", typeof live?.summary?.activeMissions === "number" ? live.summary.activeMissions : "—"],
+          ["Needs attention", typeof needs?.count === "number" ? needs.count : "—"],
+          [
+            "Tasks completed · last 24 hours",
+            typeof live?.summary?.completedTasks24h === "number" ? live.summary.completedTasks24h : "—",
+          ],
+          ["Issues", typeof issues === "number" ? issues : "—"],
+        ].map(([label, value]) => (
+          <div key={label}>
+            <span>{label}</span>
+            <strong>{value}</strong>
+          </div>
+        ))}
       </div>
 
-      <div className="dash-token-grid mt-6">
-        <section aria-labelledby="dash-tokens" className="dash-card dash-tokens" data-tone="tokens">
-          {snap === null ? <Loading /> : <TokenChart tokens={snap.tokens.slice(-TOKEN_DAYS)} />}
+      <div className="dashboard-grid">
+        <section className="dashboard-panel">
+          <div className="dashboard-panel-head">
+            <h2>Needs your attention</h2>
+            <Link href="/needs-you">View all</Link>
+          </div>
+          {attention.source === "loading" ? (
+            <Loading />
+          ) : attention.source === "error" ? (
+            <p role="status">
+              Unable to load attention items.{" "}
+              <button type="button" onClick={attention.reload}>
+                Try again
+              </button>
+            </p>
+          ) : !needs?.items.length ? (
+            <p className="dashboard-empty justify-center text-center">
+              <CircleCheck aria-hidden="true" /> Nothing needs your attention.
+            </p>
+          ) : (
+            <ul>
+              {needs.items.slice(0, 5).map((item) => (
+                <li key={`${item.kind}:${item.missionId}:${item.taskId ?? ""}`}>
+                  <Link
+                    href={
+                      item.kind === "room_needs_you"
+                        ? `/bots?room=${encodeURIComponent(item.missionId)}`
+                        : missionHref(item.missionId)
+                    }
+                  >
+                    <strong>{kindLabel[item.kind]}</strong>
+                    <span>
+                      {item.missionTitle}
+                      {item.taskTitle ? ` · ${item.taskTitle}` : ""}
+                    </span>
+                    <small>
+                      {item.detail}
+                      {item.since ? ` · ${timeAgo(item.since)}` : ""}
+                    </small>
+                  </Link>
+                </li>
+              ))}
+            </ul>
+          )}
         </section>
-        <section aria-labelledby="dash-agent-tokens" className="dash-card dash-tokens" data-tone="tokens">
-          {snap === null ? <Loading /> : <AgentTokensCard
-              agents={snap.agentTokens}
-              models={snap.modelTokens}
-              runtimes={snap.runtimeTokens}
-              unsplit={snap.unsplitTokens}
-              days={TOKEN_DAYS}
-              error={snap.agentTokensError}
-            />}
+
+        <section className="dashboard-panel">
+          <div className="dashboard-panel-head">
+            <h2>Active missions</h2>
+            <Link href="/projects">View projects</Link>
+          </div>
+          {board.source === "loading" ? (
+            <Loading />
+          ) : board.source === "error" || !live ? (
+            <p role="status">
+              Unable to load missions.{" "}
+              <button type="button" onClick={board.reload}>
+                Try again
+              </button>
+            </p>
+          ) : !live.missions.length ? (
+            <p className="dashboard-empty justify-center text-center">
+              <ClipboardList aria-hidden="true" /> No active missions.
+            </p>
+          ) : (
+            <ul>
+              {live.missions.map((m) => (
+                <li key={m.id}>
+                  <Link href={missionHref(m.id)}>
+                    <strong>{m.title}</strong>
+                    <small>
+                      {PIPE_LABELS[m.stage] ?? m.stage}
+                      {m.total > 0 ? ` · ${m.done}/${m.total} tasks` : ""}
+                      {m.waiting ? " · Needs attention" : ""}
+                    </small>
+                  </Link>
+                </li>
+              ))}
+            </ul>
+          )}
         </section>
       </div>
+
+      <div className="dashboard-grid dashboard-secondary">
+        <section className="dashboard-panel">
+          <div className="dashboard-panel-head">
+            <h2>Recent activity</h2>
+            <span>Task updates · last 24 hours</span>
+          </div>
+          {board.source === "loading" ? (
+            <Loading />
+          ) : board.source === "error" || !live ? (
+            <p role="status">
+              Unable to load activity.{" "}
+              <button type="button" onClick={board.reload}>
+                Try again
+              </button>
+            </p>
+          ) : !live.activity.length ? (
+            <p className="dashboard-empty justify-center text-center">
+              <Activity aria-hidden="true" /> No recent task updates.
+            </p>
+          ) : (
+            <ul>
+              {live.activity.map((a) => (
+                <li key={a.id}>
+                  <Link href={missionHref(a.missionId)}>
+                    <strong>{a.title}</strong>
+                    <small>
+                      {a.label} · {timeAgo(a.at)}
+                    </small>
+                  </Link>
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
+
+        <section className="dashboard-panel">
+          <div className="dashboard-panel-head">
+            <h2>System health</h2>
+            <Link href="/gateway">Gateway</Link>
+          </div>
+          <ul className="dashboard-health">
+            {healthRows.map(([name, state]) => (
+              <li key={name}>
+                <span>{name}</span>
+                <strong data-state={state.toLowerCase()}>{state}</strong>
+              </li>
+            ))}
+          </ul>
+          {(health.source === "error" || runtime.source === "error") && (
+            <p role="status">
+              Some health data is unavailable.{" "}
+              <button
+                type="button"
+                onClick={() => {
+                  health.reload();
+                  runtime.reload();
+                }}
+              >
+                Try again
+              </button>
+            </p>
+          )}
+        </section>
+      </div>
+
+      <section aria-label="Token usage">
+        <div className="dash-token-grid">
+          <section aria-labelledby="dash-tokens" className="dash-card dash-tokens" data-tone="tokens">
+            {board.source === "loading" ? (
+              <Loading />
+            ) : board.source === "error" ? (
+              <div className="grid gap-2">
+                <h2 id="dash-tokens" className="eyebrow">Tokens per day</h2>
+                <p className="text-sm text-muted-foreground" role="status">
+                  Unable to load token usage.{" "}
+                  <button type="button" className="text-primary underline text-xs" onClick={board.reload}>
+                    Try again
+                  </button>
+                </p>
+              </div>
+            ) : snap ? (
+              <TokenChart tokens={snap.tokens.slice(-TOKEN_DAYS)} />
+            ) : null}
+          </section>
+          <section aria-labelledby="dash-agent-tokens" className="dash-card dash-tokens" data-tone="tokens">
+            {board.source === "loading" ? (
+              <Loading />
+            ) : board.source === "error" ? (
+              <div className="grid gap-2">
+                <h2 id="dash-agent-tokens" className="eyebrow">Tokens per agent &amp; model</h2>
+                <p className="text-sm text-muted-foreground" role="status">
+                  Unable to load token breakdown.{" "}
+                  <button type="button" className="text-primary underline text-xs" onClick={board.reload}>
+                    Try again
+                  </button>
+                </p>
+              </div>
+            ) : snap ? (
+              <AgentTokensCard
+                agents={snap.agentTokens}
+                models={snap.modelTokens}
+                runtimes={snap.runtimeTokens}
+                unsplit={snap.unsplitTokens}
+                days={TOKEN_DAYS}
+                error={snap.agentTokensError}
+              />
+            ) : null}
+          </section>
+        </div>
+      </section>
     </div>
   );
 }

@@ -3,8 +3,29 @@ import { connection } from "next/server";
 import type { NextRequest } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { openRunEventStream } from "@/lib/agent-runtime";
+import { createStepCollector } from "@/lib/run-steps";
+import { recordRunActivity, saveRunSteps } from "@/lib/run-steps-store";
 import { AppConfigError } from "@/lib/types";
-import type { Agent } from "@/lib/types";
+import type { Agent, SubagentRun } from "@/lib/types";
+import type { LogStep } from "@/lib/run-events";
+
+/**
+ * The sub-agents a task's run delegated to, kept on its mission_tasks row so
+ * the inspector shows them after the stream is gone. Best effort.
+ */
+async function saveSubagentRuns(runId: string, steps: LogStep[]) {
+  const byId = new Map<string, SubagentRun>();
+  for (const step of steps) if (step.subagent) byId.set(step.subagent.delegationId, step.subagent);
+  if (byId.size === 0) return;
+  const { error } = await getSupabaseAdmin()
+    .from("mission_tasks")
+    .update({ subagent_runs: [...byId.values()] })
+    .eq("run_id", runId);
+  // Before 20261031000000_hermes_full_suite.sql the column is missing: skip.
+  if (error && error.code !== "42703" && error.code !== "PGRST204") {
+    console.warn("[run-steps] could not save sub-agents", runId, error.message);
+  }
+}
 
 type RouteContext = {
   params: Promise<{ runId: string }>;
@@ -67,7 +88,40 @@ export async function GET(request: NextRequest, context: RouteContext) {
 
     const stream = await openRunEventStream(agent, runId, request.signal);
 
-    return new Response(stream, {
+    // Pass every byte through untouched, and read the steps on the side. When
+    // the run's stream ends on its own (not when the viewer leaves), keep them
+    // so the chat can show the work after a reload.
+    let lastWrite = 0;
+    const collector = createStepCollector((event) => {
+      const now = Date.now();
+      if (!event.terminal && now - lastWrite < 15_000) return;
+      lastWrite = now;
+      void recordRunActivity(runId, event).catch((error: unknown) => console.warn("[run-activity]", error));
+    });
+    const decoder = new TextDecoder();
+    const tee = new TransformStream<Uint8Array, Uint8Array>({
+      transform(chunk, controller) {
+        controller.enqueue(chunk);
+        try {
+          collector.feed(decoder.decode(chunk, { stream: true }));
+        } catch {
+          // A frame we can't read must never break the live view.
+        }
+      },
+      async flush() {
+        try {
+          collector.feed(decoder.decode());
+          collector.end();
+          const steps = collector.steps();
+          await saveRunSteps(runId, steps);
+          await saveSubagentRuns(runId, steps);
+        } catch (err: unknown) {
+          console.warn("[run-steps] could not save steps", runId, err);
+        }
+      },
+    });
+
+    return new Response(stream.pipeThrough(tee), {
       headers: {
         "Content-Type": "text/event-stream",
         "Cache-Control": "no-cache, no-transform",

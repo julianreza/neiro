@@ -4,8 +4,8 @@ import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { useTheme } from "next-themes";
 import {
-  Activity,
   Bot,
+  BotMessageSquare,
   Clock3,
   Command,
   FolderGit2,
@@ -37,6 +37,7 @@ import {
   CommandSeparator,
 } from "@/components/ui/command";
 import { Button } from "@/components/ui/button";
+import type { SearchKind, SearchResult } from "@/lib/workspace-search";
 import {
   TooltipProvider,
 } from "@/components/ui/tooltip";
@@ -47,8 +48,9 @@ const navigation: NavItem[] = [
   { href: "/needs-you", label: "Needs you", icon: Inbox },
   { href: "/reviews", label: "Code review", icon: ScanSearch },
   { href: "/chat", label: "Chat", icon: MessagesSquare },
+  { href: "/bots", label: "Bots", icon: BotMessageSquare },
   { href: "/agents", label: "AI team", icon: Bot },
-  { href: "/schedules", label: "Time AI", icon: Clock3 },
+  { href: "/schedules", label: "Schedules", icon: Clock3 },
   { href: "/gateway", label: "Gateway", icon: Network },
   { href: "/users", label: "Users", icon: Users },
 ];
@@ -111,6 +113,23 @@ function DashboardSession({
   railMemory: RailMemoryStore;
 }) {
   const [commandOpen, setCommandOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const [search, setSearch] = useState<{ results: SearchResult[]; error: string | null }>({ results: [], error: null });
+  useEffect(() => {
+    const trimmed = query.trim();
+    if (!commandOpen || trimmed.length < 2) return;
+    const controller = new AbortController();
+    const timer = setTimeout(() => {
+      fetch(`/api/search?q=${encodeURIComponent(trimmed)}`, { signal: controller.signal })
+        .then(async (response) => {
+          if (!response.ok) throw new Error("Search unavailable. Try again.");
+          return response.json() as Promise<{ results: SearchResult[] }>;
+        })
+        .then((data) => { if (!controller.signal.aborted) setSearch({ results: data.results, error: null }); })
+        .catch(() => { if (!controller.signal.aborted) setSearch({ results: [], error: "Search unavailable. Try again." }); });
+    }, 250);
+    return () => { clearTimeout(timer); controller.abort(); };
+  }, [query, commandOpen]);
   const railExpanded = useSyncExternalStore(subscribeRail, readRail, () => true);
   const router = useRouter();
   const { setTheme } = useTheme();
@@ -204,12 +223,6 @@ function DashboardSession({
               <span className="text-sm">{current?.label}</span>
             </div>
             <div className="flex items-center gap-3">
-              <span className="hidden items-center gap-2 text-xs text-muted-foreground sm:flex">
-                <Activity className="size-3.5" /> Offline preview
-              </span>
-              <span className="rounded border px-2 py-1 text-[10px] font-medium text-muted-foreground">
-                Demo
-              </span>
               <Button
                 size="icon"
                 variant="ghost"
@@ -245,10 +258,19 @@ function DashboardSession({
         >
           <CommandInput
             aria-label="Search workspace commands"
-            placeholder="Where do you want to go?"
+            placeholder="Search projects, missions, tasks, or commands…"
+            value={query}
+            onValueChange={(value) => { setQuery(value); setSearch({ results: [], error: null }); }}
           />
           <CommandList>
             <CommandEmpty>No matching commands.</CommandEmpty>
+            {search.error && <p role="status" className="px-3 py-2 text-sm text-muted-foreground">{search.error}</p>}
+            {(["Projects", "Missions", "Tasks", "Artifacts"] as SearchKind[]).map((kind) => {
+              const matches = search.results.filter((result) => result.kind === kind);
+              return matches.length > 0 && <CommandGroup key={kind} heading={kind}>
+                {matches.map((result) => <CommandItem key={result.id} value={`${result.title} ${result.id}`} onSelect={() => navigate(result.href)}>{result.title}</CommandItem>)}
+              </CommandGroup>;
+            })}
             <CommandGroup heading="Workspace">
               {items.map(({ href, label, icon: Icon }) => (
                 <CommandItem key={href} onSelect={() => navigate(href)}>

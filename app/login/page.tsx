@@ -3,7 +3,7 @@
 import * as React from "react";
 import { useSearchParams } from "next/navigation";
 import { Suspense, useState, useTransition } from "react";
-import { KeyRound, ShieldAlert, ShieldCheck, Sparkles, Loader2 } from "lucide-react";
+import { KeyRound, ShieldAlert, ShieldCheck, Loader2 } from "lucide-react";
 import { BotRig, agentLook, followPointer, resetPointer } from "@/components/agent-bot";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -14,13 +14,16 @@ import { ThemeToggle } from "@/components/theme-toggle";
 /** What the "You" lane on the rail reflects. */
 type LoginStatus = "idle" | "typing" | "pending" | "error";
 
-/** The agent lanes, in the same order as the AI team screen. */
-const TEAM_LANES = [
-  "Orchestrator",
-  "Specification",
-  "Workers",
-  "QA",
-  "Reviewer",
+/** The N mark: one node per agent, walked in team order along the
+    letter's stroke (up, diagonal down, up). "You" closes the N. */
+const N_PATH = "M40 230 V40 L160 230 V40";
+const N_NODES = [
+  { label: "Orchestrator", x: 40, y: 230, lx: 40, ly: 262, anchor: "middle" },
+  { label: "Specification", x: 40, y: 40, lx: 40, ly: 18, anchor: "middle" },
+  { label: "Workers", x: 80, y: 103, lx: 100, ly: 108, anchor: "start" },
+  { label: "QA", x: 120, y: 167, lx: 100, ly: 172, anchor: "end" },
+  { label: "Reviewer", x: 160, y: 230, lx: 160, ly: 262, anchor: "middle" },
+  { label: "You", x: 160, y: 40, lx: 160, ly: 18, anchor: "middle" },
 ] as const;
 
 /** Bots that peek out from behind the card. Decoration only. */
@@ -256,36 +259,39 @@ export default function LoginPage() {
         {/* Teal rail: the same shape as the dashboard nav rail. The team
             lanes are decoration; the heading on the right carries meaning. */}
         <aside className="login-rail">
-          <div className="flex items-center gap-3">
-            <span className="login-rail-logo">
-              <Sparkles className="size-5" aria-hidden="true" />
-            </span>
-            <span className="text-lg font-semibold tracking-tight">Neiro</span>
-          </div>
-
-          <ol className="login-lanes" aria-hidden="true">
-            {TEAM_LANES.map((lane, index) => (
-              <li
-                key={lane}
-                className="login-lane"
-                style={{ "--i": index } as React.CSSProperties}
-              >
-                <span className="login-lane-dot" />
-                <span className="login-lane-label">{lane}</span>
-              </li>
-            ))}
-            <li
-              className="login-lane"
-              data-you=""
-              data-status={status}
-              style={{ "--i": TEAM_LANES.length } as React.CSSProperties}
-            >
-              <span className="login-lane-dot" />
-              <span className="login-lane-label">You</span>
-            </li>
-          </ol>
-
-          <p className="login-rail-note">Your agents are ready.</p>
+          <svg
+            className="login-n"
+            viewBox="-12 0 224 272"
+            role="img"
+            aria-label="Neiro"
+          >
+            <path className="login-n-track" d={N_PATH} pathLength={100} />
+            <path className="login-n-line" d={N_PATH} pathLength={100} />
+            <path className="login-n-spark" d={N_PATH} pathLength={100} />
+            {N_NODES.map((node, index) => {
+              const you = node.label === "You";
+              return (
+                <g
+                  key={node.label}
+                  className="login-n-node"
+                  data-you={you ? "" : undefined}
+                  data-status={you ? status : undefined}
+                  style={{ "--i": index } as React.CSSProperties}
+                >
+                  <circle className="login-n-halo" cx={node.x} cy={node.y} r={15} />
+                  <circle className="login-n-dot" cx={node.x} cy={node.y} r={9} />
+                  <text
+                    className="login-n-label"
+                    x={node.lx}
+                    y={node.ly}
+                    textAnchor={node.anchor}
+                  >
+                    {node.label}
+                  </text>
+                </g>
+              );
+            })}
+          </svg>
         </aside>
 
         <section className="login-form-side">

@@ -19,6 +19,7 @@ const DOT: Record<NotificationKind, string> = {
   routing_needs_you: "bg-sky-500",
   budget_reached: "bg-orange-500",
   mission_error: "bg-red-500",
+  bot_action: "bg-violet-500",
 };
 
 export function NotificationBell() {

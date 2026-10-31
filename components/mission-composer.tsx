@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 import {
   ChevronDown,
@@ -22,12 +23,17 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { FolderPicker, rememberFolder } from "@/components/folder-picker";
 import { BotRig, agentLook } from "@/components/agent-bot";
-import { AgentMarkdown, CopyButton } from "@/components/agent-markdown";
-import { FilesRead } from "@/components/reply-parts";
+import { AgentMarkdown } from "@/components/agent-markdown";
+import { FilesRead, ReplyMeta, StepTrail } from "@/components/reply-parts";
+import { ThinkingBlock, WorkSummary, reasoningOf } from "@/components/reply-extras";
+import { useRunSteps } from "@/hooks/use-run-steps";
+import { useSavedSteps } from "@/hooks/use-saved-steps";
 import { ApprovalAsk, AskHand } from "@/components/approval-ask";
 import { useRole } from "@/hooks/use-role";
 import { normalizeApprovals, type PendingApproval } from "@/lib/approvals";
 import { askContextBrief, splitAnswerFiles, type AskTurn } from "@/lib/ask-history";
+import { AttachImages, useImageDrop } from "@/components/attach-images";
+import type { ImageAttachment } from "@/lib/types";
 
 export type ComposerMode = "ask" | "build" | "fix" | "plan";
 
@@ -117,6 +123,11 @@ type AskState =
       finishedAt?: number;
       output: string;
       error?: string;
+      model?: string | null;
+      tokens?: number;
+      inputTokens?: number | null;
+      outputTokens?: number | null;
+      cacheReadTokens?: number | null;
     };
 
 function rememberWorkspace(path: string) {
@@ -143,6 +154,8 @@ export function MissionComposer({
   launching,
   onLaunch,
   advanced,
+  images,
+  onImagesChange,
   folderLocked = false,
   compact = false,
   onAskChange,
@@ -159,6 +172,9 @@ export function MissionComposer({
   onLaunch: (mode: Exclude<ComposerMode, "ask">, context?: string) => void;
   /** Mission-only options, shown behind "Advanced options". */
   advanced: ReactNode;
+  /** Screenshots sent with the next question or mission. Omit to hide the attach button. */
+  images?: ImageAttachment[];
+  onImagesChange?: (next: ImageAttachment[]) => void;
   /** The folder is the project's: show it, but don't let it change. */
   folderLocked?: boolean;
   /** One row of mode pills and no "What happens next" side panel. */
@@ -187,7 +203,12 @@ export function MissionComposer({
   const askRequest = useRef(false);
   const info = COMPOSER_MODES.find((m) => m.id === mode)!;
   const asking = ask.phase === "running";
+  // One stream per question; kept after it finishes for the work summary.
+  const { steps: liveAskSteps } = useRunSteps(ask.phase === "idle" ? null : ask.runId, ask.phase === "idle" ? null : ask.agentId);
+  const savedAskSteps = useSavedSteps(ask.phase === "done" && liveAskSteps.length === 0 ? ask.runId : null);
+  const askSteps = liveAskSteps.length > 0 ? liveAskSteps : savedAskSteps;
   const busy = mode === "ask" ? asking || startingAsk : launching;
+  const imageDrop = useImageDrop(images ?? [], onImagesChange ?? (() => undefined));
   const runId = asking ? ask.runId : null;
   const agentId = asking ? ask.agentId : null;
   const role = useRole();
@@ -264,6 +285,11 @@ export function MissionComposer({
           output?: string;
           error?: string | null;
           approvals?: unknown;
+          model?: string | null;
+          tokens?: number;
+          inputTokens?: number | null;
+          outputTokens?: number | null;
+          cacheReadTokens?: number | null;
         };
         if (cancelled) return;
         if (!res.ok) throw new Error(data.error ?? `Request failed (${res.status})`);
@@ -281,6 +307,11 @@ export function MissionComposer({
                   output: data.output ?? "",
                   error: ok ? undefined : (data.error ?? `The question ended: ${status}`),
                   finishedAt: Date.now(),
+                  model: data.model ?? null,
+                  tokens: data.tokens ?? 0,
+                  inputTokens: data.inputTokens ?? null,
+                  outputTokens: data.outputTokens ?? null,
+                  cacheReadTokens: data.cacheReadTokens ?? null,
                 },
           );
           return;
@@ -324,6 +355,7 @@ export function MissionComposer({
         body: JSON.stringify({
           question: question.trim(),
           workspace_path: workspace.trim(),
+          images: images?.length ? images : undefined,
           session_id: followUp && !retry && ask.phase !== "idle" ? ask.runId : undefined,
         }),
       });
@@ -337,6 +369,7 @@ export function MissionComposer({
         toast.error(data.error ?? `Could not ask (${res.status})`);
         return;
       }
+      if (images?.length) onImagesChange?.([]);
       rememberWorkspace(workspace);
       if (answerElsewhere) {
         // The parent shows the answer (Projects page chat panel); the composer stays free.
@@ -345,7 +378,25 @@ export function MissionComposer({
         return;
       }
       setThread((turns) =>
-        retry ? turns : followUp && ask.phase === "done" ? [...turns, { question: ask.question, answer: ask.output }] : [],
+        retry
+          ? turns
+          : followUp && ask.phase === "done"
+            ? [
+                ...turns,
+                {
+                  question: ask.question,
+                  answer: ask.output,
+                  runId: ask.runId,
+                  model: ask.model,
+                  tokens: ask.tokens,
+                  inputTokens: ask.inputTokens,
+                  outputTokens: ask.outputTokens,
+                  cacheReadTokens: ask.cacheReadTokens,
+                  startedAt: new Date(ask.startedAt).toISOString(),
+                  finishedAt: ask.finishedAt ? new Date(ask.finishedAt).toISOString() : null,
+                },
+              ]
+            : [],
       );
       setAsk({
         phase: "running",
@@ -443,6 +494,20 @@ export function MissionComposer({
             })}
           </div>
           {compact && <p className="composer-hint">{info.detail}</p>}
+          <div className="flex flex-wrap items-center gap-2 text-sm" aria-label="Mission templates">
+            <span className="text-muted-foreground">Templates:</span>
+            {([
+              { label: "Implement feature", mode: "build" as const, text: "Goal:\n\nAcceptance criteria:\n- " },
+              { label: "Fix failing tests", mode: "fix" as const, text: "Failing tests or error:\n\nExpected behavior:\n\nAcceptance criteria:\n- Reproduce the failure\n- Fix the cause\n- Verify the affected tests" },
+            ]).map((template) => (
+              <button key={template.label} type="button" className="rounded-lg border px-2 py-1 hover:bg-secondary focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary" onClick={() => {
+                setMode(template.mode);
+                onPromptChange(template.text);
+                inputRef.current?.focus();
+              }}>{template.label}</button>
+            ))}
+            <Link className="rounded-lg border px-2 py-1 hover:bg-secondary focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary" href="/reviews">Review changes</Link>
+          </div>
 
           <div className="composer-input">
             <Label htmlFor="mission-prompt" className="sr-only">
@@ -453,6 +518,7 @@ export function MissionComposer({
               id="mission-prompt"
               value={prompt}
               onChange={(event) => onPromptChange(event.target.value)}
+              {...(onImagesChange ? imageDrop : {})}
               onKeyDown={(event) => {
                 if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
                   event.preventDefault();
@@ -490,6 +556,7 @@ export function MissionComposer({
               ) : (
                 <FolderPicker value={workspace} onChange={onWorkspaceChange} />
               )}
+              {onImagesChange && <AttachImages images={images ?? []} onChange={onImagesChange} disabled={busy} />}
               <div className="flex flex-wrap items-center gap-3">
                 <span id="launch-disabled-reason" className="text-xs text-muted-foreground">
                   {blocked ?? "⌘ / Ctrl + Enter"}
@@ -542,6 +609,7 @@ export function MissionComposer({
 
       {ask.phase !== "idle" && answer && (
         <article className="composer-answer" data-phase={ask.phase} aria-live="polite" aria-busy={asking}>
+          <EarlierTurns turns={thread} />
           <p className="answer-you">
             <span className="sr-only">You asked: </span>
             {ask.question}
@@ -569,18 +637,34 @@ export function MissionComposer({
                       : ask.error}
                 </span>
               </p>
+              {ask.phase === "done" && (
+                <>
+                  <WorkSummary
+                    steps={askSteps}
+                    spent={duration((ask.finishedAt ?? now) - ask.startedAt)}
+                    files={answer.files.length}
+                  >
+                    <StepTrail steps={askSteps} live={false} all />
+                  </WorkSummary>
+                  <ThinkingBlock text={reasoningOf(askSteps)} />
+                </>
+              )}
               {answer.body ? (
                 <div className="composer-markdown">
-                  <AgentMarkdown text={answer.body} />
+                  <AgentMarkdown
+                    text={answer.body}
+                    onOption={ask.phase === "done" ? (option) => void startAsk(option, true) : undefined}
+                    optionsDisabled={asking}
+                  />
                 </div>
               ) : (
-                ask.phase === "running" && waiting.length === 0 && (
-                  <p className="composer-thinking">
-                    <i />
-                    <i />
-                    <i />
-                    <span className="sr-only">Waiting for the answer</span>
-                  </p>
+                ask.phase === "running" &&
+                waiting.length === 0 && (
+                  <StepTrail
+                    steps={askSteps}
+                    live
+                    label={askSteps.length === 0 ? "Reading the project…" : "Thinking…"}
+                  />
                 )
               )}
               {waiting.length > 0 && (
@@ -593,9 +677,16 @@ export function MissionComposer({
               )}
               <FilesRead files={answer.files} />
               {ask.phase === "done" && answer.body && (
-                <div className="chat-foot">
-                  <CopyButton text={answer.body} label="Copy answer" />
-                </div>
+                <ReplyMeta
+                  at={new Date(ask.startedAt).toISOString()}
+                  finishedAt={ask.finishedAt ? new Date(ask.finishedAt).toISOString() : null}
+                  model={ask.model}
+                  tokens={ask.tokens}
+                  inputTokens={ask.inputTokens}
+                  outputTokens={ask.outputTokens}
+                  cacheReadTokens={ask.cacheReadTokens}
+                  copyText={answer.body}
+                />
               )}
               <div className="flex flex-wrap gap-2">
                 {ask.phase === "running" ? (
@@ -650,5 +741,41 @@ export function MissionComposer({
         </article>
       )}
     </section>
+  );
+}
+
+/** While the Ask agent reads the project: its steps, Kiro Crew style. */
+
+/** Earlier questions of this Ask thread, folded: each answer with its model, tokens and time. */
+function EarlierTurns({ turns }: { turns: AskTurn[] }) {
+  if (turns.length === 0) return null;
+  return (
+    <details className="ask-earlier">
+      <summary>
+        {turns.length} earlier {turns.length === 1 ? "question" : "questions"} in this thread
+      </summary>
+      {turns.map((t, i) => {
+        const body = splitAnswerFiles(t.answer);
+        return (
+          <div key={t.runId ?? i} className="ask-earlier-turn">
+            <p className="answer-you">{t.question}</p>
+            <div className="composer-markdown">
+              <AgentMarkdown text={body.body} />
+            </div>
+            <FilesRead files={body.files} />
+            <ReplyMeta
+              at={t.startedAt}
+              finishedAt={t.finishedAt}
+              model={t.model}
+              tokens={t.tokens}
+              inputTokens={t.inputTokens}
+              outputTokens={t.outputTokens}
+              cacheReadTokens={t.cacheReadTokens}
+              copyText={body.body || undefined}
+            />
+          </div>
+        );
+      })}
+    </details>
   );
 }

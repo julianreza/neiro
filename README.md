@@ -32,7 +32,7 @@ Give Neiro a goal. A team of AI agents plans it, writes the spec, codes it, test
 | 🙋 **Needs you** | One inbox for everything waiting on a human. |
 | 🌿 **Safe worktrees** | Agents work on their own git branch. Your checkout is never touched. |
 | 🔎 **Code review** | Review any GitHub PR by URL. Build and Fix missions open a draft PR and land their Final review here too. |
-| ⏰ **Schedules** | See the Hermes cron jobs that run your agents. |
+| ⏰ **Schedules** | Create and manage the Hermes cron jobs that run your agents. |
 | 💰 **Budgets** | Token budgets with notifications before you overspend. |
 | 👥 **Users & roles** | Admin and viewer roles behind a signed session login. |
 | 🎨 **Neumorphic UI** | Soft-depth surfaces, light and dark themes, reduced-motion aware. |
@@ -140,7 +140,7 @@ flowchart LR
 - **Task router** (`lib/task-router.ts`): Laya picks the best agent for each queued task. On timeout the default worker is used.
 - **Auth** (`proxy.ts`, `lib/auth.ts`): every route is gated except `/login`, `/api/auth` and the public SVGs. Sessions are HMAC-SHA256 tokens. Failed logins are rate limited.
 - **Database** (`supabase/migrations/`): RLS on, no public policies. Only the server-side service-role client reads or writes.
-- **Integrations**: `lib/hermes.ts` is the Hermes client. Models, including 9Router ones, are listed through Hermes.
+- **Integrations**: `lib/hermes.ts` is the Hermes client. The Gateway lists Hermes models and discovers the local Oh My Pi runtime independently.
 
 ### 🌿 Worktrees
 
@@ -176,8 +176,8 @@ Every page loads from its API first. If the API is down, it shows sample data wi
 | --- | --- | --- | --- |
 | Mission control | `/api/missions`, `/api/missions/:id` | Launch, approve plan, cancel, task controls | Sample missions, launch disabled |
 | AI team | `/api/agents` | Create, edit, enable/disable, delete, restore starters | Sample agents, edits disabled |
-| Schedules | `/api/schedules` (Hermes jobs) | None (manage jobs on Hermes) | Sample schedules |
-| 9Router & VPS | `/api/gateway/status`, `/api/gateway/models` | None | Sample model catalog, health unknown |
+| Schedules | `/api/schedules` (Hermes jobs) | Create, edit, enable, and delete jobs | Sample schedules |
+| Gateway | `/api/gateway/status`, `/api/agents/models`, `/api/agents/runtimes` | None | Sample Hermes catalog, health unknown |
 
 ## 📁 Project layout
 

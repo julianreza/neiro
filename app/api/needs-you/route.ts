@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { connection } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
-import { buildNeedsYou } from "@/lib/needs-you";
+import { buildNeedsYou, roomNeedsYou } from "@/lib/needs-you";
 import { AppConfigError } from "@/lib/types";
 import type { MissionStatus, TaskStage } from "@/lib/types";
 
@@ -43,6 +43,19 @@ export async function GET() {
         updatedAt: typeof r.updated_at === "string" ? r.updated_at : undefined,
       }))
     );
+    // Group rooms (20261031000000_hermes_full_suite.sql); no table = no rooms.
+    const roomsRes = await db.from("bot_rooms").select("id, name, updated_at").eq("needs_you", true);
+    if (!roomsRes.error) {
+      items.push(
+        ...roomNeedsYou(
+          (roomsRes.data ?? []).map((r) => ({
+            id: String(r.id),
+            name: String(r.name ?? "Room"),
+            updatedAt: typeof r.updated_at === "string" ? r.updated_at : undefined,
+          })),
+        ),
+      );
+    }
     return NextResponse.json({ items, count: items.length }, { status: 200 });
   } catch (err: unknown) {
     if (err instanceof AppConfigError) {

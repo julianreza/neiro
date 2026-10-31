@@ -139,3 +139,51 @@ test("tokensByAgent sums per agent and folds the tail into Others", () => {
     ["Others", 8],
   ]);
 });
+
+test("dashboard summary counts all active missions and activity excludes older and future tasks", () => {
+  const missions: PipeMission[] = Array.from({ length: 7 }, (_, i) => ({ id: `m${i}`, title: `Mission ${i}`, status: "running", phase: "executing" }));
+  const tasks: PipeTask[] = [
+    { id: "recent", missionId: "m0", title: "Recent", stage: "Coding", updatedAt: "2026-10-30T11:00:00Z" },
+    { id: "old", missionId: "m0", title: "Old", stage: "Coding", updatedAt: "2026-10-28T11:00:00Z" },
+    { id: "future", missionId: "m0", title: "Future", stage: "Coding", updatedAt: "2026-10-31T11:00:00Z" },
+  ];
+  const dashboard = buildDashboard(missions, tasks, NOW);
+  assert.equal(dashboard.summary.activeMissions, 7);
+  assert.equal(dashboard.missions.length, 5);
+  assert.deepEqual(dashboard.activity.map((item) => item.id), ["recent"]);
+});
+
+test("buildDashboard summary handles >5 missions and >300 recent tasks without capping totals", () => {
+  const missions: PipeMission[] = Array.from({ length: 12 }, (_, i) => ({
+    id: `m${i}`,
+    title: `Mission ${i}`,
+    status: i % 2 === 0 ? "running" : "awaiting_plan_approval",
+    phase: "executing",
+  }));
+  // 350 completed tasks within the rolling 24-hour window
+  const tasks: PipeTask[] = Array.from({ length: 350 }, (_, i) => ({
+    id: `t${i}`,
+    missionId: `m${i % 12}`,
+    title: `Task ${i}`,
+    stage: "Done",
+    updatedAt: new Date(NOW - 1000 * 60 * (i + 1)).toISOString(),
+  }));
+  const snap = buildDashboard(missions, tasks, NOW);
+  assert.equal(snap.summary.activeMissions, 12);
+  assert.equal(snap.missions.length, 5);
+  assert.equal(snap.summary.completedTasks24h, 350);
+  assert.equal(snap.activity.length, 8);
+});
+
+test("buildDashboard handles missions without tasks cleanly with total: 0", () => {
+  const missions: PipeMission[] = [
+    { id: "m-empty", title: "Empty Mission", status: "running", phase: "planning" },
+  ];
+  const snap = buildDashboard(missions, [], NOW);
+  assert.equal(snap.missions.length, 1);
+  assert.equal(snap.missions[0].id, "m-empty");
+  assert.equal(snap.missions[0].stage, "plan");
+  assert.equal(snap.missions[0].total, 0);
+  assert.equal(snap.missions[0].done, 0);
+  assert.equal(snap.missions[0].waiting, false);
+});

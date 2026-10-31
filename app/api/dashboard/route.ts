@@ -67,7 +67,7 @@ export async function GET() {
     }));
     const openIds = missions.map((m) => m.id);
 
-    const [openTasks, recentTasks, tokenRows, usageRows, askRows] = await Promise.all([
+    const [openTasks, recentTasks, tokenRows, usageRows, askRows, completedCount] = await Promise.all([
       openIds.length === 0
         ? Promise.resolve({ data: [], error: null })
         : db.from("mission_tasks").select(TASK_COLUMNS).in("mission_id", openIds),
@@ -93,6 +93,7 @@ export async function GET() {
         .limit(TOKEN_LIMIT),
       // Chat and Ask questions are runs too; their tokens live on the question.
       askTokenRows(db, tokenSince),
+      db.from("mission_tasks").select("id", { count: "exact", head: true }).eq("stage", "Done").gte("updated_at", since).lte("updated_at", new Date().toISOString()),
     ]);
     if (openTasks.error) return NextResponse.json({ error: openTasks.error.message }, { status: 500 });
     if (recentTasks.error) return NextResponse.json({ error: recentTasks.error.message }, { status: 500 });
@@ -143,6 +144,7 @@ export async function GET() {
       [...tokenTasks, ...asks],
       [...usage, ...asks],
     );
+    snapshot.summary.completedTasks24h = completedCount.error ? null : completedCount.count;
     // Without the usage table the donut would show chat agents only; say why instead.
     if (usageRows.error) snapshot.agentTokensError = usageRows.error.message;
     return NextResponse.json(snapshot, { status: 200 });

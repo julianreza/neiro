@@ -10,6 +10,9 @@ import type { LogStep } from "@/lib/run-events";
 const KIND: Record<LogStep["kind"], string> = {
   tool: "Tool",
   message: "Says",
+  reasoning: "Thinking",
+  commentary: "Notes",
+  subagent: "Sub-agent",
   approval: "Asks you",
   done: "Done",
   error: "Error",

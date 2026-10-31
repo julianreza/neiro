@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Check, Terminal } from "lucide-react";
+import { Check, GitBranch, Terminal } from "lucide-react";
 import { toast } from "sonner";
 import type { DemoTask, TaskStage } from "@/lib/demo-missions";
 import { useIsMobile } from "@/hooks/use-mobile";
@@ -15,18 +15,42 @@ import {
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
+import { formatTokens } from "@/lib/client-api";
+import type { SubagentRun } from "@/lib/types";
+
+/** What the live task row knows about its runs (live missions only). */
+export type InspectorFacts = {
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  runtimeProvider: string | null;
+  runtimeModel: string | null;
+  subagentRuns: SubagentRun[];
+  /** The task has a Hermes session that can be forked. */
+  canFork: boolean;
+};
 
 export function RunInspectorSheet({
   task,
   onClose,
   onUpdate,
+  facts,
+  onFork,
 }: {
   task: DemoTask | null;
   onClose: () => void;
   onUpdate: (id: string, stage: TaskStage) => void;
+  /** Present on a live mission: real run facts instead of the demo transcript. */
+  facts?: InspectorFacts | null;
+  /** Branch the task's session and retry Coding with these instructions. */
+  onFork?: (id: string, instructions: string, keepOriginal: boolean) => Promise<boolean>;
 }) {
   const mobile = useIsMobile();
   const [reply, setReply] = useState("");
+  const [forkNote, setForkNote] = useState("");
+  const [keepOriginal, setKeepOriginal] = useState(false);
+  const [forking, setForking] = useState(false);
+  const live = Boolean(facts);
   return (
     <Sheet
       open={!!task}
@@ -40,13 +64,15 @@ export function RunInspectorSheet({
       >
         <SheetHeader>
           <p className="eyebrow mb-2">
-            Run inspector · demo
+            {live ? "Run inspector" : "Run inspector · demo"}
           </p>
           <SheetTitle>
             {task?.id} / {task?.title}
           </SheetTitle>
           <SheetDescription>
-            Sample transcript. No live stream or VPS session is connected.
+            {live
+              ? "What this task's runs used, and what they handed to sub-agents."
+              : "Sample transcript. No live stream or VPS session is connected."}
           </SheetDescription>
         </SheetHeader>
         {task && (
@@ -57,6 +83,51 @@ export function RunInspectorSheet({
                 {task.model}
               </span>
             </div>
+            {facts && (
+              <div className="space-y-4">
+                <dl className="grid grid-cols-2 gap-3 text-xs">
+                  <div className="rounded-md bg-secondary/30 p-3">
+                    <dt className="eyebrow">Ran on</dt>
+                    <dd className="mt-1 font-mono">
+                      {facts.runtimeModel
+                        ? `${facts.runtimeProvider ? `${facts.runtimeProvider}/` : ""}${facts.runtimeModel}`
+                        : "Not reported yet"}
+                    </dd>
+                  </div>
+                  <div className="rounded-md bg-secondary/30 p-3">
+                    <dt className="eyebrow">Cache</dt>
+                    <dd className="mt-1 font-mono">
+                      {formatTokens(facts.cacheReadTokens)} read · {formatTokens(facts.cacheWriteTokens)} written
+                    </dd>
+                  </div>
+                </dl>
+                <section aria-labelledby="inspector-subagents">
+                  <h3 id="inspector-subagents" className="eyebrow mb-2">Sub-agents</h3>
+                  {facts.subagentRuns.length === 0 ? (
+                    <p className="text-xs text-muted-foreground">No sub-agents yet.</p>
+                  ) : (
+                    <ul className="space-y-2">
+                      {facts.subagentRuns.map((run) => (
+                        <li key={run.delegationId} className="flex items-start gap-3 rounded-md bg-secondary/30 p-3 text-xs">
+                          <GitBranch className="mt-0.5 size-3.5 shrink-0 text-primary" aria-hidden="true" />
+                          <div className="min-w-0 flex-1">
+                            <p className="flex flex-wrap items-center gap-2">
+                              <span className="code-chip">{run.delegationId.slice(0, 8)}</span>
+                              <span>{run.status === "running" ? "Running" : run.status === "failed" ? "Failed" : "Finished"}</span>
+                              {run.durationSec !== undefined && <span className="text-muted-foreground">{run.durationSec}s</span>}
+                              {run.tokens !== undefined && <span className="text-muted-foreground">{formatTokens(run.tokens)} tokens</span>}
+                            </p>
+                            {run.summary && <p className="mt-1 text-muted-foreground">{run.summary}</p>}
+                          </div>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </section>
+              </div>
+            )}
+            {!live && (
+            <>
             <div>
               <h3 className="mb-4 text-xs font-medium">Sample activity</h3>
               {[
@@ -86,7 +157,43 @@ export function RunInspectorSheet({
               </div>
               <pre className="whitespace-pre-wrap font-mono text-xs leading-7">{`Task: ${task.title}\nStage: ${task.stage}\n\nI will inspect the requirements before changing code.\nBackend execution is unavailable in this UI preview.`}</pre>
             </div>
-            {task.stage === "Needs you" && (
+            </>
+            )}
+            {facts?.canFork && onFork && (
+              <form
+                className="space-y-3 border-t pt-4"
+                onSubmit={async (event) => {
+                  event.preventDefault();
+                  if (!forkNote.trim() || forking) return;
+                  setForking(true);
+                  const ok = await onFork(task.id, forkNote.trim(), keepOriginal);
+                  setForking(false);
+                  if (ok) setForkNote("");
+                }}
+              >
+                <Label htmlFor="fork-note">Fork and try another way</Label>
+                <Textarea
+                  id="fork-note"
+                  required
+                  maxLength={4000}
+                  placeholder="What should the agent try instead?"
+                  value={forkNote}
+                  onChange={(event) => setForkNote(event.target.value)}
+                  aria-describedby="fork-note-help"
+                />
+                <p id="fork-note-help" className="text-xs text-muted-foreground">
+                  Copies this task&apos;s session so far, then codes again with your note.
+                </p>
+                <div className="flex items-center gap-3">
+                  <Switch id="fork-keep" checked={keepOriginal} onCheckedChange={setKeepOriginal} />
+                  <Label htmlFor="fork-keep">Keep the original task (make a new one)</Label>
+                </div>
+                <Button type="submit" disabled={forking || !forkNote.trim()}>
+                  <GitBranch aria-hidden="true" /> {forking ? "Forking…" : "Fork & retry"}
+                </Button>
+              </form>
+            )}
+            {!live && task.stage === "Needs you" && (
               <form
                 onSubmit={(event) => {
                   event.preventDefault();

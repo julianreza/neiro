@@ -67,6 +67,50 @@ export function isMissingRuntimeColumn(error: { code?: string; message?: string 
   return (error.code === "PGRST204" || error.code === "42703") && /\b(runtime|effort)\b/.test(msg);
 }
 
+/** Reasoning effort values the Hermes API server accepts in model_options. */
+export const REASONING_EFFORTS = ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"] as const;
+export type ReasoningEffort = (typeof REASONING_EFFORTS)[number];
+
+export function asReasoningEffort(value: unknown): ReasoningEffort | null {
+  return REASONING_EFFORTS.includes(value as ReasoningEffort) ? (value as ReasoningEffort) : null;
+}
+
+/** A feature the agent's runtime does not have (e.g. forking an Oh My Pi session). */
+export class UnsupportedRuntimeError extends Error {
+  constructor(message = "Not available for Oh My Pi agents") {
+    super(message);
+    this.name = "UnsupportedRuntimeError";
+  }
+}
+
+/** An image attached to a mission or a chat message, as a data: URL. */
+export type ImageAttachment = { name: string; dataUrl: string };
+
+export const APPROVAL_CHOICES = ["once", "session", "always", "deny"] as const;
+export type ApprovalChoice = (typeof APPROVAL_CHOICES)[number];
+
+/** A run waiting on the user: a tool approval or a clarify question. */
+export type PendingControl = {
+  requestId: string;
+  executionGeneration: number | null;
+  kind: "approval" | "clarify";
+  tool?: string;
+  command?: string;
+  /** Answers Hermes accepts for this approval. */
+  choices: ApprovalChoice[];
+};
+
+/** One sub-agent a run delegated to (subagent.start / subagent.complete). */
+export type SubagentRun = {
+  delegationId: string;
+  childSessionId?: string;
+  status: "running" | "completed" | "failed";
+  summary?: string;
+  durationSec?: number;
+  tokens?: number;
+  startedAt: string | null;
+};
+
 export type Agent = {
   id: string;
   name: string;
@@ -86,6 +130,16 @@ export type Agent = {
   runtime?: AgentRuntime;
   /** Oh My Pi thinking level (off … max); empty = the CLI's own default. */
   effort?: string;
+  /** Hermes model_options.reasoning_effort; null = the profile's default. */
+  reasoningEffort?: ReasoningEffort | null;
+  /** Hermes model_options.service_tier; null = the provider's default. */
+  serviceTier?: string | null;
+  /** The bot's forever-chat Hermes session (Bot Mode). */
+  canonicalSessionId?: string | null;
+  /** Group shown on the /chat Bots tab; null = "Team". */
+  botSection?: string | null;
+  /** Hidden from the /chat Bots tab. */
+  botHidden?: boolean;
   createdAt?: string;
   updatedAt?: string;
 };
@@ -138,15 +192,23 @@ export type Mission = {
   runId: string | null;
   runAgentId: string | null;
   runStartedAt: string | null;
+  /** Time the mission phase last changed; unavailable on older rows. */
+  phaseChangedAt?: string | null;
   lastError: string | null;
   lastErrorAt: string | null;
   /** Max tokens all tasks in this mission may use; null = no limit. */
   tokenBudget?: number | null;
+  /** Time completion was recorded; null for older missions. */
+  completedAt?: string | null;
   /** Composer mode the mission was launched with; null on older missions. */
   mode?: MissionMode | null;
   /** Draft PR the mission opened from its work branch, once it has one. */
   prUrl?: string | null;
   prNumber?: number | null;
+  /** Summarizing also drafts a SKILL.md from what worked. */
+  learnSkillOnDone?: boolean;
+  /** Images sent with the first planning run. Not loaded on mission lists. */
+  attachments?: ImageAttachment[];
   createdAt?: string;
   updatedAt?: string;
 };
@@ -214,6 +276,18 @@ export type MissionTask = TaskRouting & {
   resultOutput: string | null;
   /** Hermes session of the task's coding runs; reused on every retry. */
   sessionId: string | null;
+  /** Prompt tokens Hermes read from / wrote to its cache, over all runs. */
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
+  /** Provider and model the last run really used (after any fallback). */
+  runtimeProvider?: string | null;
+  runtimeModel?: string | null;
+  /** Approvals / clarify questions the active run waits on. */
+  pendingControls?: PendingControl[];
+  /** resolve-unknown details of the active run. */
+  admissionId?: string | null;
+  executionGeneration?: number | null;
+  subagentRuns?: SubagentRun[];
   createdAt?: string;
   updatedAt?: string;
 };
@@ -227,11 +301,31 @@ export type MissionArtifact = {
   content: string;
   dedupeKey: string | null;
   createdAt?: string;
+  /** The run that made it (20261031000100_artifact_run.sql); null on older rows. */
+  runId?: string | null;
+  runStartedAt?: string | null;
+};
+
+/** One finished task run's spend (agent_token_usage), for the task chat footer. */
+export type TaskRunUsage = {
+  runId: string;
+  taskId: string;
+  stage: string;
+  tokens: number;
+  model: string | null;
+  inputTokens?: number | null;
+  outputTokens?: number | null;
+  cacheReadTokens?: number | null;
+  at: string;
 };
 
 export type MissionDetailDTO = Mission & {
+  activity?: Record<string, { at: string; terminal: boolean }>;
+  result?: import("@/lib/mission-result").MissionResult;
   tasks: MissionTask[];
   artifacts: MissionArtifact[];
+  /** Per-run tokens and model; empty when agent_token_usage can't be read. */
+  runUsage?: TaskRunUsage[];
 };
 
 export type MissionSummaryDTO = Mission & {
@@ -373,3 +467,77 @@ export type GatewayStatusDTO = {
   agentsHealth: AgentHealth[];
   checkedAt: string;
 };
+
+/** Where a Group room's turns are: null while the room is idle. */
+export type RoomDriver = {
+  triggerMessageId: string;
+  round: number;
+  /** Agents still to speak this round, in order. */
+  queue: string[];
+  /** Agents mentioned this round, added to the next round. */
+  nextRound: string[];
+  /** How many agents took a turn this round. */
+  turnsThisRound: number;
+  passesThisRound: number;
+  replies: number;
+  /** Agents told to pause. */
+  paused: string[];
+  claim: { agentId: string; runId: string; startedAt: string } | null;
+};
+
+export type BotRoom = {
+  id: string;
+  name: string;
+  avatarUrl: string | null;
+  memberAgentIds: string[];
+  detectStopDirectives: boolean;
+  needsYou: boolean;
+  pinned: boolean;
+  section: string | null;
+  /** agentId -> that bot's own Hermes session for this room. */
+  memberSessions: Record<string, string>;
+  driver: RoomDriver | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type BotRoomMessage = {
+  id: string;
+  roomId: string;
+  senderKind: "user" | "bot" | "system";
+  senderAgentId: string | null;
+  senderName: string;
+  content: string;
+  mentions: string[];
+  threadRootId: string | null;
+  runId: string | null;
+  createdAt: string;
+};
+
+export const HERMES_SUITE_MIGRATION_HINT =
+  "Run supabase/migrations/20261031000000_hermes_full_suite.sql in Supabase first, then save again.";
+
+/**
+ * Reads `reasoningEffort` and `serviceTier` from an agent API body. Absent
+ * keys stay undefined; "" or null clears the field.
+ */
+export function parseHermesModelFields(
+  body: Record<string, unknown> | null | undefined,
+):
+  | { ok: true; reasoning_effort?: ReasoningEffort | null; service_tier?: string | null }
+  | { ok: false; error: string } {
+  const out: { reasoning_effort?: ReasoningEffort | null; service_tier?: string | null } = {};
+  if (body && "reasoningEffort" in body) {
+    const v = typeof body.reasoningEffort === "string" ? body.reasoningEffort.trim() : body.reasoningEffort;
+    if (v === "" || v === null || v === undefined) out.reasoning_effort = null;
+    else if (REASONING_EFFORTS.includes(v as ReasoningEffort)) out.reasoning_effort = v as ReasoningEffort;
+    else return { ok: false, error: `reasoningEffort must be one of: ${REASONING_EFFORTS.join(", ")}` };
+  }
+  if (body && "serviceTier" in body) {
+    const v = typeof body.serviceTier === "string" ? body.serviceTier.trim() : body.serviceTier;
+    if (v === "" || v === null || v === undefined) out.service_tier = null;
+    else if (typeof v === "string" && /^[a-z0-9_-]{1,40}$/.test(v)) out.service_tier = v;
+    else return { ok: false, error: "serviceTier must be up to 40 characters: a-z, 0-9, _ or -" };
+  }
+  return { ok: true, ...out };
+}

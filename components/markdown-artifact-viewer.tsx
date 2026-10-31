@@ -2,12 +2,39 @@
 
 import { useState } from "react";
 import Markdown from "react-markdown";
+import { StepTrail, took } from "@/components/reply-parts";
+import { ThinkingBlock, WorkSummary, reasoningOf } from "@/components/reply-extras";
+import { useSavedSteps } from "@/hooks/use-saved-steps";
 import remarkGfm from "remark-gfm";
 import { Copy, Download, FileText } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 
-export type ArtifactFile = { name: string; label: string; content: string };
+export type ArtifactFile = {
+  id?: string;
+  name: string;
+  label: string;
+  content: string;
+  /** The run that wrote it (plan, PRD): its saved steps show above the text. */
+  runId?: string | null;
+  startedAt?: string | null;
+  at?: string;
+};
+
+/** "Worked 1m 12s · 9 steps" for the run that wrote this artifact. */
+function ArtifactWork({ file }: { file: ArtifactFile }) {
+  const steps = useSavedSteps(file.runId);
+  const spent = file.startedAt && file.at ? took(file.startedAt, file.at) : "";
+  if (steps.length === 0) return null;
+  return (
+    <div className="px-6 pt-4 md:px-8">
+      <WorkSummary steps={steps} spent={spent}>
+        <StepTrail steps={steps} live={false} all />
+      </WorkSummary>
+      <ThinkingBlock text={reasoningOf(steps)} />
+    </div>
+  );
+}
 
 /**
  * Shows mission artifacts. Pass `files` for real artifacts; without it the
@@ -16,9 +43,11 @@ export type ArtifactFile = { name: string; label: string; content: string };
 export function MarkdownArtifactViewer({
   title,
   files,
+  initialArtifactId,
 }: {
   title: string;
   files?: ArtifactFile[];
+  initialArtifactId?: string | null;
 }) {
   const demoArtifacts: ArtifactFile[] = [
     {
@@ -34,7 +63,7 @@ export function MarkdownArtifactViewer({
     },
   ];
   const artifacts = files ?? demoArtifacts;
-  const [selected, setSelected] = useState(0);
+  const [selected, setSelected] = useState(() => Math.max(0, artifacts.findIndex((file) => file.id === initialArtifactId)));
   const artifact = artifacts[Math.min(selected, artifacts.length - 1)];
   if (!artifact) {
     return (
@@ -107,6 +136,7 @@ export function MarkdownArtifactViewer({
             </Button>
           </div>
         </div>
+        <ArtifactWork file={artifact} />
         <article className="prose prose-sm dark:prose-invert max-w-[72ch] overflow-x-auto p-6 md:p-8">
           <Markdown remarkPlugins={[remarkGfm]}>{artifact.content}</Markdown>
         </article>

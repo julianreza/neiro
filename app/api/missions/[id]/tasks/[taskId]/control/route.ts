@@ -2,15 +2,25 @@ import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 import { isAuthorizedRequest } from "@/lib/auth";
 import { getSupabaseAdmin } from "@/lib/supabase";
-import { stopRun, submitRunApproval, submitRunClarify } from "@/lib/agent-runtime";
+import { findPendingControl, forkSession, stopRun, submitRunApproval, submitRunClarify } from "@/lib/agent-runtime";
+import { mapAgentRow, mapTaskRow } from "@/lib/orchestrator-store";
 import {
   advanceMission,
   approveRoute,
   overrideRoute,
   reportAdvanceError,
 } from "@/lib/orchestrator";
-import { AppConfigError } from "@/lib/types";
-import type { Agent } from "@/lib/types";
+import { AppConfigError, UnsupportedRuntimeError } from "@/lib/types";
+import type { Agent, ApprovalChoice } from "@/lib/types";
+
+const APPROVAL_ACTIONS: Record<string, ApprovalChoice> = {
+  approve_tool: "once",
+  approve_tool_session: "session",
+  approve_tool_always: "always",
+  deny_tool: "deny",
+};
+
+const FORK_NOTE_MAX = 4000;
 
 type RouteContext = {
   params: Promise<{ id: string; taskId: string }>;
@@ -29,7 +39,10 @@ export async function POST(request: NextRequest, context: RouteContext) {
       "retry",
       "stop",
       "approve_tool",
+      "approve_tool_session",
+      "approve_tool_always",
       "deny_tool",
+      "fork_session",
       "clarify",
       "mark_done",
       "approve_route",
@@ -96,22 +109,7 @@ export async function POST(request: NextRequest, context: RouteContext) {
         .eq("id", runAgentId)
         .maybeSingle();
 
-      if (agentData) {
-        agent = {
-          id: agentData.id,
-          name: agentData.name,
-          role: agentData.role,
-          stage: agentData.stage,
-          specialty: agentData.specialty || "",
-          model: agentData.model || "",
-          profile: agentData.profile || "default",
-          prompt: agentData.prompt || "",
-          url: agentData.url || "",
-          key_enc: agentData.key_enc,
-          enabled: agentData.enabled,
-          activeRun: agentData.active_run ?? false,
-        };
-      }
+      if (agentData) agent = mapAgentRow(agentData);
     }
 
     if (action === "mark_done") {
@@ -208,12 +206,24 @@ export async function POST(request: NextRequest, context: RouteContext) {
       return NextResponse.json({ ok: true, task: data }, { status: 200 });
     }
 
-    if (action === "approve_tool" || action === "deny_tool") {
-      const isApproved = action === "approve_tool" || Boolean(approved);
+    if (action in APPROVAL_ACTIONS) {
+      // deny_tool with approved: true is the old "approve" spelling.
+      const choice: ApprovalChoice =
+        action === "deny_tool" && approved === true ? "once" : APPROVAL_ACTIONS[action];
       if (agent && activeRunId) {
         let answered: boolean;
         try {
-          answered = await submitRunApproval(agent, activeRunId, isApproved, requestId ? { requestId } : undefined);
+          const control = await findPendingControl(agent, activeRunId, requestId);
+          if (control && choice !== "once" && choice !== "deny" && !control.choices.includes(choice)) {
+            return NextResponse.json(
+              { error: `This approval does not offer "${choice}". Choose once or deny.` },
+              { status: 400 },
+            );
+          }
+          answered = await submitRunApproval(agent, activeRunId, choice, {
+            requestId: control?.requestId ?? requestId,
+            executionGeneration: control?.executionGeneration ?? null,
+          });
         } catch (err: unknown) {
           const message = err instanceof Error ? err.message : String(err);
           return NextResponse.json({ error: message }, { status: 500 });
@@ -240,6 +250,100 @@ export async function POST(request: NextRequest, context: RouteContext) {
       return NextResponse.json({ ok: true, task: data }, { status: 200 });
     }
 
+    if (action === "fork_session") {
+      const instructions = typeof body?.instructions === "string" ? body.instructions.trim() : "";
+      if (!instructions || instructions.length > FORK_NOTE_MAX) {
+        return NextResponse.json(
+          { error: `Say what to try instead (1-${FORK_NOTE_MAX} characters).` },
+          { status: 400 },
+        );
+      }
+      const current = mapTaskRow(task);
+      if (activeRunId || (typeof task.run_id === "string" && task.run_id.startsWith("claim:"))) {
+        return NextResponse.json({ error: "Stop the running attempt before forking it." }, { status: 409 });
+      }
+      if (!current.sessionId) {
+        return NextResponse.json({ error: "This task has no session to fork yet." }, { status: 409 });
+      }
+      if (!agent) {
+        return NextResponse.json({ error: "The task's agent is gone; pick an agent first." }, { status: 409 });
+      }
+
+      let newSession: string;
+      try {
+        newSession = await forkSession(agent, current.sessionId, `Fork: ${current.title}`);
+      } catch (err: unknown) {
+        const status = err instanceof UnsupportedRuntimeError ? 409 : 502;
+        return NextResponse.json({ error: err instanceof Error ? err.message : String(err) }, { status });
+      }
+
+      const branch = body?.createBranchTask === true;
+      const targetId = branch ? crypto.randomUUID() : taskId;
+      if (branch) {
+        const { error: insertErr } = await supabase.from("mission_tasks").insert({
+          id: targetId,
+          mission_id: missionId,
+          // A fresh key: the original keeps its place in the plan.
+          task_key: current.taskKey ? `${current.taskKey}-fork-${targetId.slice(0, 4)}` : null,
+          title: `${current.title} (fork)`,
+          stage: "Routed",
+          agent_id: current.agentId ?? agent.id,
+          agent_name: current.agentName,
+          model: current.model,
+          tokens: 0,
+          depends: current.depends,
+          approval: false,
+          retries: 0,
+          result: current.result,
+          session_id: newSession,
+          // Routed means "agent chosen": the router never re-runs.
+          routing_status: current.routingStatus ?? "approved",
+        });
+        if (insertErr) return NextResponse.json({ error: insertErr.message }, { status: 500 });
+      }
+
+      const { count } = await supabase
+        .from("mission_artifacts")
+        .select("id", { count: "exact", head: true })
+        .eq("task_id", targetId)
+        .eq("kind", "fork_note");
+      const { error: noteErr } = await supabase.from("mission_artifacts").insert({
+        id: crypto.randomUUID(),
+        mission_id: missionId,
+        task_id: targetId,
+        title: `Fork note: ${current.title}`,
+        kind: "fork_note",
+        content: instructions,
+        dedupe_key: `fork:${targetId}:${(count ?? 0) + 1}`,
+      });
+      if (noteErr) return NextResponse.json({ error: noteErr.message }, { status: 500 });
+
+      if (!branch) {
+        const { error: updErr } = await supabase
+          .from("mission_tasks")
+          .update({
+            stage: "Routed",
+            session_id: newSession,
+            approval: false,
+            result_output: null,
+            run_id: null,
+            run_agent_id: null,
+            run_started_at: null,
+            routing_status: current.routingStatus ?? "approved",
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", taskId);
+        if (updErr) return NextResponse.json({ error: updErr.message }, { status: 500 });
+      }
+
+      try {
+        await advanceMission(missionId);
+      } catch (err: unknown) {
+        await reportAdvanceError(missionId, err, targetId);
+      }
+      return NextResponse.json({ ok: true, taskId: targetId, sessionId: newSession }, { status: 200 });
+    }
+
     if (action === "clarify") {
       if (!reply || typeof reply !== "string") {
         return NextResponse.json({ error: "Missing required 'reply' text" }, { status: 400 });
@@ -247,7 +351,11 @@ export async function POST(request: NextRequest, context: RouteContext) {
 
       if (agent && activeRunId) {
         try {
-          await submitRunClarify(agent, activeRunId, reply);
+          const control = await findPendingControl(agent, activeRunId, requestId, "clarify").catch(() => null);
+          await submitRunClarify(agent, activeRunId, reply, {
+            requestId: control?.requestId ?? requestId,
+            executionGeneration: control?.executionGeneration ?? null,
+          });
         } catch (err: unknown) {
           const message = err instanceof Error ? err.message : String(err);
           return NextResponse.json({ error: message }, { status: 500 });

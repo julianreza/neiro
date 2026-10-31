@@ -21,6 +21,8 @@ export type RecordedStart = {
   idempotencyKey?: string;
   prompt: string;
   sessionId?: string;
+  sessionKey?: string;
+  images?: number;
 };
 
 export class FakeHermes implements HermesClient {
@@ -47,6 +49,8 @@ export class FakeHermes implements HermesClient {
       idempotencyKey: key,
       prompt: input.prompt,
       sessionId: input.sessionId,
+      sessionKey: input.sessionKey,
+      images: input.images?.length,
     });
     return { kind: "started", runId };
   };
@@ -63,6 +67,19 @@ export class FakeHermes implements HermesClient {
   createSession = async (): Promise<string> => {
     await yieldTick();
     return `session-${++this.sessionsCreated}`;
+  };
+
+  /** resolve-unknown calls; set `resolveResult` to script the answer. */
+  resolved: Array<{ runId: string; admissionId: string; executionGeneration: number }> = [];
+  resolveResult = true;
+  resolveUnknownRun = async (
+    _agent: Agent,
+    runId: string,
+    details: { admissionId: string; executionGeneration: number },
+  ): Promise<boolean> => {
+    await yieldTick();
+    this.resolved.push({ runId, ...details });
+    return this.resolveResult;
   };
 
   /** Create or update a run's status/output, e.g. to complete it. */

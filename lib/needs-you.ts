@@ -5,7 +5,7 @@ import type { MissionStatus, TaskStage } from "@/lib/types";
  * Built from plain rows so it is unit-tested without Supabase.
  */
 
-export type NeedsYouKind = "plan_approval" | "task_failed" | "pick_agent" | "budget" | "mission_error";
+export type NeedsYouKind = "plan_approval" | "task_failed" | "pick_agent" | "budget" | "mission_error" | "room_needs_you";
 
 /**
  * How the orchestrator records, in the mission's last_error, that a task was
@@ -68,7 +68,24 @@ const ORDER: Record<NeedsYouKind, number> = {
   budget: 2,
   task_failed: 3,
   mission_error: 4,
+  room_needs_you: 5,
 };
+
+/**
+ * Group rooms waiting on the operator (a bot asked @user or wants a tool).
+ * `missionId` holds the room id; the inbox links these to /bots?room=<id>.
+ */
+export function roomNeedsYou(rooms: Array<{ id: string; name: string; updatedAt?: string }>): NeedsYouItem[] {
+  return rooms.map((r) => ({
+    kind: "room_needs_you" as const,
+    missionId: r.id,
+    missionTitle: r.name,
+    taskId: null,
+    taskTitle: null,
+    detail: "A bot in this room is waiting for you",
+    since: r.updatedAt ?? null,
+  }));
+}
 
 export function buildNeedsYou(missions: NeedsYouMission[], tasks: NeedsYouTask[]): NeedsYouItem[] {
   const byId = new Map(missions.map((m) => [m.id, m]));

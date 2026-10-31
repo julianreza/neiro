@@ -1,6 +1,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { getSupabaseAdmin } from "@/lib/supabase";
-import { asRuntime, MISSION_MODES } from "@/lib/types";
+import { writeDroppingMissing } from "@/lib/missing-column";
+import { APPROVAL_CHOICES, asReasoningEffort, asRuntime, MISSION_MODES } from "@/lib/types";
 import type {
   Agent,
   AgentStage,
@@ -11,7 +12,10 @@ import type {
   MissionPhase,
   MissionStatus,
   MissionTask,
+  ImageAttachment,
+  PendingControl,
   RoutingStatus,
+  SubagentRun,
   TaskRouting,
   TaskStage,
 } from "@/lib/types";
@@ -43,6 +47,7 @@ export type MissionPatch = Partial<{
   runStartedAt: string | null;
   prUrl: string | null;
   prNumber: number | null;
+  completedAt: string | null;
 }>;
 
 export type TaskPatch = Partial<
@@ -58,8 +63,28 @@ export type TaskPatch = Partial<
     retries: number;
     resultOutput: string | null;
     sessionId: string | null;
+    cacheReadTokens: number;
+    cacheWriteTokens: number;
+    runtimeProvider: string | null;
+    runtimeModel: string | null;
+    pendingControls: PendingControl[];
+    admissionId: string | null;
+    executionGeneration: number | null;
+    subagentRuns: SubagentRun[];
   }
 >;
+
+/** mission_tasks columns added by 20261031000000_hermes_full_suite.sql. */
+export const OPTIONAL_TASK_COLUMNS = [
+  "cache_read_tokens",
+  "cache_write_tokens",
+  "runtime_provider",
+  "runtime_model",
+  "pending_controls",
+  "admission_id",
+  "execution_generation",
+  "subagent_runs",
+] as const;
 
 export type NewTaskRow = {
   id: string;
@@ -79,6 +104,9 @@ export type NewArtifactRow = {
   kind: string;
   content: string;
   dedupeKey: string;
+  /** The run that made it, so the task chat can show its tokens and time. */
+  runId?: string | null;
+  runStartedAt?: string | null;
 };
 
 /** Tokens one finished run spent, credited to the agent that ran it. */
@@ -93,6 +121,10 @@ export type TokenUsageRow = {
   tokens: number;
   model?: string | null;
   runtime?: string | null;
+  /** In / out / cache-read split, when the run reports it. */
+  inputTokens?: number;
+  outputTokens?: number;
+  cacheReadTokens?: number;
 };
 
 export interface OrchestratorStore {
@@ -178,6 +210,11 @@ export function mapAgentRow(row: Row): Agent {
     tokenBudget: num(row.token_budget),
     runtime: asRuntime(row.runtime),
     effort: str(row.effort) ?? "",
+    reasoningEffort: asReasoningEffort(row.reasoning_effort),
+    serviceTier: str(row.service_tier),
+    canonicalSessionId: str(row.canonical_session_id),
+    botSection: str(row.bot_section),
+    botHidden: Boolean(row.bot_hidden ?? false),
     createdAt: str(row.created_at) ?? undefined,
     updatedAt: str(row.updated_at) ?? undefined,
   };
@@ -202,6 +239,7 @@ export function mapMissionRow(row: Row): Mission {
     projectId: str(row.project_id),
     runId: str(row.run_id),
     runAgentId: str(row.run_agent_id),
+    phaseChangedAt: str(row.phase_changed_at),
     runStartedAt: str(row.run_started_at),
     lastError: str(row.last_error),
     lastErrorAt: str(row.last_error_at),
@@ -209,8 +247,11 @@ export function mapMissionRow(row: Row): Mission {
     mode: MISSION_MODES.includes(row.mode as MissionMode) ? (row.mode as MissionMode) : null,
     prUrl: str(row.pr_url),
     prNumber: num(row.pr_number),
+    learnSkillOnDone: Boolean(row.learn_skill_on_done ?? false),
+    attachments: mapAttachments(row.attachments),
     createdAt: str(row.created_at) ?? undefined,
     updatedAt: str(row.updated_at) ?? undefined,
+    completedAt: str(row.completed_at),
   };
 }
 
@@ -235,10 +276,70 @@ export function mapTaskRow(row: Row): MissionTask {
     runStartedAt: str(row.run_started_at),
     resultOutput: str(row.result_output),
     sessionId: str(row.session_id),
+    cacheReadTokens: Number(row.cache_read_tokens ?? 0) || 0,
+    cacheWriteTokens: Number(row.cache_write_tokens ?? 0) || 0,
+    runtimeProvider: str(row.runtime_provider),
+    runtimeModel: str(row.runtime_model),
+    pendingControls: mapPendingControls(row.pending_controls),
+    admissionId: str(row.admission_id),
+    executionGeneration: num(row.execution_generation),
+    subagentRuns: mapSubagentRuns(row.subagent_runs),
     ...mapRouting(row),
     createdAt: str(row.created_at) ?? undefined,
     updatedAt: str(row.updated_at) ?? undefined,
   };
+}
+
+function mapAttachments(v: unknown): ImageAttachment[] {
+  if (!Array.isArray(v)) return [];
+  return v.flatMap((a) => {
+    if (!a || typeof a !== "object") return [];
+    const r = a as Row;
+    return typeof r.dataUrl === "string" ? [{ name: String(r.name ?? "image"), dataUrl: r.dataUrl }] : [];
+  });
+}
+
+/** Stored pending_controls rows (already normalized when written). */
+function mapPendingControls(v: unknown): PendingControl[] {
+  if (!Array.isArray(v)) return [];
+  return v.flatMap((c) => {
+    if (!c || typeof c !== "object") return [];
+    const r = c as Row;
+    const requestId = str(r.requestId);
+    if (!requestId) return [];
+    const choices = Array.isArray(r.choices)
+      ? r.choices.filter((x): x is PendingControl["choices"][number] =>
+          APPROVAL_CHOICES.includes(x as PendingControl["choices"][number]))
+      : [];
+    return [{
+      requestId,
+      executionGeneration: num(r.executionGeneration),
+      kind: r.kind === "clarify" ? "clarify" : "approval",
+      tool: str(r.tool) ?? undefined,
+      command: str(r.command) ?? undefined,
+      choices: choices.length ? choices : ["once", "deny"],
+    } satisfies PendingControl];
+  });
+}
+
+function mapSubagentRuns(v: unknown): SubagentRun[] {
+  if (!Array.isArray(v)) return [];
+  return v.flatMap((x) => {
+    if (!x || typeof x !== "object") return [];
+    const r = x as Row;
+    const delegationId = str(r.delegationId);
+    if (!delegationId) return [];
+    const status = r.status === "completed" || r.status === "failed" ? r.status : "running";
+    return [{
+      delegationId,
+      childSessionId: str(r.childSessionId) ?? undefined,
+      status,
+      summary: str(r.summary) ?? undefined,
+      durationSec: num(r.durationSec) ?? undefined,
+      tokens: num(r.tokens) ?? undefined,
+      startedAt: str(r.startedAt),
+    } satisfies SubagentRun];
+  });
 }
 
 export function mapArtifactRow(row: Row): MissionArtifact {
@@ -251,6 +352,8 @@ export function mapArtifactRow(row: Row): MissionArtifact {
     content: String(row.content ?? ""),
     dedupeKey: str(row.dedupe_key),
     createdAt: str(row.created_at) ?? undefined,
+    runId: str(row.run_id),
+    runStartedAt: str(row.run_started_at),
   };
 }
 
@@ -263,6 +366,7 @@ function missionPatchToRow(patch: MissionPatch): Row {
   if (patch.runStartedAt !== undefined) row.run_started_at = patch.runStartedAt;
   if (patch.prUrl !== undefined) row.pr_url = patch.prUrl;
   if (patch.prNumber !== undefined) row.pr_number = patch.prNumber;
+  if (patch.completedAt !== undefined) row.completed_at = patch.completedAt;
   return row;
 }
 
@@ -279,6 +383,14 @@ function taskPatchToRow(patch: TaskPatch): Row {
   if (patch.retries !== undefined) row.retries = patch.retries;
   if (patch.resultOutput !== undefined) row.result_output = patch.resultOutput;
   if (patch.sessionId !== undefined) row.session_id = patch.sessionId;
+  if (patch.cacheReadTokens !== undefined) row.cache_read_tokens = patch.cacheReadTokens;
+  if (patch.cacheWriteTokens !== undefined) row.cache_write_tokens = patch.cacheWriteTokens;
+  if (patch.runtimeProvider !== undefined) row.runtime_provider = patch.runtimeProvider;
+  if (patch.runtimeModel !== undefined) row.runtime_model = patch.runtimeModel;
+  if (patch.pendingControls !== undefined) row.pending_controls = patch.pendingControls;
+  if (patch.admissionId !== undefined) row.admission_id = patch.admissionId;
+  if (patch.executionGeneration !== undefined) row.execution_generation = patch.executionGeneration;
+  if (patch.subagentRuns !== undefined) row.subagent_runs = patch.subagentRuns;
   if (patch.routingStatus !== undefined) row.routing_status = patch.routingStatus;
   if (patch.layaAgentId !== undefined) row.laya_agent_id = patch.layaAgentId;
   if (patch.humanAgentId !== undefined) row.human_agent_id = patch.humanAgentId;
@@ -300,7 +412,7 @@ export function createSupabaseStore(client?: SupabaseClient): OrchestratorStore 
   return {
     async getMissionDetail(missionId) {
       const supabase = db();
-      const [mRes, tRes, aRes] = await Promise.all([
+      const [mRes, tRes, aRes, uRes] = await Promise.all([
         supabase.from("missions").select("*").eq("id", missionId).single(),
         supabase
           .from("mission_tasks")
@@ -312,6 +424,13 @@ export function createSupabaseStore(client?: SupabaseClient): OrchestratorStore 
           .select("*")
           .eq("mission_id", missionId)
           .order("created_at", { ascending: true }),
+        // select("*") so a missing model column (older DB) still reads.
+        supabase
+          .from("agent_token_usage")
+          .select("*")
+          .eq("mission_id", missionId)
+          .order("created_at", { ascending: true })
+          .limit(5_000),
       ]);
 
       if (mRes.error || !mRes.data) {
@@ -324,6 +443,23 @@ export function createSupabaseStore(client?: SupabaseClient): OrchestratorStore 
         ...mapMissionRow(mRes.data as Row),
         tasks: (tRes.data ?? []).map((r) => mapTaskRow(r as Row)),
         artifacts: (aRes.data ?? []).map((r) => mapArtifactRow(r as Row)),
+        // Token usage is extra: a missing table just means no footer facts.
+        runUsage: uRes.error
+          ? []
+          : (uRes.data ?? []).map((r) => {
+              const row = r as Row;
+              return {
+                runId: String(row.run_id ?? ""),
+                taskId: String(row.task_id ?? ""),
+                stage: String(row.stage ?? ""),
+                tokens: Number(row.tokens) || 0,
+                model: row.model ? String(row.model) : null,
+                inputTokens: row.input_tokens == null ? null : Number(row.input_tokens) || 0,
+                outputTokens: row.output_tokens == null ? null : Number(row.output_tokens) || 0,
+                cacheReadTokens: row.cache_read_tokens == null ? null : Number(row.cache_read_tokens) || 0,
+                at: String(row.created_at ?? ""),
+              };
+            }),
       };
     },
 
@@ -363,21 +499,33 @@ export function createSupabaseStore(client?: SupabaseClient): OrchestratorStore 
     },
 
     async updateTaskIf(id, guard, patch) {
-      let query = db()
-        .from("mission_tasks")
-        .update({ ...taskPatchToRow(patch), updated_at: new Date().toISOString() })
-        .eq("id", id)
-        .eq("stage", guard.stage);
-      query = guard.runId === null ? query.is("run_id", null) : query.eq("run_id", guard.runId);
-      if (guard.routingStatus !== undefined) {
-        query =
-          guard.routingStatus === null
-            ? query.is("routing_status", null)
-            : query.eq("routing_status", guard.routingStatus);
-      }
-      const { data, error } = await query.select("id");
+      let matched = 0;
+      const write = async (values: Row) => {
+        let query = db()
+          .from("mission_tasks")
+          .update(values)
+          .eq("id", id)
+          .eq("stage", guard.stage);
+        query = guard.runId === null ? query.is("run_id", null) : query.eq("run_id", guard.runId);
+        if (guard.routingStatus !== undefined) {
+          query =
+            guard.routingStatus === null
+              ? query.is("routing_status", null)
+              : query.eq("routing_status", guard.routingStatus);
+        }
+        const { data, error } = await query.select("id");
+        matched = (data ?? []).length;
+        return { error };
+      };
+      // A column from a migration that was never run is dropped, not fatal.
+      const { error } = await writeDroppingMissing(
+        { ...taskPatchToRow(patch), updated_at: new Date().toISOString() },
+        OPTIONAL_TASK_COLUMNS,
+        write,
+        "orchestrator-store",
+      );
       if (error) throw new Error(error.message);
-      return (data ?? []).length === 1;
+      return matched === 1;
     },
 
     async claimTask(taskId, token) {
@@ -414,20 +562,21 @@ export function createSupabaseStore(client?: SupabaseClient): OrchestratorStore 
     },
 
     async insertArtifactOnce(row) {
-      const { error } = await db()
-        .from("mission_artifacts")
-        .upsert(
-          {
-            id: crypto.randomUUID(),
-            mission_id: row.missionId,
-            task_id: row.taskId ?? null,
-            title: row.title,
-            kind: row.kind,
-            content: row.content,
-            dedupe_key: row.dedupeKey,
-          },
-          { onConflict: "dedupe_key", ignoreDuplicates: true },
-        );
+      const base = {
+        id: crypto.randomUUID(),
+        mission_id: row.missionId,
+        task_id: row.taskId ?? null,
+        title: row.title,
+        kind: row.kind,
+        content: row.content,
+        dedupe_key: row.dedupeKey,
+      };
+      const write = (values: Row) =>
+        db().from("mission_artifacts").upsert(values, { onConflict: "dedupe_key", ignoreDuplicates: true });
+      const run = row.runId ? { run_id: row.runId, run_started_at: row.runStartedAt ?? null } : {};
+      let { error } = await write({ ...base, ...run });
+      // Before 20261031000100_artifact_run.sql those columns are missing; still save the artifact.
+      if (error && row.runId && (error.code === "PGRST204" || error.code === "42703")) ({ error } = await write(base));
       if (error) throw new Error(error.message);
     },
 
@@ -441,11 +590,20 @@ export function createSupabaseStore(client?: SupabaseClient): OrchestratorStore 
         stage: row.stage,
         tokens: Math.max(0, Math.round(row.tokens)),
       };
-      const write = (values: Row) =>
-        db().from("agent_token_usage").upsert(values, { onConflict: "run_id", ignoreDuplicates: true });
-      let { error } = await write({ ...base, model: row.model ?? null, runtime: row.runtime ?? null });
-      // Before the model/runtime migration those columns are missing; still record the tokens.
-      if (error && (error.code === "PGRST204" || error.code === "42703")) ({ error } = await write(base));
+      const write = async (values: Row) =>
+        await db().from("agent_token_usage").upsert(values, { onConflict: "run_id", ignoreDuplicates: true });
+      const split = {
+        ...(row.inputTokens !== undefined ? { input_tokens: row.inputTokens } : {}),
+        ...(row.outputTokens !== undefined ? { output_tokens: row.outputTokens } : {}),
+        ...(row.cacheReadTokens !== undefined ? { cache_read_tokens: row.cacheReadTokens } : {}),
+      };
+      // Columns from later migrations are dropped if missing; the tokens always land.
+      const { error } = await writeDroppingMissing(
+        { ...base, model: row.model ?? null, runtime: row.runtime ?? null, ...split },
+        ["model", "runtime", "input_tokens", "output_tokens", "cache_read_tokens"],
+        write,
+        "token-usage",
+      );
       if (error) throw new Error(error.message);
     },
 

@@ -2,7 +2,14 @@ import { NextResponse } from "next/server";
 import { connection } from "next/server";
 import type { NextRequest } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
-import { AppConfigError, isMissingRuntimeColumn, parseRuntimeFields, RUNTIME_MIGRATION_HINT } from "@/lib/types";
+import {
+  AppConfigError,
+  HERMES_SUITE_MIGRATION_HINT,
+  isMissingRuntimeColumn,
+  parseHermesModelFields,
+  parseRuntimeFields,
+  RUNTIME_MIGRATION_HINT,
+} from "@/lib/types";
 import { parseTokenBudget } from "@/lib/budget";
 import type { Agent, AgentPublic } from "@/lib/types";
 
@@ -104,6 +111,10 @@ export async function POST(request: NextRequest) {
     if (!runtimeFields.ok) return NextResponse.json({ error: runtimeFields.error }, { status: 400 });
     if (runtimeFields.runtime && runtimeFields.runtime !== "hermes") row.runtime = runtimeFields.runtime;
     if (runtimeFields.effort) row.effort = runtimeFields.effort;
+    const modelFields = parseHermesModelFields(body);
+    if (!modelFields.ok) return NextResponse.json({ error: modelFields.error }, { status: 400 });
+    if (modelFields.reasoning_effort) row.reasoning_effort = modelFields.reasoning_effort;
+    if (modelFields.service_tier) row.service_tier = modelFields.service_tier;
 
     const { data, error } = await supabase
       .from("agents")
@@ -112,7 +123,11 @@ export async function POST(request: NextRequest) {
       .single();
 
     if (error) {
-      const message = isMissingRuntimeColumn(error) ? RUNTIME_MIGRATION_HINT : error.message;
+      const message = isMissingRuntimeColumn(error)
+        ? RUNTIME_MIGRATION_HINT
+        : /reasoning_effort|service_tier/.test(error.message)
+          ? HERMES_SUITE_MIGRATION_HINT
+          : error.message;
       return NextResponse.json({ error: message }, { status: 500 });
     }
 

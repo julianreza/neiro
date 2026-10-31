@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { advanceMission, reportAdvanceError, type OrchestratorDeps } from "./orchestrator";
-import { budgetBlock, parseTokenBudget } from "./budget";
+import { budgetBlock, cacheSummary, parseTokenBudget } from "./budget";
 import { shortHash, webhookPayload } from "./notifications";
 import type { NotificationEvent } from "./notifications";
 import { FakeHermes } from "./test-fakes/fake-hermes";
@@ -190,4 +190,15 @@ test("webhook payload carries a Slack-style text with a link", () => {
     "https://neiro.example/"
   );
   assert.equal(body.text, "Done\nAll good\nhttps://neiro.example/missions/m%201");
+});
+
+test("cache summary: totals and the share read from cache", () => {
+  assert.deepEqual(
+    cacheSummary([
+      { tokens: 600, cacheReadTokens: 100, cacheWriteTokens: 20 },
+      { tokens: 400, cacheReadTokens: 21 },
+    ]),
+    { readTokens: 121, writeTokens: 20, readShare: 12.1 },
+  );
+  assert.deepEqual(cacheSummary([{ tokens: 0 }]), { readTokens: 0, writeTokens: 0, readShare: 0 });
 });

@@ -1,13 +1,22 @@
 import { randomUUID } from "node:crypto";
 import {
   createHermesSession,
+  forkHermesSession,
+  getHermesDetailedInventory,
+  getHermesServerCapabilities,
   getHermesRun,
+  resolveHermesUnknownRun,
+  sendHermesSessionChat,
   openHermesRunEventStream,
   startHermesRun,
   stopHermesRun,
   submitHermesRunApproval,
   submitHermesRunClarify,
+  type HermesControlDetails,
+  type HermesDetailedInventory,
   type HermesRunStatus,
+  type HermesServerCapabilities,
+  type HermesSessionChatInput,
   type HermesStartRunInput,
   type HermesStartRunResult,
 } from "@/lib/hermes";
@@ -20,7 +29,9 @@ import {
   stopCliRun,
   type CliRuntime,
 } from "@/lib/cli-runtime";
-import { asRuntime, type Agent } from "@/lib/types";
+import { asRuntime, UnsupportedRuntimeError } from "@/lib/types";
+import type { Agent, ApprovalChoice, PendingControl } from "@/lib/types";
+import { normalizePendingControls } from "@/lib/approvals";
 
 /**
  * One door for every agent run. Hermes agents go to the Hermes server; the
@@ -82,23 +93,85 @@ export async function openRunEventStream(
   return cliRuntimeOfRunId(runId) ? openCliEventStream(runId, signal) : openHermesRunEventStream(agent, runId, signal);
 }
 
-/** An Oh My Pi run waits for the answer; Hermes gets it over its API. */
+/**
+ * An Oh My Pi run waits for the answer; Hermes gets it over its API.
+ * `true` = once, `false` = deny. Oh My Pi has only Allow / Deny, so once,
+ * session and always all allow.
+ */
 export async function submitRunApproval(
   agent: Agent,
   runId: string,
-  approved: boolean,
-  details?: { requestId?: string; executionGeneration?: number },
+  choice: ApprovalChoice | boolean,
+  details?: HermesControlDetails,
 ): Promise<boolean> {
-  return cliRuntimeOfRunId(runId)
-    ? answerCliApproval(runId, approved, details?.requestId)
-    : submitHermesRunApproval(agent, runId, approved, details);
+  if (cliRuntimeOfRunId(runId)) {
+    const allow = typeof choice === "boolean" ? choice : choice !== "deny";
+    return answerCliApproval(runId, allow, details?.requestId ?? undefined);
+  }
+  return submitHermesRunApproval(agent, runId, choice, details);
 }
 
 export async function submitRunClarify(
   agent: Agent,
   runId: string,
   reply: string,
-  details?: { requestId?: string; executionGeneration?: number },
+  details?: HermesControlDetails,
 ): Promise<boolean> {
   return cliRuntimeOfRunId(runId) ? false : submitHermesRunClarify(agent, runId, reply, details);
+}
+
+/** Hermes can release a run left "unknown" after a crash; a CLI run cannot be. */
+export async function resolveUnknownRun(
+  agent: Agent,
+  runId: string,
+  details: { admissionId: string; executionGeneration: number },
+): Promise<boolean> {
+  return cliRuntimeOfRunId(runId) ? false : resolveHermesUnknownRun(agent, runId, details);
+}
+
+export async function forkSession(agent: Agent, sessionId: string, title?: string): Promise<string> {
+  if (cliOf(agent) || sessionId.startsWith("cli-")) throw new UnsupportedRuntimeError();
+  return forkHermesSession(agent, sessionId, title);
+}
+
+/** Compacts a session's context; its history stays readable. */
+export async function compactSession(agent: Agent, sessionId: string): Promise<void> {
+  if (cliOf(agent)) throw new UnsupportedRuntimeError();
+  await sendHermesSessionChat(agent, sessionId, { prompt: "/compact" });
+}
+
+const NO_CAPABILITIES: HermesServerCapabilities = { available: false, features: {}, endpoints: {} };
+
+export async function getCapabilities(agent: Agent): Promise<HermesServerCapabilities> {
+  return cliOf(agent) ? NO_CAPABILITIES : getHermesServerCapabilities(agent);
+}
+
+export async function getInventory(agent: Agent): Promise<HermesDetailedInventory> {
+  return cliOf(agent) ? { skills: [], toolsets: [] } : getHermesDetailedInventory(agent);
+}
+
+/** One whole turn in a session, for runtimes that have session chat. */
+export async function sessionChat(
+  agent: Agent,
+  sessionId: string,
+  input: HermesSessionChatInput,
+): Promise<{ output: string; tokens: number }> {
+  if (cliOf(agent)) throw new UnsupportedRuntimeError();
+  return sendHermesSessionChat(agent, sessionId, input);
+}
+
+/**
+ * The waiting control `requestId` names (else the first of `kind`), read
+ * fresh from the run so its execution generation and choices are current.
+ */
+export async function findPendingControl(
+  agent: Agent,
+  runId: string,
+  requestId: string | undefined,
+  kind: "approval" | "clarify" = "approval",
+): Promise<PendingControl | null> {
+  const run = await getRun(agent, runId);
+  const controls = run.controls ?? normalizePendingControls(run.pending_controls);
+  const ofKind = controls.filter((c) => c.kind === kind);
+  return (requestId ? ofKind.find((c) => c.requestId === requestId) : undefined) ?? ofKind[0] ?? null;
 }

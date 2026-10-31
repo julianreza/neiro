@@ -1,18 +1,22 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { AgentMarkdown, CopyButton } from "@/components/agent-markdown";
-import { FilesRead, ReplyTime } from "@/components/reply-parts";
-import { Check, ChevronRight, CircleAlert, FolderGit2, Loader2, MessagesSquare, Plus, RotateCcw, Send } from "lucide-react";
+import { AgentMarkdown } from "@/components/agent-markdown";
+import { FilesRead, ReplyMeta, StepTrail, took } from "@/components/reply-parts";
+import { ThinkingBlock, WorkSummary, reasoningOf } from "@/components/reply-extras";
+import { ChevronRight, CircleAlert, FolderGit2, Loader2, MessagesSquare, Plus, RotateCcw, Send } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Picker } from "@/components/ui/picker";
-import { Textarea } from "@/components/ui/textarea";
+import { AttachImages, useImageDrop } from "@/components/attach-images";
+import { MentionInput, useMentionBots } from "@/components/mention-input";
+import type { ImageAttachment } from "@/lib/types";
 import { AgentBot, agentLook, roleForAgent } from "@/components/agent-bot";
 import { ApprovalAsk, AskHand } from "@/components/approval-ask";
 import { DeleteButton } from "@/components/delete-button";
 import { useRole } from "@/hooks/use-role";
 import { useRunSteps } from "@/hooks/use-run-steps";
+import { useSavedSteps } from "@/hooks/use-saved-steps";
 import { normalizeApprovals, type PendingApproval } from "@/lib/approvals";
 import { timeAgo } from "@/lib/client-api";
 import { splitAnswerFiles } from "@/lib/ask-history";
@@ -128,6 +132,10 @@ export function ChatView() {
     }
   }
 
+  const mentionBots = useMentionBots();
+  const [images, setImages] = useState<ImageAttachment[]>([]);
+  const imageDrop = useImageDrop(images, setImages);
+
   async function send() {
     const question = draft.trim();
     if (!question) {
@@ -147,13 +155,19 @@ export function ChatView() {
       const res = await fetch("/api/ask", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ question, workspace_path: path || undefined, session_id: last?.id }),
+        body: JSON.stringify({
+          question,
+          workspace_path: path || undefined,
+          session_id: last?.id,
+          images: images.length ? images : undefined,
+        }),
       });
       const data = (await res.json().catch(() => ({}))) as { runId?: string; error?: string };
       if (!res.ok || !data.runId) {
         toast.error(data.error ?? `Couldn't send (${res.status})`);
         return false;
       }
+      setImages([]);
       await load();
       setSelected(chat ? chat.id : data.runId);
       return true;
@@ -181,7 +195,7 @@ export function ChatView() {
         </span>
         <div className="min-w-0 flex-1">
           <h1 className="text-2xl font-semibold tracking-tight">Chat</h1>
-          <p className="text-sm text-muted-foreground">Ask the team about a project, or about anything.</p>
+          <p className="text-sm text-muted-foreground">Start a general conversation with the team about a project or anything else.</p>
         </div>
       </div>
 
@@ -285,6 +299,12 @@ export function ChatView() {
                 canAnswer={canSend}
                 answer={(approval, approve) => answerApproval(m, approval, approve)}
                 retry={running || sending ? undefined : () => void ask(m.question)}
+                onFollowUp={
+                  canSend && m.id === chat?.messages.at(-1)?.id
+                    ? (text) => void ask(text)
+                    : undefined
+                }
+                followUpBusy={Boolean(running) || sending}
               />
             ))}
           </div>
@@ -297,10 +317,12 @@ export function ChatView() {
                 void send();
               }}
             >
-              <Textarea
-                ref={input}
+              <MentionInput
+                inputRef={input}
                 value={draft}
-                onChange={(event) => setDraft(event.target.value)}
+                onValueChange={setDraft}
+                bots={mentionBots}
+                {...imageDrop}
                 onKeyDown={(event) => {
                   if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
                     event.preventDefault();
@@ -322,8 +344,9 @@ export function ChatView() {
                     options={[{ value: "", label: "No folder" }, ...projects.map((p) => ({ value: p.id, label: p.name }))]}
                   />
                 ) : (
-                  <span className="text-xs text-muted-foreground">⌘ / Ctrl + Enter</span>
+                  <span className="text-xs text-muted-foreground">⌘ / Ctrl + Enter · @ to mention a bot</span>
                 )}
+                <AttachImages images={images} onChange={setImages} disabled={sending} />
                 <Button type="submit" disabled={sending || !draft.trim() || running !== null}>
                   {sending ? <Loader2 className="animate-spin" aria-hidden="true" /> : <Send aria-hidden="true" />}
                   Send
@@ -344,18 +367,32 @@ export function ChatTurn({
   canAnswer,
   answer,
   retry,
+  onFollowUp,
+  followUpBusy,
 }: {
   row: AskQuestionDTO;
   approvals: PendingApproval[];
   canAnswer: boolean;
   answer: (approval: PendingApproval, approve: boolean) => Promise<string | null>;
   retry?: () => void;
+  /** Send a suggested next step; only the newest turn gets buttons. */
+  onFollowUp?: (text: string) => void;
+  followUpBusy?: boolean;
 }) {
   const botRole = roleForAgent(row.agentName || "Q&A");
   const answerParts = splitAnswerFiles(row.answer);
   const asleep = row.status === "failed" || row.status === "stopped";
   const asks = approvals.length > 0;
   const done = !asks && row.status !== "running" && !asleep;
+  // Steps stream only while the run lives; a turn seen running keeps them
+  // after it finishes, for the "Worked 2m · 14 steps" summary.
+  const [watched, setWatched] = useState(row.status === "running");
+  if (row.status === "running" && !watched) setWatched(true);
+  const { steps: liveSteps } = useRunSteps(watched ? row.id : null, row.agentId);
+  // Not seen running here (a reload, an old chat): read the steps saved when it ended.
+  const saved = useSavedSteps(done && liveSteps.length === 0 ? row.id : null);
+  const steps = liveSteps.length > 0 ? liveSteps : saved;
+  const spent = row.finishedAt ? took(row.createdAt, row.finishedAt) : "";
   return (
     <>
       <p className="chat-you">{row.question}</p>
@@ -378,18 +415,30 @@ export function ChatTurn({
             {asks ? (
               <ApprovalAsk agentName={row.agentName || "Q&A"} approvals={approvals} readOnly={!canAnswer} send={answer} />
             ) : row.status === "running" ? (
-              <WorkingSteps runId={row.id} agentId={row.agentId} />
+              <StepTrail steps={steps} live label={steps.length === 0 ? "Reading the question…" : "Thinking…"} />
             ) : asleep ? null : (
-              <FoldedAnswer text={answerParts.body} />
+              <>
+                <WorkSummary steps={steps} spent={spent} files={answerParts.files.length}>
+                  <StepTrail steps={steps} live={false} all />
+                </WorkSummary>
+                <ThinkingBlock text={reasoningOf(steps)} />
+                <FoldedAnswer text={answerParts.body} onOption={onFollowUp} optionsDisabled={followUpBusy} />
+              </>
             )}
             <FilesRead files={answerParts.files} />
-            {done && answerParts.body && (
-              <div className="chat-foot">
-                <CopyButton text={answerParts.body} label="Copy answer" />
-              </div>
-            )}
           </div>
-          <ReplyTime at={row.createdAt} finishedAt={row.status !== "running" ? row.finishedAt : null} />
+          {row.status !== "running" && (
+            <ReplyMeta
+              at={row.createdAt}
+              finishedAt={row.finishedAt}
+              model={row.model}
+              tokens={row.tokens}
+              inputTokens={row.inputTokens}
+              outputTokens={row.outputTokens}
+              cacheReadTokens={row.cacheReadTokens}
+              copyText={done ? answerParts.body : undefined}
+            />
+          )}
         </div>
       </div>
     </>
@@ -399,13 +448,21 @@ export function ChatTurn({
 const FOLD_AT = 700;
 
 /** A long answer starts folded behind a fade, with a Show all button. */
-function FoldedAnswer({ text }: { text: string }) {
+function FoldedAnswer({
+  text,
+  onOption,
+  optionsDisabled,
+}: {
+  text: string;
+  onOption?: (text: string) => void;
+  optionsDisabled?: boolean;
+}) {
   const long = text.length > FOLD_AT;
   const [open, setOpen] = useState(false);
   return (
     <>
       <div className="composer-markdown chat-answer" data-folded={long && !open ? "" : undefined}>
-        <AgentMarkdown text={text} />
+        <AgentMarkdown text={text} onOption={onOption} optionsDisabled={optionsDisabled} />
       </div>
       {long && (
         <button type="button" className="story-more chat-more" aria-expanded={open} onClick={() => setOpen((v) => !v)}>
@@ -447,26 +504,3 @@ function FailedReply({ row, retry }: { row: AskQuestionDTO; retry?: () => void }
   );
 }
 
-/** While the agent works: its latest steps, the newest one pulsing. */
-function WorkingSteps({ runId, agentId }: { runId: string; agentId: string | null }) {
-  const { steps } = useRunSteps(runId, agentId);
-  const tools = steps.filter((step) => step.kind === "tool").slice(-3).map((step) => step.text);
-  const writing = steps.length > 0 && steps[steps.length - 1].kind === "message";
-  const items = [...tools, ...(writing ? ["Writing the answer"] : [])];
-  if (items.length === 0) items.push("Reading the question");
-  return (
-    <ol className="chat-steps" role="status" aria-label="Answering" aria-live="polite">
-      {items.map((text, i) => {
-        const now = i === items.length - 1;
-        return (
-          <li key={`${i}-${text}`} data-state={now ? "now" : "done"}>
-            <span className="chat-step-mark" aria-hidden="true">
-              {!now && <Check />}
-            </span>
-            <span className="min-w-0 truncate">{text}</span>
-          </li>
-        );
-      })}
-    </ol>
-  );
-}

@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { formatTokens, missionHref, timeAgo } from "@/lib/client-api";
 import { useRunSteps } from "@/hooks/use-run-steps";
 import type { LogStep } from "@/lib/run-events";
+import type { SubagentRun } from "@/lib/types";
 import type { ActiveRunDTO } from "@/app/api/runs/active/route";
 
 const POLL_MS = 10_000;
@@ -15,11 +16,26 @@ const POLL_MS = 10_000;
 const KIND_LABEL: Record<LogStep["kind"], string> = {
   tool: "Tool",
   message: "Says",
+  reasoning: "Thinking",
+  commentary: "Notes",
+  subagent: "Sub-agent",
   approval: "Asks you",
   done: "Done",
   error: "Error",
   info: "Info",
 };
+
+/** Delegation id, status, seconds and tokens of one sub-agent. */
+function SubagentChips({ run }: { run: SubagentRun }) {
+  return (
+    <span className="log-subagent-chips">
+      <span className="code-chip">{run.delegationId.slice(0, 8)}</span>
+      <span data-status={run.status}>{run.status === "running" ? "running" : run.status}</span>
+      {run.durationSec !== undefined && <span className="tabular-nums">{run.durationSec}s</span>}
+      {run.tokens !== undefined && <span className="tabular-nums">{formatTokens(run.tokens)}</span>}
+    </span>
+  );
+}
 
 type RunStatus = "work" | "wait" | "gone";
 
@@ -261,6 +277,7 @@ function RunInspector({
                 <span className="min-w-0 flex-1 truncate">
                   {step.kind === "approval" ? <b>{step.text}</b> : step.text}
                 </span>
+                {step.subagent && <SubagentChips run={step.subagent} />}
                 <span className="text-xs text-muted-foreground tabular-nums">{clock(step.at)}</span>
               </button>
             </li>
@@ -284,6 +301,24 @@ function RunInspector({
               {KIND_LABEL[focus.kind]}
               {focus.at && <> · {clock(focus.at)}</>}
             </p>
+            {focus.kind === "reasoning" && (
+              <details className="log-thinking" open>
+                <summary>Thinking</summary>
+                <p>{focus.text}</p>
+              </details>
+            )}
+            {focus.subagent && (
+              <div className="log-subagent">
+                <p className="flex flex-wrap items-center gap-2 text-xs">
+                  <SubagentChips run={focus.subagent} />
+                </p>
+                {focus.subagent.childSessionId && (
+                  <p className="mt-2 text-xs text-muted-foreground">
+                    Session <span className="code-chip">{focus.subagent.childSessionId}</span>
+                  </p>
+                )}
+              </div>
+            )}
             {focus.detail && (
               <div className="log-term">
                 <pre>{focus.detail}</pre>

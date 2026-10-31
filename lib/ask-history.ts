@@ -1,4 +1,5 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { writeDroppingMissing } from "@/lib/missing-column";
 
 /** One question asked in Ask mode, as History shows it. */
 export type AskStatus = "running" | "completed" | "failed" | "stopped";
@@ -16,6 +17,12 @@ export type AskQuestionDTO = {
   answer: string;
   error: string | null;
   tokens: number;
+  /** The model that answered (20261030000300_ask_model.sql); null on older rows. */
+  model?: string | null;
+  /** Token split (20261031000300_token_split.sql); null when not recorded. */
+  inputTokens?: number | null;
+  outputTokens?: number | null;
+  cacheReadTokens?: number | null;
   createdAt: string;
   finishedAt: string | null;
 };
@@ -24,7 +31,8 @@ export const ASK_TABLE = "ask_questions";
 
 /** Split the "Files read:" line the ask rules request off the answer. */
 export function splitAnswerFiles(output: string): { body: string; files: string[] } {
-  const match = output.match(/\n\s*\**files read:?\**:?\s*(.+)\s*$/i);
+  // An "[OPTIONS: …]" line after it stays with the body (it becomes buttons).
+  const match = output.match(/\n\s*\**files read:?\**:?\s*([^\n]+?)\s*(\n\s*\[OPTIONS:[^\]\n]*\]\s*)?$/i);
   if (!match) return { body: output.trim(), files: [] };
   const files = match[1]
     .split(/[,\n]/)
@@ -32,11 +40,23 @@ export function splitAnswerFiles(output: string): { body: string; files: string[
     // Agents sometimes write "none" when they read no files.
     .filter((f) => f && !/^(none|no files?|n\/a|-)\.?$/i.test(f))
     .slice(0, 12);
-  return { body: output.slice(0, match.index).trim(), files };
+  return { body: `${output.slice(0, match.index)}${match[2] ?? ""}`.trim(), files };
 }
 
 /** One finished question and its answer, from the composer's Ask thread. */
-export type AskTurn = { question: string; answer: string };
+export type AskTurn = {
+  question: string;
+  answer: string;
+  /** Shown under an earlier turn in the Ask thread; optional, context only needs the text. */
+  runId?: string;
+  model?: string | null;
+  tokens?: number;
+  inputTokens?: number | null;
+  outputTokens?: number | null;
+  cacheReadTokens?: number | null;
+  startedAt?: string;
+  finishedAt?: string | null;
+};
 
 const CONTEXT_LIMIT = 12000;
 
@@ -77,7 +97,16 @@ export function askStatusFromRun(status: string): Exclude<AskStatus, "running" |
 
 /** The fields to save once a run has finished, or null while it still runs. */
 export function askResultUpdate(
-  run: { status: string; output?: string; tokens?: number; model?: string; error?: string },
+  run: {
+    status: string;
+    output?: string;
+    tokens?: number;
+    model?: string;
+    error?: string;
+    input_tokens?: number;
+    output_tokens?: number;
+    cache_read_tokens?: number;
+  },
   now: Date = new Date(),
 ) {
   const status = askStatusFromRun(run.status);
@@ -88,10 +117,16 @@ export function askResultUpdate(
     tokens: Number.isFinite(run.tokens) ? Math.max(0, Math.round(run.tokens ?? 0)) : 0,
     // The model Hermes really used; an agent with no model runs on its default.
     ...(run.model ? { model: run.model } : {}),
+    // In / out split (20261031000300_token_split.sql), when the run says it.
+    ...(run.input_tokens !== undefined ? { input_tokens: run.input_tokens } : {}),
+    ...(run.output_tokens !== undefined ? { output_tokens: run.output_tokens } : {}),
+    ...(run.cache_read_tokens !== undefined ? { cache_read_tokens: run.cache_read_tokens } : {}),
     error: status === "completed" ? null : (run.error || `The question ended: ${run.status}`),
     finished_at: now.toISOString(),
   };
 }
+
+const numOrNull = (v: unknown) => (v === null || v === undefined || v === "" ? null : Number(v) || 0);
 
 export function mapAskRow(row: Record<string, unknown>): AskQuestionDTO {
   const status = String(row.status) as AskStatus;
@@ -107,6 +142,10 @@ export function mapAskRow(row: Record<string, unknown>): AskQuestionDTO {
     answer: typeof row.answer === "string" ? row.answer : "",
     error: typeof row.error === "string" ? row.error : null,
     tokens: Number(row.tokens) || 0,
+    model: typeof row.model === "string" && row.model ? row.model : null,
+    inputTokens: numOrNull(row.input_tokens),
+    outputTokens: numOrNull(row.output_tokens),
+    cacheReadTokens: numOrNull(row.cache_read_tokens),
     createdAt: String(row.created_at),
     finishedAt: typeof row.finished_at === "string" ? row.finished_at : null,
   };
@@ -147,6 +186,8 @@ export async function recordAskStart(
     /** The model and runtime the agent answered with, kept even if the agent changes later. */
     model?: string;
     runtime?: string;
+    /** Where to send the answer once it is done, e.g. "telegram:<chatId>". */
+    replyTo?: string;
   },
 ) {
   const base = {
@@ -169,15 +210,15 @@ export async function recordAskStart(
     session_id: row.sessionId ?? row.id, // 20261029000300_ask_session.sql
     model: row.model || null, // 20261030000300_ask_model.sql
     runtime: row.runtime || null, // 20261030000300_ask_model.sql
+    reply_to: row.replyTo || null, // 20261031000000_hermes_full_suite.sql
   };
-  let { error } = await save({ ...base, ...optional });
-  while (error) {
-    const missing = Object.keys(optional).find((col) => new RegExp(`\\b${col}\\b`).test(error!.message));
-    if (!missing) break;
-    console.warn(`[ask-history] column ${missing} is missing; saving the question without it`);
-    delete optional[missing];
-    ({ error } = await save({ ...base, ...optional }));
-  }
+  if (!row.replyTo) delete optional.reply_to;
+  const { error } = await writeDroppingMissing(
+    { ...base, ...optional },
+    Object.keys(optional),
+    save,
+    "ask-history",
+  );
   if (error) console.warn("[ask-history] save question failed:", error.message);
 }
 
@@ -185,13 +226,29 @@ export async function recordAskStart(
 export async function recordAskResult(
   supabase: SupabaseClient,
   runId: string,
-  run: { status: string; output?: string; tokens?: number; model?: string; error?: string },
+  run: {
+    status: string;
+    output?: string;
+    tokens?: number;
+    model?: string;
+    error?: string;
+    input_tokens?: number;
+    output_tokens?: number;
+    cache_read_tokens?: number;
+  },
 ) {
   const update = askResultUpdate(run);
   if (!update) return null;
+  // Optional columns from later migrations are dropped if missing, so the
+  // answer itself is always saved.
   await bestEffort(
     "save answer",
-    supabase.from(ASK_TABLE).update(update).eq("id", runId).eq("status", "running"),
+    writeDroppingMissing(
+      update,
+      ["model", "input_tokens", "output_tokens", "cache_read_tokens"],
+      async (row) => await supabase.from(ASK_TABLE).update(row).eq("id", runId).eq("status", "running"),
+      "ask-history",
+    ),
   );
   return update;
 }

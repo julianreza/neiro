@@ -1,5 +1,7 @@
 "use client";
 
+import { ProjectQuality } from "@/components/project-quality";
+
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { FolderGit2, GitBranch, Loader2, MessageCircleQuestionMark, Plus, Rocket } from "lucide-react";
 import { toast } from "sonner";
@@ -397,6 +399,8 @@ export function ProjectHub() {
               <ProjectSettings
                 project={project}
                 canDelete={canAdd}
+                key={`settings-${project.id}`}
+                onDefaultsChanged={(defaults) => setSaved((list) => list.state === "ready" ? { state: "ready", data: list.data.map((item) => item.id === project.id ? { ...item, defaults } : item) } : list)}
                 onDeleted={() => {
                   setSaved((list) =>
                     list.state === "ready" ? { state: "ready", data: list.data.filter((p) => p.id !== project.id) } : list,
@@ -407,11 +411,14 @@ export function ProjectHub() {
               />
             </header>
 
+            <ProjectQuality key={`quality-${project.id}`} projectId={project.id} />
+
             {canAdd && (
               <ProjectComposer
-                key={project.id}
+                key={`composer-${project.id}`}
                 projectId={project.id}
                 path={project.path}
+                defaults={project.defaults}
                 inputRef={composerRef}
                 onChanged={refresh}
                 onOpen={(item) => {

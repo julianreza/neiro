@@ -8,7 +8,8 @@ import { useCallback, useEffect, useState } from "react";
  */
 export type LiveState<T> =
   | { source: "loading" }
-  | { source: "live"; data: T }
+  | { source: "error"; reason: string }
+  | { source: "live"; data: T; lastUpdated: string; staleReason?: string }
   | { source: "demo"; data: T; reason: string };
 
 /** Human-readable reason for falling back to demo data. */
@@ -36,13 +37,15 @@ export function useLiveData<T>(
   url: string | null,
   demo: T,
   parse: (json: unknown) => T,
-): LiveState<T> & { reload: () => void } {
+): LiveState<T> & { reload: () => void; showDemo: () => void } {
   const [result, setResult] = useState<{ url: string | null; state: LiveState<T> }>({
     url: null,
     state: { source: "loading" },
   });
   const [nonce, setNonce] = useState(0);
   const reload = useCallback(() => setNonce((n) => n + 1), []);
+  const showDemo = useCallback(() => setResult((previous) => previous.url === url && previous.state.source === "error"
+    ? { url, state: { source: "demo", data: demo, reason: previous.state.reason } } : previous), [url, demo]);
 
   useEffect(() => {
     if (url === null) return;
@@ -50,23 +53,29 @@ export function useLiveData<T>(
     const settle = (state: LiveState<T>) => {
       if (!cancelled) setResult({ url, state });
     };
+    const fail = (reason: string) => {
+      if (cancelled) return;
+      setResult((previous) => previous.url === url && previous.state.source === "live"
+        ? { url, state: { ...previous.state, staleReason: reason } }
+        : { url, state: previous.url === url && previous.state.source === "demo" ? previous.state : { source: "error", reason } });
+    };
     (async () => {
       try {
         const res = await fetch(url, { cache: "no-store" });
         if (!res.ok) {
-          settle({ source: "demo", data: demo, reason: await describeFailure(res) });
+          fail(await describeFailure(res));
           return;
         }
         let data: T;
         try {
           data = parse(await res.json());
         } catch {
-          settle({ source: "demo", data: demo, reason: "Unexpected API response" });
+          fail("Unexpected API response");
           return;
         }
-        settle({ source: "live", data });
+        settle({ source: "live", data, lastUpdated: new Date().toISOString() });
       } catch {
-        settle({ source: "demo", data: demo, reason: "Network error" });
+        fail("Network error");
       }
     })();
     return () => {
@@ -78,5 +87,5 @@ export function useLiveData<T>(
 
   const state: LiveState<T> =
     url !== null && result.url === url ? result.state : { source: "loading" };
-  return { ...state, reload };
+  return { ...state, reload, showDemo };
 }

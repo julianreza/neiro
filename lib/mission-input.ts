@@ -1,6 +1,7 @@
+import { validateAttachments } from "@/lib/attachments";
 import { parseTokenBudget } from "@/lib/budget";
 import { MISSION_MODES } from "@/lib/types";
-import type { MissionMode } from "@/lib/types";
+import type { ImageAttachment, MissionMode } from "@/lib/types";
 
 /**
  * Validation for POST /api/missions. Kept framework-free so it is unit-tested
@@ -30,6 +31,10 @@ export type MissionCreateInput = {
   tokenBudget: number | null;
   /** Composer mode; null when the caller did not say (older clients). */
   mode: MissionMode | null;
+  /** Summarizing also drafts a SKILL.md. */
+  learnSkillOnDone: boolean;
+  /** Screenshots for the planner (validated data: URLs). */
+  attachments: ImageAttachment[];
 };
 
 // Conservative subset of `git check-ref-format`: no spaces, no "..", no "//",
@@ -132,11 +137,20 @@ export function parseMissionCreateBody(body: unknown): MissionCreateParseResult 
     mode = b.mode as MissionMode;
   }
 
+  if (b.learn_skill_on_done !== undefined && typeof b.learn_skill_on_done !== "boolean") {
+    return { ok: false, error: "learn_skill_on_done must be a boolean" };
+  }
+
+  const attached = validateAttachments(b.attachments);
+  if (!attached.ok) return attached;
+
   return {
     ok: true,
     value: {
       title,
       prompt,
+      learnSkillOnDone: b.learn_skill_on_done === true,
+      attachments: attached.images,
       pauseAfterPlanning: b.pause_after_planning === true,
       maxParallelWorkers: workers.value,
       maxRetries: retries.value,

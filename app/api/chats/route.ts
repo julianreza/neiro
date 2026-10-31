@@ -23,7 +23,16 @@ export async function GET() {
       }
       return NextResponse.json({ error: error.message }, { status: 500 });
     }
-    return NextResponse.json({ chats: groupThreads((data ?? []).map(mapAskRow)) });
+    // Bot forever-chats live on the Bots rail, not in the thread list.
+    const supabase = getSupabaseAdmin();
+    const { data: agentRows } = await supabase.from("agents").select("*");
+    const botSessions = new Set(
+      (agentRows ?? [])
+        .map((a) => (a as Record<string, unknown>).canonical_session_id)
+        .filter((s): s is string => typeof s === "string" && s.length > 0),
+    );
+    const rows = (data ?? []).filter((r) => !botSessions.has(String((r as Record<string, unknown>).session_id ?? "")));
+    return NextResponse.json({ chats: groupThreads(rows.map(mapAskRow)) });
   } catch (err: unknown) {
     if (err instanceof AppConfigError) {
       return NextResponse.json({ error: err.message, code: err.code }, { status: 503 });

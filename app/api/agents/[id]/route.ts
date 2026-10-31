@@ -2,7 +2,14 @@ import { NextResponse } from "next/server";
 import { connection } from "next/server";
 import type { NextRequest } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
-import { AppConfigError, isMissingRuntimeColumn, parseRuntimeFields, RUNTIME_MIGRATION_HINT } from "@/lib/types";
+import {
+  AppConfigError,
+  HERMES_SUITE_MIGRATION_HINT,
+  isMissingRuntimeColumn,
+  parseHermesModelFields,
+  parseRuntimeFields,
+  RUNTIME_MIGRATION_HINT,
+} from "@/lib/types";
 import { parseTokenBudget } from "@/lib/budget";
 import type { Agent } from "@/lib/types";
 
@@ -23,7 +30,8 @@ export async function GET(_request: NextRequest, context: RouteContext) {
       .maybeSingle();
 
     if (error) {
-      return NextResponse.json({ error: error.message }, { status: 500 });
+      const message = /reasoning_effort|service_tier/.test(error.message) ? HERMES_SUITE_MIGRATION_HINT : error.message;
+      return NextResponse.json({ error: message }, { status: /reasoning_effort|service_tier/.test(error.message) ? 409 : 500 });
     }
     if (!data) {
       return NextResponse.json({ error: "Agent not found" }, { status: 404 });
@@ -85,6 +93,10 @@ export async function PATCH(request: NextRequest, context: RouteContext) {
     if (!runtimeFields.ok) return NextResponse.json({ error: runtimeFields.error }, { status: 400 });
     if (runtimeFields.runtime !== undefined) updates.runtime = runtimeFields.runtime;
     if (runtimeFields.effort !== undefined) updates.effort = runtimeFields.effort;
+    const modelFields = parseHermesModelFields(body);
+    if (!modelFields.ok) return NextResponse.json({ error: modelFields.error }, { status: 400 });
+    if (modelFields.reasoning_effort !== undefined) updates.reasoning_effort = modelFields.reasoning_effort;
+    if (modelFields.service_tier !== undefined) updates.service_tier = modelFields.service_tier;
 
     if (Object.keys(updates).length === 0) {
       return NextResponse.json({ error: "No valid fields provided for update" }, { status: 400 });

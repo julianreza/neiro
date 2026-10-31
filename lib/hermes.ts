@@ -1,4 +1,6 @@
-import { Agent, AppConfigError } from "@/lib/types";
+import { isSyntheticRequestId, normalizePendingControls } from "@/lib/approvals";
+import { AppConfigError } from "@/lib/types";
+import type { Agent, ApprovalChoice, PendingControl, ReasoningEffort } from "@/lib/types";
 
 export type HermesEndpointConfig = {
   baseUrl: string;
@@ -56,14 +58,65 @@ async function hermesFetch(
   });
 }
 
+type HermesAgentRef = Pick<Agent, "profile" | "url" | "key_enc">;
+
+const textOf = (v: unknown): string | undefined => (typeof v === "string" && v.trim() ? v.trim() : undefined);
+const numOf = (v: unknown): number | undefined => (typeof v === "number" && Number.isFinite(v) ? v : undefined);
+
+/** `[...]`, `{ data: [...] }` or `{ <key>: [...] }`: Hermes has used all three. */
+function readList(data: unknown, key: string): unknown[] {
+  if (Array.isArray(data)) return data;
+  if (data && typeof data === "object") {
+    const rec = data as Record<string, unknown>;
+    if (Array.isArray(rec.data)) return rec.data;
+    if (Array.isArray(rec[key])) return rec[key] as unknown[];
+  }
+  return [];
+}
+
+export type HermesReadiness = {
+  status?: string;
+  db?: string;
+  diskFreeBytes?: number;
+  activeRuns?: number;
+  pendingCompletions?: number;
+  activeDelegations?: number;
+};
+
 export type HermesProbeResult = {
   ok: boolean;
   latencyMs: number;
   status?: string;
   capabilities?: string[];
+  /** Raw /health/detailed body. Server-side only: never sent to the browser. */
   details?: Record<string, unknown>;
+  readiness?: HermesReadiness;
   error?: string;
 };
+
+/** The readiness fields of /health/detailed, wherever this Hermes version puts them. */
+export function readinessOf(data: Record<string, unknown>): HermesReadiness {
+  const pick = (...keys: string[]): unknown => {
+    for (const key of keys) {
+      const parts = key.split(".");
+      let cur: unknown = data;
+      for (const part of parts) {
+        cur = cur && typeof cur === "object" ? (cur as Record<string, unknown>)[part] : undefined;
+      }
+      if (cur !== undefined && cur !== null) return cur;
+    }
+    return undefined;
+  };
+  const dbVal = pick("db.status", "database.status", "db", "database", "state_db");
+  return {
+    status: textOf(pick("status")),
+    db: typeof dbVal === "string" ? dbVal : typeof dbVal === "boolean" ? (dbVal ? "ok" : "down") : undefined,
+    diskFreeBytes: numOf(pick("disk.free_bytes", "disk_free_bytes", "disk.free", "disk_space.free_bytes")),
+    activeRuns: numOf(pick("active_runs", "runs.active")),
+    pendingCompletions: numOf(pick("pending_completions")),
+    activeDelegations: numOf(pick("active_delegations", "delegations.active")),
+  };
+}
 
 export async function probeHermesAgent(agent: Agent): Promise<HermesProbeResult> {
   const startTime = Date.now();
@@ -80,7 +133,7 @@ export async function probeHermesAgent(agent: Agent): Promise<HermesProbeResult>
           error: `Hermes returned status ${res.status}: ${res.statusText}`,
         };
       }
-      return { ok: true, latencyMs, status: "healthy" };
+      return { ok: true, latencyMs, status: "healthy", readiness: { status: "healthy" } };
     }
 
     const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
@@ -95,6 +148,7 @@ export async function probeHermesAgent(agent: Agent): Promise<HermesProbeResult>
       status: statusVal,
       capabilities: capabilitiesVal,
       details: data,
+      readiness: { ...readinessOf(data), status: statusVal },
     };
   } catch (err: unknown) {
     if (err instanceof AppConfigError) throw err;
@@ -107,74 +161,123 @@ export async function probeHermesAgent(agent: Agent): Promise<HermesProbeResult>
   }
 }
 
-export async function listHermesCapabilitiesInventory(
-  agent: Agent,
-): Promise<string[]> {
+export type HermesServerCapabilities = {
+  /** False when the server has no /v1/capabilities (older Hermes) or could not be reached. */
+  available: boolean;
+  features: Record<string, boolean>;
+  endpoints: Record<string, { method: string; path: string }>;
+};
+
+const CAPABILITIES_TTL_MS = 60_000;
+const capabilitiesCache = new Map<string, { at: number; value: HermesServerCapabilities }>();
+
+const NO_CAPABILITIES: HermesServerCapabilities = { available: false, features: {}, endpoints: {} };
+
+/** For tests. */
+export function clearHermesCapabilitiesCache(): void {
+  capabilitiesCache.clear();
+}
+
+/** GET /v1/capabilities, cached for a minute per server + profile. Never throws for a missing route. */
+export async function getHermesServerCapabilities(agent?: HermesAgentRef): Promise<HermesServerCapabilities> {
+  const { baseUrl, profilePrefix } = resolveAgentEndpoint(agent);
+  const key = `${baseUrl}|${profilePrefix}`;
+  const hit = capabilitiesCache.get(key);
+  if (hit && Date.now() - hit.at < CAPABILITIES_TTL_MS) return hit.value;
+  try {
+    const res = await hermesFetch(agent, "/v1/capabilities");
+    if (!res.ok) return NO_CAPABILITIES;
+    const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+    const features: Record<string, boolean> = {};
+    const rawFeatures = data.features && typeof data.features === "object" ? (data.features as Record<string, unknown>) : {};
+    for (const [name, value] of Object.entries(rawFeatures)) {
+      if (typeof value === "boolean") features[name] = value;
+      else if (value && typeof value === "object" && "enabled" in value) {
+        features[name] = Boolean((value as Record<string, unknown>).enabled);
+      } else features[name] = Boolean(value);
+    }
+    const endpoints: HermesServerCapabilities["endpoints"] = {};
+    const rawEndpoints = data.endpoints && typeof data.endpoints === "object" ? (data.endpoints as Record<string, unknown>) : {};
+    for (const [name, value] of Object.entries(rawEndpoints)) {
+      if (!value || typeof value !== "object") continue;
+      const v = value as Record<string, unknown>;
+      const method = textOf(v.method);
+      const path = textOf(v.path);
+      if (method && path) endpoints[name] = { method, path };
+    }
+    const value: HermesServerCapabilities = { available: true, features, endpoints };
+    capabilitiesCache.set(key, { at: Date.now(), value });
+    return value;
+  } catch (err: unknown) {
+    if (err instanceof AppConfigError) throw err;
+    return NO_CAPABILITIES;
+  }
+}
+
+export type HermesSkillInfo = { name: string; description?: string; category?: string };
+export type HermesToolsetInfo = {
+  name: string;
+  label?: string;
+  description?: string;
+  enabled?: boolean;
+  configured?: boolean;
+  tools?: string[];
+  /** An MCP server's toolset (mcp-<server>). */
+  isMcp: boolean;
+};
+
+export type HermesDetailedInventory = { skills: HermesSkillInfo[]; toolsets: HermesToolsetInfo[] };
+
+export function parseSkills(data: unknown): HermesSkillInfo[] {
+  return readList(data, "skills").flatMap((s): HermesSkillInfo[] => {
+    if (typeof s === "string") return s.trim() ? [{ name: s.trim() }] : [];
+    if (!s || typeof s !== "object") return [];
+    const r = s as Record<string, unknown>;
+    const name = textOf(r.name);
+    if (!name) return [];
+    return [{ name, description: textOf(r.description), category: textOf(r.category) }];
+  });
+}
+
+export function parseToolsets(data: unknown): HermesToolsetInfo[] {
+  return readList(data, "toolsets").flatMap((t): HermesToolsetInfo[] => {
+    if (typeof t === "string") return t.trim() ? [{ name: t.trim(), isMcp: t.trim().startsWith("mcp-") }] : [];
+    if (!t || typeof t !== "object") return [];
+    const r = t as Record<string, unknown>;
+    const name = textOf(r.name);
+    if (!name) return [];
+    return [{
+      name,
+      label: textOf(r.label),
+      description: textOf(r.description),
+      enabled: typeof r.enabled === "boolean" ? r.enabled : undefined,
+      configured: typeof r.configured === "boolean" ? r.configured : undefined,
+      tools: Array.isArray(r.tools) ? r.tools.filter((x): x is string => typeof x === "string") : undefined,
+      isMcp: name.startsWith("mcp-"),
+    }];
+  });
+}
+
+/** Installed skills and toolsets (MCP servers included), with their metadata. */
+export async function getHermesDetailedInventory(agent: HermesAgentRef): Promise<HermesDetailedInventory> {
   try {
     const [skillsRes, toolsRes] = await Promise.all([
       hermesFetch(agent, "/v1/skills").catch(() => null),
       hermesFetch(agent, "/v1/toolsets").catch(() => null),
     ]);
-
-    const inventory: string[] = [];
-
-    if (skillsRes && skillsRes.ok) {
-      const skillsData = (await skillsRes.json().catch(() => null)) as unknown;
-      if (Array.isArray(skillsData)) {
-        for (const s of skillsData) {
-          if (typeof s === "string") {
-            inventory.push(s);
-          } else if (s && typeof s === "object" && "name" in s) {
-            const nameVal = s.name;
-            if (typeof nameVal === "string") inventory.push(nameVal);
-          }
-        }
-      } else if (skillsData && typeof skillsData === "object" && "skills" in skillsData) {
-        const skillsList = skillsData.skills;
-        if (Array.isArray(skillsList)) {
-          for (const s of skillsList) {
-            if (typeof s === "string") {
-              inventory.push(s);
-            } else if (s && typeof s === "object" && "name" in s) {
-              const nameVal = s.name;
-              if (typeof nameVal === "string") inventory.push(nameVal);
-            }
-          }
-        }
-      }
-    }
-
-    if (toolsRes && toolsRes.ok) {
-      const toolsData = (await toolsRes.json().catch(() => null)) as unknown;
-      if (Array.isArray(toolsData)) {
-        for (const t of toolsData) {
-          if (typeof t === "string") {
-            inventory.push(t);
-          } else if (t && typeof t === "object" && "name" in t) {
-            const nameVal = t.name;
-            if (typeof nameVal === "string") inventory.push(nameVal);
-          }
-        }
-      } else if (toolsData && typeof toolsData === "object" && "toolsets" in toolsData) {
-        const toolsetsList = toolsData.toolsets;
-        if (Array.isArray(toolsetsList)) {
-          for (const t of toolsetsList) {
-            if (typeof t === "string") {
-              inventory.push(t);
-            } else if (t && typeof t === "object" && "name" in t) {
-              const nameVal = t.name;
-              if (typeof nameVal === "string") inventory.push(nameVal);
-            }
-          }
-        }
-      }
-    }
-
-    return Array.from(new Set(inventory));
+    const skills = skillsRes?.ok ? parseSkills(await skillsRes.json().catch(() => null)) : [];
+    const toolsets = toolsRes?.ok ? parseToolsets(await toolsRes.json().catch(() => null)) : [];
+    return { skills, toolsets };
   } catch (err: unknown) {
     if (err instanceof AppConfigError) throw err;
-    return [];
+    return { skills: [], toolsets: [] };
   }
+}
+
+/** Names only (skills, then toolsets), for callers that predate the detailed inventory. */
+export async function listHermesCapabilitiesInventory(agent: Agent): Promise<string[]> {
+  const { skills, toolsets } = await getHermesDetailedInventory(agent);
+  return Array.from(new Set([...skills.map((s) => s.name), ...toolsets.map((t) => t.name)]));
 }
 
 export async function createHermesSession(
@@ -219,10 +322,17 @@ export async function createHermesSession(
 export async function getHermesSessionMessages(
   agent: Agent,
   sessionId: string,
+  opts?: { includeCompacted?: boolean; inlineImages?: boolean },
 ): Promise<Array<{ role: string; content: string }>> {
+  const query = new URLSearchParams({
+    inline_images: opts?.inlineImages ? "true" : "false",
+  });
+  if (opts?.includeCompacted !== undefined) {
+    query.set("include_compacted", opts.includeCompacted ? "true" : "false");
+  }
   const res = await hermesFetch(
     agent,
-    `/api/sessions/${encodeURIComponent(sessionId)}/messages?inline_images=false`,
+    `/api/sessions/${encodeURIComponent(sessionId)}/messages?${query.toString()}`,
   );
 
   if (!res.ok) {
@@ -256,17 +366,65 @@ export async function getHermesSessionMessages(
   });
 }
 
+export type HermesModelOptionsInput = {
+  reasoning_effort?: ReasoningEffort;
+  service_tier?: string;
+  reasoning?: { enabled: boolean };
+};
+
 export type HermesStartRunInput = {
   sessionId?: string;
   prompt: string;
   instructions?: string;
   model?: string;
   idempotencyKey?: string;
+  /** Long-term memory scope (X-Hermes-Session-Key), e.g. "neiro:project:<id>". */
+  sessionKey?: string;
+  /** Per-run model_options; fields left out fall back to the agent's settings. */
+  modelOptions?: HermesModelOptionsInput;
+  /** Images sent with the prompt, as data: URLs. */
+  images?: Array<{ name?: string; dataUrl: string }>;
 };
 
 export type HermesStartRunResult =
-  | { kind: "started"; runId: string }
+  | { kind: "started"; runId: string; skippedImages?: boolean }
   | { kind: "deferred"; reason: string };
+
+/** A header-safe X-Hermes-Session-Key: no CR, LF or NUL, at most 256 characters. */
+export function cleanSessionKey(value: string | undefined | null): string {
+  return (value ?? "").replace(/[\r\n\0]/g, "").trim().slice(0, 256);
+}
+
+/** model_options for a run: the input's fields over the agent's. Undefined when there is nothing to send. */
+export function buildModelOptions(
+  agent: Pick<Agent, "reasoningEffort" | "serviceTier">,
+  input?: HermesModelOptionsInput,
+): HermesModelOptionsInput | undefined {
+  const out: HermesModelOptionsInput = {};
+  const effort = input?.reasoning_effort ?? agent.reasoningEffort ?? undefined;
+  if (effort) out.reasoning_effort = effort;
+  const tier = (input?.service_tier ?? agent.serviceTier ?? "").trim();
+  if (tier) out.service_tier = tier;
+  if (input?.reasoning) out.reasoning = input.reasoning;
+  return Object.keys(out).length ? out : undefined;
+}
+
+/** The run's `input`: plain text, or one user message with text and image parts. */
+export function runInput(prompt: string, images?: Array<{ dataUrl: string }>): unknown {
+  if (!images || images.length === 0) return prompt;
+  return [{
+    role: "user",
+    content: [
+      { type: "input_text", text: prompt },
+      ...images.map((img) => ({ type: "image_url", image_url: { url: img.dataUrl } })),
+    ],
+  }];
+}
+
+/** A 400 that says the images (not the prompt) were the problem. */
+function isImageRejection(status: number, text: string): boolean {
+  return status === 400 && /invalid_image_url|image|vision|multimodal/i.test(text);
+}
 
 export async function startHermesRun(
   agent: Agent,
@@ -276,9 +434,13 @@ export async function startHermesRun(
   if (input.idempotencyKey) {
     headers["Idempotency-Key"] = input.idempotencyKey;
   }
+  const sessionKey = cleanSessionKey(input.sessionKey);
+  if (sessionKey) {
+    headers["X-Hermes-Session-Key"] = sessionKey;
+  }
 
   const body: Record<string, unknown> = {
-    input: input.prompt,
+    input: runInput(input.prompt, input.images),
     instructions: input.instructions || agent.prompt || "",
   };
 
@@ -297,11 +459,28 @@ export async function startHermesRun(
     body.provider = process.env.HERMES_PROVIDER_SLUG;
   }
 
-  const res = await hermesFetch(agent, "/v1/runs", {
-    method: "POST",
-    headers,
-    body: JSON.stringify(body),
-  });
+  const modelOptions = buildModelOptions(agent, input.modelOptions);
+  if (modelOptions) {
+    body.model_options = modelOptions;
+  }
+  // Skills and toolsets are set per Hermes profile; /v1/runs ignores them.
+
+  const post = (values: Record<string, unknown>) =>
+    hermesFetch(agent, "/v1/runs", {
+      method: "POST",
+      headers,
+      body: JSON.stringify(values),
+    });
+
+  let res = await post(body);
+  let skippedImages = false;
+  if (!res.ok && input.images?.length) {
+    const text = await res.clone().text().catch(() => "");
+    if (isImageRejection(res.status, text)) {
+      skippedImages = true;
+      res = await post({ ...body, input: input.prompt });
+    }
+  }
 
   if (res.status === 429 || res.status === 503) {
     const text = await res.text().catch(() => "Service busy or draining");
@@ -328,20 +507,32 @@ export async function startHermesRun(
     throw new Error("Hermes did not return a runId");
   }
 
-  return { kind: "started", runId };
+  return skippedImages ? { kind: "started", runId, skippedImages } : { kind: "started", runId };
 }
+
+export type HermesRunRuntime = { provider?: string; model?: string; route_source?: string };
 
 export type HermesRunStatus = {
   run_id: string;
   status: string;
   output?: string;
   tokens?: number;
-  /** The model Hermes really ran, read from the run's session once the run ends. */
+  /** The model Hermes really ran: the run's runtime, else its session, once the run ends. */
   model?: string;
   error?: string;
   pending_controls?: unknown[];
+  /** pending_controls, normalized. */
+  controls?: PendingControl[];
   admission_id?: string;
   execution_generation?: number;
+  cache_read_tokens?: number;
+  cache_write_tokens?: number;
+  /** Prompt (in) and completion (out) tokens, when the run reports them. */
+  input_tokens?: number;
+  output_tokens?: number;
+  runtime?: HermesRunRuntime;
+  /** Set while the server drains for shutdown. */
+  shutdown_requested_at?: number;
 };
 
 const ENDED_RUN_STATUSES = new Set([
@@ -362,6 +553,19 @@ export async function getHermesSessionModel(
   } catch {
     return undefined;
   }
+}
+
+function runtimeOf(v: unknown): HermesRunRuntime | undefined {
+  if (!v || typeof v !== "object") return undefined;
+  const r = v as Record<string, unknown>;
+  const out: HermesRunRuntime = {};
+  const provider = textOf(r.provider);
+  const model = textOf(r.model);
+  const route = textOf(r.route_source);
+  if (provider) out.provider = provider;
+  if (model) out.model = model;
+  if (route) out.route_source = route;
+  return Object.keys(out).length ? out : undefined;
 }
 
 export async function getHermesRun(
@@ -403,16 +607,19 @@ export async function getHermesRun(
   }
 
   const pending_controls = Array.isArray(data.pending_controls) ? data.pending_controls : [];
-  const status = typeof data.status === "string" ? data.status : "unknown";
-  // The run itself does not say its model. An agent with no model set runs on
+  // A missing status is not Hermes saying "unknown" (that one triggers recovery).
+  const status = typeof data.status === "string" ? data.status : "missing_status";
+  const runtime = runtimeOf(data.runtime);
+  // The run itself rarely says its model. An agent with no model set runs on
   // Hermes' default, so read the model from the session, once, when it ends.
   const ended = ENDED_RUN_STATUSES.has(status.toLowerCase());
   const model =
-    ended && tokens > 0 && typeof data.session_id === "string"
+    runtime?.model ??
+    (ended && tokens > 0 && typeof data.session_id === "string"
       ? await getHermesSessionModel(agent, data.session_id)
-      : undefined;
+      : undefined);
 
-  return {
+  const result: HermesRunStatus = {
     run_id: typeof data.run_id === "string" ? data.run_id : runId,
     status,
     output,
@@ -420,10 +627,23 @@ export async function getHermesRun(
     model,
     error: typeof data.error === "string" ? data.error : undefined,
     pending_controls,
+    controls: normalizePendingControls(pending_controls),
     admission_id: typeof data.admission_id === "string" ? data.admission_id : undefined,
     execution_generation:
       typeof data.execution_generation === "number" ? data.execution_generation : undefined,
   };
+  const cacheRead = numOf(usage?.cache_read_tokens);
+  const cacheWrite = numOf(usage?.cache_write_tokens);
+  if (cacheRead !== undefined) result.cache_read_tokens = cacheRead;
+  if (cacheWrite !== undefined) result.cache_write_tokens = cacheWrite;
+  const inTokens = numOf(usage?.input_tokens) ?? numOf(usage?.prompt_tokens);
+  const outTokens = numOf(usage?.output_tokens) ?? numOf(usage?.completion_tokens);
+  if (inTokens !== undefined) result.input_tokens = inTokens;
+  if (outTokens !== undefined) result.output_tokens = outTokens;
+  if (runtime) result.runtime = runtime;
+  const shutdown = numOf(data.shutdown_requested_at);
+  if (shutdown !== undefined) result.shutdown_requested_at = shutdown;
+  return result;
 }
 
 export async function stopHermesRun(agent: Agent, runId: string): Promise<boolean> {
@@ -437,21 +657,48 @@ export async function stopHermesRun(agent: Agent, runId: string): Promise<boolea
   }
 }
 
+/** Releases a run Hermes lost track of (status "unknown") so it can be retried safely. */
+export async function resolveHermesUnknownRun(
+  agent: Agent,
+  runId: string,
+  details: { admissionId: string; executionGeneration: number },
+): Promise<boolean> {
+  try {
+    const res = await hermesFetch(agent, `/v1/runs/${encodeURIComponent(runId)}/resolve-unknown`, {
+      method: "POST",
+      body: JSON.stringify({
+        admission_id: details.admissionId,
+        execution_generation: details.executionGeneration,
+      }),
+    });
+    return res.ok;
+  } catch (err: unknown) {
+    if (err instanceof AppConfigError) throw err;
+    return false;
+  }
+}
+
+export type HermesControlDetails = { requestId?: string | null; executionGeneration?: number | null };
+
+/** request_id / execution_generation, only when they are real (a made-up id is left out). */
+function controlFields(details?: HermesControlDetails): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  if (details?.requestId && !isSyntheticRequestId(details.requestId)) out.request_id = details.requestId;
+  if (typeof details?.executionGeneration === "number") out.execution_generation = details.executionGeneration;
+  return out;
+}
+
+/** Answers a waiting approval. `true` = once, `false` = deny. */
 export async function submitHermesRunApproval(
   agent: Agent,
   runId: string,
-  approved: boolean,
-  details?: { requestId?: string; executionGeneration?: number },
+  choice: ApprovalChoice | boolean,
+  details?: HermesControlDetails,
 ): Promise<boolean> {
-  const payload = {
-    request_id: details?.requestId || "default",
-    execution_generation: details?.executionGeneration || 1,
-    choice: approved ? "once" : "deny",
-  };
-
+  const value: ApprovalChoice = typeof choice === "boolean" ? (choice ? "once" : "deny") : choice;
   const res = await hermesFetch(agent, `/v1/runs/${encodeURIComponent(runId)}/approval`, {
     method: "POST",
-    body: JSON.stringify(payload),
+    body: JSON.stringify({ ...controlFields(details), choice: value }),
   });
 
   return res.ok;
@@ -461,20 +708,115 @@ export async function submitHermesRunClarify(
   agent: Agent,
   runId: string,
   reply: string,
-  details?: { requestId?: string; executionGeneration?: number },
+  details?: HermesControlDetails,
 ): Promise<boolean> {
-  const payload = {
-    request_id: details?.requestId || "default",
-    execution_generation: details?.executionGeneration || 1,
-    answer: reply,
-  };
-
   const res = await hermesFetch(agent, `/v1/runs/${encodeURIComponent(runId)}/clarify`, {
     method: "POST",
-    body: JSON.stringify(payload),
+    body: JSON.stringify({ ...controlFields(details), answer: reply }),
   });
 
   return res.ok;
+}
+
+/** Branches a session; returns the new session's id. */
+export async function forkHermesSession(agent: Agent, sessionId: string, title?: string): Promise<string> {
+  const res = await hermesFetch(agent, `/api/sessions/${encodeURIComponent(sessionId)}/fork`, {
+    method: "POST",
+    body: JSON.stringify(title ? { title } : {}),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`Failed to fork Hermes session (${res.status}): ${text}`);
+  }
+  const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+  const nested = data.session && typeof data.session === "object" ? (data.session as Record<string, unknown>) : {};
+  const id = textOf(data.session_id) ?? textOf(data.id) ?? textOf(nested.id) ?? textOf(nested.session_id);
+  if (!id) throw new Error("Hermes did not return the forked session id");
+  return id;
+}
+
+export type HermesSessionChatInput = {
+  prompt: string;
+  /** data: or http(s) image URLs. */
+  images?: string[];
+  model?: string;
+  modelOptions?: Record<string, unknown>;
+  sessionKey?: string;
+};
+
+function sessionChatBody(input: HermesSessionChatInput): Record<string, unknown> {
+  const body: Record<string, unknown> = {
+    message: input.images?.length
+      ? [
+          { type: "text", text: input.prompt },
+          ...input.images.map((url) => ({ type: "image_url", image_url: { url } })),
+        ]
+      : input.prompt,
+  };
+  if (input.model?.trim()) body.model = input.model.trim();
+  if (input.modelOptions && Object.keys(input.modelOptions).length) body.model_options = input.modelOptions;
+  return body;
+}
+
+function sessionChatHeaders(input: HermesSessionChatInput): Record<string, string> {
+  const key = cleanSessionKey(input.sessionKey);
+  return key ? { "X-Hermes-Session-Key": key } : {};
+}
+
+/** One turn in a session, streamed (POST /api/sessions/{id}/chat/stream). */
+export async function streamHermesSessionChat(
+  agent: Agent,
+  sessionId: string,
+  input: HermesSessionChatInput,
+  signal?: AbortSignal,
+): Promise<ReadableStream<Uint8Array>> {
+  const res = await hermesFetch(
+    agent,
+    `/api/sessions/${encodeURIComponent(sessionId)}/chat/stream`,
+    {
+      method: "POST",
+      headers: { Accept: "text/event-stream", ...sessionChatHeaders(input) },
+      body: JSON.stringify(sessionChatBody(input)),
+    },
+    signal,
+  );
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`Failed to stream session chat (${res.status}): ${text}`);
+  }
+  if (!res.body) throw new Error("No response body received from session chat stream");
+  return res.body;
+}
+
+/**
+ * One whole turn in a session (POST /api/sessions/{id}/chat). Used for
+ * "/compact" and for bot turns, which need the full answer.
+ */
+export async function sendHermesSessionChat(
+  agent: Agent,
+  sessionId: string,
+  input: HermesSessionChatInput,
+  signal?: AbortSignal,
+): Promise<{ output: string; tokens: number }> {
+  const res = await hermesFetch(
+    agent,
+    `/api/sessions/${encodeURIComponent(sessionId)}/chat`,
+    {
+      method: "POST",
+      headers: sessionChatHeaders(input),
+      body: JSON.stringify(sessionChatBody(input)),
+    },
+    signal ?? AbortSignal.timeout(10 * 60_000),
+  );
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`Session chat failed (${res.status}): ${text}`);
+  }
+  const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+  const usage = data.usage && typeof data.usage === "object" ? (data.usage as Record<string, unknown>) : {};
+  const output =
+    textOf(data.output) ?? textOf(data.response) ?? textOf(data.content) ?? textOf(data.message) ?? "";
+  return { output, tokens: numOf(usage.total_tokens) ?? 0 };
 }
 
 export async function openHermesRunEventStream(
