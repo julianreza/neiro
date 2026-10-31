@@ -1,0 +1,50 @@
+{
+  "phase": "done",
+  "decisions": [
+    {
+      "id": "auto-scope",
+      "title": "Review otomatis masuk ke Code review untuk mode apa saja?",
+      "options": [
+        "Build something new dan Fix a bug",
+        "Hanya Build something new"
+      ],
+      "recommended": "Build something new dan Fix a bug",
+      "answer": "Build something new dan Fix a bug"
+    },
+    {
+      "id": "pr-granularity",
+      "title": "Satu PR per misi atau per tugas?",
+      "options": [
+        "Satu PR per misi, tugas berikutnya push ulang",
+        "Satu PR per tugas"
+      ],
+      "recommended": "Satu PR per misi, tugas berikutnya push ulang",
+      "answer": "Satu PR per misi, tugas berikutnya push ulang"
+    },
+    {
+      "id": "pr-draft",
+      "title": "PR dari misi dibuka sebagai apa?",
+      "options": [
+        "Draft PR",
+        "PR biasa (ready for review)"
+      ],
+      "recommended": "Draft PR",
+      "answer": "Draft PR"
+    },
+    {
+      "id": "page-layout",
+      "title": "Layout halaman /reviews?",
+      "options": [
+        "A Setia ke Sage",
+        "B Sage berwarna",
+        "C Sage + robot"
+      ],
+      "recommended": "B Sage berwarna",
+      "answer": "A Setia ke Sage, saat proses pakai C"
+    }
+  ],
+  "blocking": null,
+  "context": {
+    "template": "Code Review Sage app (~/.kiro/crew/apps/code-review-sage) + neiro Final review stage in lib/orchestrator.ts"
+  }
+}
