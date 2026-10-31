@@ -3,7 +3,32 @@
 import { useCallback, useEffect, useMemo, useState, type CSSProperties } from "react";
 import Link from "next/link";
 import { toast } from "sonner";
-import { Eye, EyeOff, GitPullRequest, Loader2, Plus, RotateCcw, ScanSearch, Send, SlidersHorizontal, Wrench } from "lucide-react";
+import {
+  ArrowRight,
+  Bug,
+  CircleCheck,
+  Code,
+  Eye,
+  EyeOff,
+  Flame,
+  Gauge,
+  GitPullRequest,
+  Layers,
+  Lightbulb,
+  Loader2,
+  Plus,
+  Puzzle,
+  RotateCcw,
+  ScanSearch,
+  Send,
+  ShieldAlert,
+  SlidersHorizontal,
+  Tag,
+  Target,
+  TriangleAlert,
+  Wrench,
+  type LucideIcon,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -60,6 +85,22 @@ type AgentName = { id: string; name: string };
 type ProjectRepoOption = { repo: string; projects: string[] };
 
 const sevStyle = (s: ReviewSeverity) => ({ "--sev": SEVERITY[s].color }) as CSSProperties;
+
+function categoryIcon(category: string): LucideIcon {
+  const c = category.toLowerCase();
+  if (c.includes("secur") || c.includes("auth") || c.includes("permission")) return ShieldAlert;
+  if (c.includes("concurr") || c.includes("race")) return Layers;
+  if (c.includes("correct") || c.includes("bug") || c.includes("logic")) return Bug;
+  if (c.includes("perf")) return Gauge;
+  return Tag;
+}
+
+/** Observation → Consequence → Suggestion, shown left to right; the evidence sits under it. */
+const FLOW: { key: "observation" | "consequence" | "suggestion"; label: string; icon: LucideIcon; color: string }[] = [
+  { key: "observation", label: "Observation", icon: Eye, color: "#0ea5e9" },
+  { key: "consequence", label: "Consequence", icon: TriangleAlert, color: "#e11d48" },
+  { key: "suggestion", label: "Suggestion", icon: Lightbulb, color: "#16a34a" },
+];
 
 function prLabel(r: Pick<CodeReview, "repo" | "prNumber">) {
   return `${r.repo.split("/")[1] ?? r.repo}#${r.prNumber}`;
@@ -697,83 +738,113 @@ function FindingsView({
         )}
       </div>
 
-      <section className="cr-card cr-summary">
+      <section className="cr-card cr-summary" data-gate={review.design?.gate}>
+        <div className="cr-summary-head">
+          {review.design && (
+            <span className="cr-gate-pill" data-gate={review.design.gate}>
+              <i aria-hidden="true" /> Design gate · {review.design.gate === "pass" ? "pass" : "concern"}
+            </span>
+          )}
+          <span className="cr-muted text-sm">
+            {live.length === 0 ? "No open findings" : `${live.length} open finding${live.length === 1 ? "" : "s"}`}
+          </span>
+          {live.length > 0 && (
+            <span className="cr-risk" aria-label="Open findings by severity">
+              <span className="cr-risk-bar">
+                {SEVERITIES.map((s) => {
+                  const n = live.filter((f) => f.severity === s).length;
+                  return n > 0 ? <i key={s} style={{ ...sevStyle(s), flexGrow: n }} title={`${SEVERITY[s].label}: ${n}`} /> : null;
+                })}
+              </span>
+              <span className="cr-risk-legend">
+                {SEVERITIES.map((s) => {
+                  const n = live.filter((f) => f.severity === s).length;
+                  return n > 0 ? (
+                    <span key={s} style={sevStyle(s)}>
+                      <b>{n}</b> {SEVERITY[s].label}
+                    </span>
+                  ) : null;
+                })}
+              </span>
+            </span>
+          )}
+        </div>
         {review.design && (
-          <>
-            <p className="eyebrow" data-gate={review.design.gate}>
-              Design gate · {review.design.gate === "pass" ? "pass" : "concern"}
-            </p>
-            <dl className="cr-design">
-              {review.design.problem && (
-                <>
-                  <dt>Problem</dt>
-                  <dd>{review.design.problem}</dd>
-                </>
-              )}
-              {review.design.whyItMatters && (
-                <>
-                  <dt>Why it matters</dt>
-                  <dd>{review.design.whyItMatters}</dd>
-                </>
-              )}
-              {review.design.solutionFit && (
-                <>
-                  <dt>Solution fit</dt>
-                  <dd>{review.design.solutionFit}</dd>
-                </>
-              )}
-            </dl>
-          </>
+          <div className="cr-design-tiles">
+            {[
+              { label: "Problem", text: review.design.problem, icon: Target, color: "#8b5cf6" },
+              { label: "Why it matters", text: review.design.whyItMatters, icon: Flame, color: "#0ea5e9" },
+              {
+                label: "Solution fit",
+                text: review.design.solutionFit,
+                icon: Puzzle,
+                color: review.design.gate === "pass" ? "#16a34a" : "#f97316",
+              },
+            ]
+              .filter((t) => t.text)
+              .map(({ label, text, icon: Icon, color }) => (
+                <div key={label} className="cr-tile" style={{ "--tile": color } as CSSProperties}>
+                  <p className="cr-tile-label">
+                    <Icon className="size-3.5" aria-hidden="true" /> {label}
+                  </p>
+                  <p>{text}</p>
+                </div>
+              ))}
+          </div>
         )}
-        <p className="eyebrow mt-3">Ship-readiness summary</p>
-        <p>{review.summary || "The reviewer gave no summary."}</p>
-        {review.error && <p className="cr-muted mt-2">{review.error}</p>}
+        <div className="cr-ship">
+          <p className="eyebrow">Ship-readiness summary</p>
+          <p>{review.summary || "The reviewer gave no summary."}</p>
+          {review.error && <p className="cr-muted mt-2">{review.error}</p>}
+        </div>
       </section>
 
       {shown.length === 0 && (
         <p className="cr-muted">{live.length === 0 ? "No findings. The reviewer found nothing to fix." : "No finding at this level."}</p>
       )}
 
-      {shown.map((f) => (
+      {shown.map((f) => {
+        const CatIcon = categoryIcon(f.category);
+        const steps = FLOW.filter((s) => f[s.key]);
+        return (
         <article key={f.id} className="cr-card cr-finding" style={sevStyle(f.severity)} data-dismissed={f.dismissed || undefined}>
-          <p className="eyebrow cr-sev">
-            {SEVERITY[f.severity].label} · {f.category}
-          </p>
-          <h2 className="cr-finding-title">{f.problem}</h2>
-          <p>
+          <div className="cr-finding-head">
+            <span className="cr-sev-pill">
+              <CatIcon className="size-3.5" aria-hidden="true" />
+              {SEVERITY[f.severity].label} · {f.category}
+            </span>
             <span className="code-chip">
               {f.file}
               {f.line ? `:${f.line}` : ""}
             </span>
-          </p>
-          <dl className="cr-design cr-finding-body">
-            {f.observation && (
-              <>
-                <dt>Observation</dt>
-                <dd>{f.observation}</dd>
-              </>
+            {f.posted && (
+              <span className="cr-posted">
+                <CircleCheck className="size-3.5" aria-hidden="true" /> On GitHub
+              </span>
             )}
-            {f.evidence && (
-              <>
-                <dt>Evidence</dt>
-                <dd>
-                  <pre className="cr-evidence">{f.evidence}</pre>
-                </dd>
-              </>
-            )}
-            {f.consequence && (
-              <>
-                <dt>Consequence</dt>
-                <dd>{f.consequence}</dd>
-              </>
-            )}
-            {f.suggestion && (
-              <>
-                <dt>Suggestion</dt>
-                <dd>{f.suggestion}</dd>
-              </>
-            )}
-          </dl>
+          </div>
+          <h2 className="cr-finding-title">{f.problem}</h2>
+          {steps.length > 0 && (
+            <ol className="cr-flow">
+              {steps.map(({ key, label, icon: Icon, color }, i) => (
+                <li key={key} style={{ "--step": color } as CSSProperties}>
+                  <p className="cr-step-label">
+                    <Icon className="size-3.5" aria-hidden="true" /> {label}
+                  </p>
+                  <p>{f[key]}</p>
+                  {i < steps.length - 1 && <ArrowRight className="cr-flow-arrow" aria-hidden="true" />}
+                </li>
+              ))}
+            </ol>
+          )}
+          {f.evidence && (
+            <div className="cr-evidence-block">
+              <p className="cr-step-label">
+                <Code className="size-3.5" aria-hidden="true" /> Evidence
+              </p>
+              <pre className="cr-evidence">{f.evidence}</pre>
+            </div>
+          )}
           <footer className="cr-finding-foot">
             {f.fixMissionId && (
               <Link href={missionHref(f.fixMissionId)} className="cr-link">
@@ -781,9 +852,7 @@ function FindingsView({
                 Fixing in a mission
               </Link>
             )}
-            {f.posted ? (
-              <span className="cr-posted">On GitHub</span>
-            ) : (
+            {!f.posted && (
               <label className="cr-select">
                 <input
                   type="checkbox"
@@ -816,7 +885,8 @@ function FindingsView({
             )}
           </footer>
         </article>
-      ))}
+        );
+      })}
     </div>
   );
 }

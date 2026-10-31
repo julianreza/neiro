@@ -44,8 +44,8 @@ import {
 const navigation: NavItem[] = [
   { href: "/", label: "Dashboard", icon: LayoutDashboard },
   { href: "/projects", label: "Projects", icon: FolderGit2 },
-  { href: "/reviews", label: "Code review", icon: ScanSearch },
   { href: "/needs-you", label: "Needs you", icon: Inbox },
+  { href: "/reviews", label: "Code review", icon: ScanSearch },
   { href: "/chat", label: "Chat", icon: MessagesSquare },
   { href: "/agents", label: "AI team", icon: Bot },
   { href: "/schedules", label: "Time AI", icon: Clock3 },
