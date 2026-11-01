@@ -6,6 +6,7 @@ import { toast } from "sonner";
 import { AgentSkills } from "@/components/agent-skills";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useRole } from "@/hooks/use-role";
@@ -58,10 +59,12 @@ export function AgentAddons({ agentId, profile, sharedWith, readOnly }: Props) {
           <TabsTrigger value="mcp"><Plug aria-hidden="true" />MCP</TabsTrigger>
           <TabsTrigger value="plugin"><Blocks aria-hidden="true" />Plugins</TabsTrigger>
           <TabsTrigger value="toolset"><Wrench aria-hidden="true" />Toolsets</TabsTrigger>
+          <TabsTrigger value="memory">Memory &amp; Soul</TabsTrigger>
         </TabsList>
         <TabsContent value="skill" className="pt-2">
           <AgentSkills agentId={agentId} profile={profile} sharedWith={[]} readOnly={readOnly} bare />
         </TabsContent>
+        <TabsContent value="memory" className="pt-2"><ProfileMemory agentId={agentId} readOnly={readOnly} /></TabsContent>
         {(Object.keys(KIND) as Kind[]).map((kind) => (
           <TabsContent key={kind} value={kind} className="pt-2">
             <AddonPanel kind={kind} agentId={agentId} profile={profile} readOnly={readOnly} />
@@ -70,6 +73,45 @@ export function AgentAddons({ agentId, profile, sharedWith, readOnly }: Props) {
       </Tabs>
     </section>
   );
+}
+
+type ContextFiles = { soul: string; memory: string; user: string; limits: { soulMax: number; memoryMax: number; userMax: number } };
+
+function ProfileMemory({ agentId, readOnly }: { agentId: string; readOnly: boolean }) {
+  const url = `/api/agents/${encodeURIComponent(agentId)}/memory`;
+  const [files, setFiles] = useState<ContextFiles | null>(null);
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    const controller = new AbortController();
+    fetch(url, { cache: "no-store", signal: controller.signal }).then(async (response) => {
+      if (!response.ok) throw new Error(await readError(response));
+      return response.json() as Promise<ContextFiles>;
+    }).then(setFiles).catch((failure: unknown) => { if (!controller.signal.aborted) setError(failure instanceof Error ? failure.message : "Could not load memory"); });
+    return () => controller.abort();
+  }, [url]);
+  async function save(body: Record<string, unknown>) {
+    setBusy(true);
+    try {
+      const response = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+      if (!response.ok) throw new Error(await readError(response));
+      const updated = await response.json() as ContextFiles;
+      const kind = body.action === "sync_soul_from_prompt" ? "soul" : body.kind;
+      if (kind === "soul" || kind === "memory" || kind === "user") setFiles((current) => current ? { ...current, [kind]: updated[kind], limits: updated.limits } : updated);
+      toast.success("Profile context saved");
+    } catch (failure) { toast.error(failure instanceof Error ? failure.message : "Save failed"); }
+    finally { setBusy(false); }
+  }
+  if (error) return <p role="alert" className="text-sm text-destructive">{error}</p>;
+  if (!files) return <p className="text-xs text-muted-foreground">Loading profile context…</p>;
+  return <div className="space-y-4">
+    <p className="text-xs text-muted-foreground">These files are shared by all agents using this local Hermes profile.</p>
+    {([ ["soul", "SOUL.md", files.limits.soulMax], ["memory", "MEMORY.md", files.limits.memoryMax], ["user", "USER.md", files.limits.userMax] ] as const).map(([kind, title, max]) => <section key={kind} className="space-y-2">
+      <div className="flex items-center justify-between"><label htmlFor={`context-${kind}`} className="text-sm font-medium">{title}</label><span className="text-xs text-muted-foreground">{files[kind].length} / {max}</span></div>
+      <Textarea id={`context-${kind}`} value={files[kind]} maxLength={max} readOnly={readOnly} onChange={(event) => setFiles({ ...files, [kind]: event.target.value })} />
+      {!readOnly && <div className="flex flex-wrap gap-2"><Button size="sm" variant="outline" disabled={busy} onClick={() => void save({ kind, content: files[kind] })}>Save {title}</Button>{kind === "soul" && <Button size="sm" variant="outline" disabled={busy} onClick={() => { if (window.confirm("Replace SOUL.md with the saved agent prompt?")) void save({ action: "sync_soul_from_prompt" }); }}>Sync from Agent Prompt</Button>}</div>}
+    </section>)}
+  </div>;
 }
 
 function AddonPanel({ kind, agentId, profile, readOnly }: { kind: Kind; agentId: string; profile: string; readOnly: boolean }) {

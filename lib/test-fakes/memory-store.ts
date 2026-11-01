@@ -37,6 +37,7 @@ export class MemoryStore implements OrchestratorStore {
   tokenUsage: TokenUsageRow[] = [];
   agents: Agent[] = [];
   private seq = 0;
+  private approvalClaims = new Set<string>();
 
   /* ---------- seeding helpers ---------- */
 
@@ -227,6 +228,14 @@ export class MemoryStore implements OrchestratorStore {
       runId: row.runId ?? null,
       runStartedAt: row.runStartedAt ?? null,
     });
+  }
+
+  async claimAutoApproval(runId: string, requestId: string): Promise<boolean> {
+    await yieldTick();
+    const key = `${runId}:${requestId}`;
+    if (this.approvalClaims.has(key)) return false;
+    this.approvalClaims.add(key);
+    return true;
   }
 
   async recordTokenUsage(row: TokenUsageRow): Promise<void> {

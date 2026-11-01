@@ -175,6 +175,10 @@ export type Mission = {
   status: MissionStatus;
   phase: MissionPhase;
   pauseAfterPlanning: boolean;
+  autoApproveSafeTools?: boolean;
+  /** Verification stages explicitly skipped after a preflight warning. */
+  skipQa?: boolean;
+  skipReview?: boolean;
   maxParallelWorkers: number;
   maxRetries: number;
   workspacePath: string | null;
@@ -272,6 +276,10 @@ export type MissionTask = TaskRouting & {
   runId: string | null;
   runAgentId: string | null;
   runStartedAt: string | null;
+  taskWorktreePath?: string | null;
+  taskBranch?: string | null;
+  taskIntegrationPending?: boolean;
+  verificationWaitStage?: "QA check" | "Final review" | null;
   /** Output of the completed coding run. */
   resultOutput: string | null;
   /** Hermes session of the task's coding runs; reused on every retry. */
@@ -316,6 +324,7 @@ export type TaskRunUsage = {
   inputTokens?: number | null;
   outputTokens?: number | null;
   cacheReadTokens?: number | null;
+  costUsd?: number | null;
   at: string;
 };
 

@@ -77,6 +77,11 @@ function toolResult(data: Record<string, unknown>): { exit?: number; ms?: number
   return { ...(exit !== undefined ? { exit } : {}), ...(ms !== undefined ? { ms: Math.round(ms) } : {}) };
 }
 
+const TERMINAL_RUN_EVENTS = new Set(["run.completed", "run.succeeded", "run.failed", "run.error", "run.cancelled", "run.canceled", "run.stopped", "run.interrupted", "run.finished"]);
+export function isTerminalRunEventType(type: string): boolean {
+  return TERMINAL_RUN_EVENTS.has(type.toLowerCase());
+}
+
 export function parseRunEvent(raw: string, eventName?: string): LogStep | null {
   const trimmed = raw.trim();
   if (!trimmed || trimmed === "[DONE]") return trimmed === "[DONE]" ? { kind: "done", text: "Run finished", at: null } : null;
@@ -141,10 +146,10 @@ export function parseRunEvent(raw: string, eventName?: string): LogStep | null {
   }
   // A tool's own end ("tool.completed", "tool_result"): exit code and time,
   // merged into its start row by appendStep. Before the run-level check.
-  if (tool && /complete|end|result|finish|done/.test(type)) {
-    return { kind: "tool", text: `Ran ${tool}`, at, ended: true, ...toolResult(data) };
+  if ((tool || type.includes("tool")) && /complete|end|result|finish|done/.test(type)) {
+    return { kind: "tool", text: `Ran ${tool ?? "a tool"}`, at, ended: true, ...toolResult(data) };
   }
-  if (type.includes("complete") || type.includes("done") || type === "run.finished") {
+  if (isTerminalRunEventType(type)) {
     return { kind: "done", text: "Run finished", at };
   }
   if (tool || type.includes("tool")) {

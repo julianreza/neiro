@@ -5,6 +5,7 @@ import { parseActionPayload, parseBotCommand, runBotAction, runBotCommand } from
 import { botDeps, telegramReplyTo } from "@/lib/bot-deps";
 import { answerCallbackQuery, sendTelegramMessage } from "@/lib/telegram";
 import { getSupabaseAdmin } from "@/lib/supabase";
+import { guardExternalPrompt } from "@/lib/system-one-gate";
 import type { NotificationAction } from "@/lib/notifications";
 
 /** A long button payload ("n.<notificationId>.<index>") is read back from the notification. */
@@ -51,7 +52,10 @@ export async function POST(request: NextRequest) {
       reply = action ? await runBotAction(action, deps, source) : "This button has expired.";
       if (update.id) await answerCallbackQuery(update.id, reply);
     } else {
-      reply = await runBotCommand(parseBotCommand(update.text), deps, source);
+      const command = parseBotCommand(update.text);
+      const text = command.kind === "mission" ? command.prompt : command.kind === "ask" ? command.question : command.kind === "clarify" ? command.answer : "";
+      const guard = text ? await guardExternalPrompt(text) : "unknown";
+      reply = guard === "flagged" ? "This message may contain instructions aimed at the agent. Review it in Neiro before proceeding." : await runBotCommand(command, deps, source);
     }
   } catch (err: unknown) {
     reply = `Something went wrong: ${err instanceof Error ? err.message : "unknown error"}`;

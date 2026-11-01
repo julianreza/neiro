@@ -101,6 +101,7 @@ type MissionView = Omit<DemoMission, "tasks"> & {
   rawArtifacts?: MissionArtifact[];
   /** Each finished run's tokens and model (live missions only). */
   runUsage?: TaskRunUsage[];
+  activeRunId?: string | null;
   /** Mission branch when it runs in a git worktree (live missions only). */
   workBranch?: string | null;
   baseBranch?: string | null;
@@ -138,6 +139,7 @@ function parseMissionList(json: unknown): MissionView[] {
     prompt: m.prompt,
     status: m.status,
     phase: m.phase,
+    activeRunId: m.runId,
     phaseChangedAt: m.phaseChangedAt,
     lastError: m.lastError,
     maxRetries: m.maxRetries,
@@ -199,6 +201,7 @@ function parseMissionDetail(json: unknown): MissionView | null {
     // Fork notes are instructions to the agent, shown in the task chat.
     artifacts: m.artifacts.filter((a) => a.kind !== "coding_output" && a.kind !== "fork_note" && a.kind !== "workspace_snapshot" && a.kind !== "run_failure").map((a) => ({
       id: a.id,
+      kind: a.kind,
       name: a.kind === "learned_skill" ? "SKILL.md" : `${a.kind.toUpperCase()}.md`,
       label: a.title,
       content: a.content,
@@ -358,6 +361,17 @@ export function MissionWorkspace({
     if (!ok) toast.error(String(data.error));
     else toast.success(`${id}: ${label}`);
     refresh();
+  }
+
+  async function steerTask(id: string, instruction: string): Promise<boolean> {
+    const task = tasks.find((item) => item.id === id);
+    if (!mission || !task?.rowId) return false;
+    const { ok, data } = await postJson(`/api/missions/${encodeURIComponent(mission.id)}/tasks/${encodeURIComponent(task.rowId)}/control`, { action: "steer", reply: instruction });
+    if (!ok) toast.error(String(data.error));
+    else if (data.warning) toast.warning(String(data.warning));
+    else toast.success("Steering instruction sent");
+    refresh();
+    return ok;
   }
 
   /** Branch a task's Hermes session and code again with the operator's note. */
@@ -606,6 +620,9 @@ export function MissionWorkspace({
                 </div>
               </div>
             )}
+            {mission.rawArtifacts?.some((artifact) => artifact.kind === "gateway_draining" && (artifact.runId === mission.activeRunId || tasks.some((task) => task.runId && task.runId === artifact.runId))) && (
+              <Alert><AlertTitle>Hermes is restarting</AlertTitle><AlertDescription>The gateway is draining. Active runs may be interrupted.</AlertDescription></Alert>
+            )}
             <Tabs key={mission.id} defaultValue={typeof window !== "undefined" && new URLSearchParams(window.location.search).has("artifact") ? "artifacts" : typeof window !== "undefined" && new URLSearchParams(window.location.search).has("task") ? "board" : mission.status === "completed" ? "result" : "board"}>
 
               <div className="flex items-center justify-between gap-2 border-b pb-3">
@@ -636,6 +653,7 @@ export function MissionWorkspace({
                 {mission.result ? <>
                   <div><h3 className="font-semibold">Mission summary</h3>{mission.result.summary ? <AgentMarkdown text={mission.result.summary} /> : <p className="text-sm text-muted-foreground">No summary recorded yet.</p>}</div>
                   <p className="text-sm text-muted-foreground">{mission.status === "completed" ? "Completed" : "In progress"} · {mission.result.retries} retries · QA passed {mission.result.qaPassed}/{mission.result.qaKnown} known · {mission.result.durationMs === null ? "Duration unavailable" : `${Math.round(mission.result.durationMs / 60000)} min including waiting`}</p>
+                  {!isDemo && <div className="text-sm"><h3 className="font-semibold">Estimated model cost</h3><p className="text-muted-foreground">{mission.result.cost?.cost == null ? "No cost estimate available." : `~$${mission.result.cost.cost.toFixed(6)} · ${mission.result.cost.priced}/${mission.result.cost.total} recorded runs priced.`} Estimates use available Hermes rates and may differ from billing, subscriptions, cache adjustments, or tool charges.</p></div>}
                   <div><h3 className="font-semibold">Verification by task</h3><ul className="divide-y">{mission.result.tasks.map((task) => <li key={task.id} className="flex flex-wrap justify-between gap-2 py-2 text-sm"><span>{task.title}</span><span>QA: {task.qa} · Review: {task.review}</span></li>)}</ul>{mission.result.tasks.length === 0 && <p className="text-sm text-muted-foreground">No tasks recorded.</p>}</div>
                   <div><h3 className="font-semibold">Recorded changes</h3>{mission.result.files.length ? <ul className="list-inside list-disc break-all text-sm">{mission.result.files.map((file) => <li key={file}>{file}</li>)}</ul> : <p className="text-sm text-muted-foreground">No changes recorded.</p>}{mission.result.filesMayBeIncomplete && <p className="text-sm text-muted-foreground">A recorded diff was truncated; this list may be incomplete.</p>}</div>
                   {mission.lastError && <p className="text-sm">Outstanding issue: {mission.lastError}</p>}
@@ -762,6 +780,7 @@ export function MissionWorkspace({
                   title={mission.title}
                   initialArtifactId={typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("artifact") : null}
                   files={isLive ? mission.artifacts : undefined}
+                  agentIds={isLive && role === "admin" ? routeAgents.map((agent) => ({ id: agent.id, name: agent.name })) : undefined}
                 />
               </TabsContent>
             </Tabs>
@@ -803,6 +822,7 @@ export function MissionWorkspace({
         onUpdate={updateTask}
         facts={isLive ? (tasks.find((task) => task.id === inspected)?.facts ?? null) : null}
         onFork={isLive ? forkTask : undefined}
+        onSteer={isLive && role !== "viewer" && Boolean(tasks.find((task) => task.id === inspected)?.runId) ? steerTask : undefined}
       />
     </div>
   );

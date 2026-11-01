@@ -6,6 +6,7 @@ import { mapArtifactRow, mapMissionRow, mapTaskRow } from "@/lib/orchestrator-st
 import { AppConfigError } from "@/lib/types";
 import { missionResult } from "@/lib/mission-result";
 import { loadRunActivity } from "@/lib/run-steps-store";
+import { loadMissionRunUsage } from "@/lib/run-usage";
 import { parseTokenBudget } from "@/lib/budget";
 import type { MissionDetailDTO } from "@/lib/types";
 
@@ -92,6 +93,12 @@ export async function GET(_request: NextRequest, context: RouteContext) {
       tasks: (tasks || []).map((t) => mapTaskRow(t as Record<string, unknown>)),
       artifacts: (artifacts || []).map((a) => mapArtifactRow(a as Record<string, unknown>)),
     };
+
+    try {
+      detail.runUsage = await loadMissionRunUsage(supabase, id);
+    } catch (err) {
+      console.warn("[mission-usage] unavailable", err);
+    }
 
     try {
       detail.activity = await loadRunActivity([detail.runId, ...detail.tasks.map((task) => task.runId)].filter((id): id is string => Boolean(id)));

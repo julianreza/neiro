@@ -2,16 +2,18 @@ import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 import { isAuthorizedRequest } from "@/lib/auth";
 import { getSupabaseAdmin } from "@/lib/supabase";
-import { findPendingControl, forkSession, stopRun, submitRunApproval, submitRunClarify } from "@/lib/agent-runtime";
+import { findPendingControl, forkSession, getRun, steerRun, stopRun, submitRunApproval, submitRunClarify } from "@/lib/agent-runtime";
 import { mapAgentRow, mapTaskRow } from "@/lib/orchestrator-store";
 import {
   advanceMission,
+  classifyRun,
   approveRoute,
   overrideRoute,
   reportAdvanceError,
 } from "@/lib/orchestrator";
 import { AppConfigError, UnsupportedRuntimeError } from "@/lib/types";
 import type { Agent, ApprovalChoice } from "@/lib/types";
+import { taskRetryPatch } from "@/lib/task-retry";
 
 const APPROVAL_ACTIONS: Record<string, ApprovalChoice> = {
   approve_tool: "once",
@@ -37,6 +39,7 @@ export async function POST(request: NextRequest, context: RouteContext) {
 
     const validActions = [
       "retry",
+      "steer",
       "stop",
       "approve_tool",
       "approve_tool_session",
@@ -112,6 +115,30 @@ export async function POST(request: NextRequest, context: RouteContext) {
       if (agentData) agent = mapAgentRow(agentData);
     }
 
+    if (action === "steer") {
+      if (!(await isAuthorizedRequest(request))) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+      const instruction = typeof reply === "string" ? reply.trim() : "";
+      if (!instruction || instruction.length > 4000) return NextResponse.json({ error: "Steering requires 1–4000 characters." }, { status: 400 });
+      if (!agent || !activeRunId) return NextResponse.json({ error: "This task has no active run to steer." }, { status: 409 });
+      try {
+        const current = await getRun(agent, activeRunId);
+        if (classifyRun(current.status) !== "pending" || current.status.toLowerCase() === "unknown") {
+          return NextResponse.json({ error: "The run is no longer active." }, { status: 409 });
+        }
+        const result = await steerRun(agent, activeRunId, instruction);
+        if (!result.ok) return NextResponse.json({ error: result.error ?? "The agent rejected the instruction." }, { status: result.status >= 400 && result.status < 500 ? result.status : 502 });
+        const { error } = await supabase.from("mission_artifacts").insert({
+          id: crypto.randomUUID(), mission_id: missionId, task_id: taskId,
+          title: "Steering instruction", kind: "steer_note", content: instruction,
+          dedupe_key: `steer:${crypto.randomUUID()}`, run_id: activeRunId,
+        });
+        // The instruction is already queued; do not suggest retrying it if recording failed.
+        return NextResponse.json({ ok: true, ...(error ? { warning: "Instruction sent, but its history could not be saved." } : {}) });
+      } catch (error: unknown) {
+        return NextResponse.json({ error: error instanceof Error ? error.message : "Could not steer this run." }, { status: error instanceof UnsupportedRuntimeError ? 409 : 502 });
+      }
+    }
+
     if (action === "mark_done") {
       const { data, error } = await supabase
         .from("mission_tasks")
@@ -144,14 +171,7 @@ export async function POST(request: NextRequest, context: RouteContext) {
       const { data, error } = await supabase
         .from("mission_tasks")
         .update({
-          stage: "Queued",
-          approval: false,
-          retries: (task.retries || 0) + 1,
-          // `result` holds the task requirements; only the previous output is reset.
-          result_output: null,
-          run_id: null,
-          run_agent_id: null,
-          run_started_at: null,
+          ...taskRetryPatch(task),
           updated_at: new Date().toISOString(),
         })
         .eq("id", taskId)

@@ -32,3 +32,19 @@ test("preflight blocks a missing branch and planner without changing the workspa
     assert.deepEqual(await readdir(dir), []);
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
+
+test("unavailable verification agents warn without blocking required runtimes", async () => {
+  const parsed = parseMissionCreateBody({ prompt: "test", mode: "plan" });
+  assert.equal(parsed.ok, true);
+  if (!parsed.ok) return;
+  const agents: Agent[] = [
+    { ...agent("planner", "fullstack"), stage: "orchestrator" },
+    { ...agent("worker", "fullstack"), stage: "workers" },
+    { ...agent("qa", "qa"), stage: "qa" },
+    { ...agent("review", "review"), stage: "reviewer" },
+  ];
+  const result = await missionPreflight(parsed.value, agents, { inspectRuntime: async (a) => ({ status: a.id === "qa" ? "unavailable" : "pass", reason: a.id === "qa" ? "QA runtime not installed" : "Ready" }) });
+  assert.equal(result.checks.find((check) => check.id === "qa")?.status, "warning");
+  assert.equal(result.checks.some((check) => check.status === "blocked"), false);
+  assert.equal(result.checks.find((check) => check.id === "reviewer")?.status, "pass");
+});

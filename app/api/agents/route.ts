@@ -1,3 +1,4 @@
+import { encryptAgentKey } from "@/lib/crypto-keys";
 import { NextResponse } from "next/server";
 import { connection } from "next/server";
 import type { NextRequest } from "next/server";
@@ -70,6 +71,8 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "Missing required agent name" }, { status: 400 });
     }
 
+    if (key_enc !== null && typeof key_enc !== "string") return NextResponse.json({ error: "Agent key must be a string." }, { status: 400 });
+
     const agentId = (id && typeof id === "string" ? id : name.toLowerCase().replace(/[^a-z0-9_-]/g, "-")).slice(0, 64);
 
     const supabase = getSupabaseAdmin();
@@ -95,7 +98,7 @@ export async function POST(request: NextRequest) {
       profile,
       prompt,
       url,
-      key_enc: key_enc || null,
+      key_enc: key_enc ? await encryptAgentKey(key_enc) : null,
       enabled: Boolean(enabled),
       active_run: false,
     };

@@ -1,7 +1,7 @@
 import "server-only";
 import { openRunEventStream } from "@/lib/agent-runtime";
 import { createStepCollector, RUN_ID } from "@/lib/run-steps";
-import { recordRunActivity, saveRunSteps } from "@/lib/run-steps-store";
+import { recordRunActivity, saveRunSteps, saveSubagentRuns } from "@/lib/run-steps-store";
 import type { Agent } from "@/lib/types";
 
 /*
@@ -35,12 +35,14 @@ async function listen(agent: Agent, runId: string): Promise<void> {
     lastWrite = now;
     void recordRunActivity(runId, event).catch((error: unknown) => console.warn("[run-activity]", error));
   });
-  let savedCount = 0;
+  let savedSteps = "";
   const save = async () => {
     const steps = collector.steps();
-    if (steps.length === savedCount) return;
-    savedCount = steps.length;
+    const snapshot = JSON.stringify(steps);
+    if (snapshot === savedSteps) return;
     await saveRunSteps(runId, steps);
+    await saveSubagentRuns(runId, steps);
+    savedSteps = snapshot;
   };
   const checkpoint = setInterval(() => {
     save().catch((err: unknown) => console.warn("[run-steps] checkpoint failed", runId, err));

@@ -1,5 +1,9 @@
 import "server-only";
 import { execFile } from "node:child_process";
+import { lstat, mkdir, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
+import { join } from "node:path";
+import { extractSkillBlock } from "@/lib/orchestrator-parsers";
 
 /**
  * Hermes skills for one profile, through the local `hermes` CLI.
@@ -153,4 +157,28 @@ export async function setSkillEnabled(profile: string, name: unknown, enabled: b
   }
   const next = enabled ? disabled.filter((n) => n !== skill) : [...new Set([...disabled, skill])];
   await run(withProfile(profile, ["config", "set", "skills.disabled", JSON.stringify(next)]));
+}
+
+/** Install a learned skill only when it does not replace a file already on disk. */
+export async function saveLearnedSkillFile(profile: string, name: string, content: string, root = join(homedir(), ".hermes")): Promise<string> {
+  const safeProfile = checkProfile(profile);
+  const safeName = checkName(name);
+  if (typeof content !== "string" || content.length > 100_000) throw new HermesSkillError("Invalid skill content.", 400);
+  const parsed = extractSkillBlock(`\`\`\`skill\n${content}\n\`\`\``);
+  if (!parsed || parsed.name !== safeName) throw new HermesSkillError("Skill frontmatter must match its name and include a description.", 400);
+  let directory = root;
+  const parts = safeProfile === "default" ? ["skills", safeName] : ["profiles", safeProfile, "skills", safeName];
+  for (const part of parts) {
+    directory = join(directory, part);
+    await mkdir(directory, { recursive: true, mode: 0o700 });
+    const info = await lstat(directory);
+    if (!info.isDirectory() || info.isSymbolicLink()) throw new HermesSkillError("Skill directory is not a local directory.", 409);
+  }
+  const file = join(directory, "SKILL.md");
+  try { await writeFile(file, content, { flag: "wx", mode: 0o600 }); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") throw new HermesSkillError("A skill with this name already exists.", 409);
+    throw error;
+  }
+  return file;
 }

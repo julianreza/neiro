@@ -1,3 +1,4 @@
+import { encryptAgentKey } from "@/lib/crypto-keys";
 import { NextResponse } from "next/server";
 import { connection } from "next/server";
 import type { NextRequest } from "next/server";
@@ -79,6 +80,9 @@ export async function PATCH(request: NextRequest, context: RouteContext) {
       if (key in body) {
         if (key === "activeRun") {
           updates.active_run = body[key];
+        } else if (key === "key_enc") {
+          if (body[key] !== null && typeof body[key] !== "string") return NextResponse.json({ error: "Agent key must be a string." }, { status: 400 });
+          updates.key_enc = body[key] ? await encryptAgentKey(body[key]) : null;
         } else if (key === "tokenBudget") {
           const budget = parseTokenBudget(body[key], "tokenBudget");
           if (!budget.ok) return NextResponse.json({ error: budget.error }, { status: 400 });

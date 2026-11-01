@@ -7,9 +7,9 @@
  */
 import type {
   HermesRunStatus,
-  HermesStartRunInput,
   HermesStartRunResult,
 } from "../hermes";
+import type { RunStartInput } from "../agent-runtime";
 import type { HermesClient } from "../orchestrator";
 import type { Agent } from "../types";
 
@@ -33,7 +33,7 @@ export class FakeHermes implements HermesClient {
   private byKey = new Map<string, string>();
   private seq = 0;
 
-  startRun = async (agent: Agent, input: HermesStartRunInput): Promise<HermesStartRunResult> => {
+  startRun = async (agent: Agent, input: RunStartInput): Promise<HermesStartRunResult> => {
     await yieldTick();
     if (this.deferStarts) return { kind: "deferred", reason: "busy" };
     const key = input.idempotencyKey;

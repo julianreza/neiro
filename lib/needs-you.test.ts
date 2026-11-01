@@ -30,6 +30,15 @@ test("a budget stop shows once as a budget item, not also as a mission error", (
   assert.deepEqual(items.map((i) => i.kind), ["budget"]);
 });
 
+test("task integration failures show their actual reason without duplicating the mission", () => {
+  const items = buildNeedsYou(
+    [{ id: "m1", title: "M", status: "running", lastError: 'Task [t1]: Merge conflict: src/a.ts', lastErrorAt: null }],
+    [{ id: "t1", missionId: "m1", title: "T", stage: "Needs you", retries: 0, routeReason: null }],
+  );
+  assert.equal(items.length, 1);
+  assert.equal(items[0].detail, "Merge conflict: src/a.ts");
+});
+
 test("tasks of missions that are not in the list are ignored", () => {
   const items = buildNeedsYou([], [
     { id: "t1", missionId: "gone", title: "T", stage: "Needs you", retries: 0, routeReason: null },

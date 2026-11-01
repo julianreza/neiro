@@ -64,8 +64,9 @@ function parseSnapshot(json: unknown): DashboardSnapshot {
   return {
     ...body,
     summary: {
-      activeMissions: Number(body.summary?.activeMissions) || 0,
+      activeMissions: typeof body.summary?.activeMissions === "number" ? body.summary.activeMissions : null,
       completedTasks24h: typeof body.summary?.completedTasks24h === "number" ? body.summary.completedTasks24h : null,
+      completedTasksWithoutTime: typeof body.summary?.completedTasksWithoutTime === "number" ? body.summary.completedTasksWithoutTime : null,
     },
     agentTokens: Array.isArray(body.agentTokens) ? body.agentTokens : [],
     modelTokens: Array.isArray(body.modelTokens) ? body.modelTokens : [],
@@ -412,6 +413,15 @@ export function DashboardHome() {
           <div key={label}>
             <span>{label}</span>
             <strong>{value}</strong>
+            {label === "Tasks completed · last 24 hours" && live && (
+              live.summary.completedTasks24h === null
+                ? <span>Completion time unavailable. Check the task completion SQL migration.</span>
+                : live.summary.completedTasksWithoutTime === null
+                  ? <span>Historical completion coverage is unavailable.</span>
+                  : (live.summary.completedTasksWithoutTime ?? 0) > 0
+                  ? <span>{live.summary.completedTasksWithoutTime} completed tasks have no recorded finish time.</span>
+                  : null
+            )}
           </div>
         ))}
       </div>

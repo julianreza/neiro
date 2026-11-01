@@ -9,6 +9,8 @@ import remarkGfm from "remark-gfm";
 import { ArrowLeft, Check, Copy, Download, GitCompare, Loader2, MessageSquarePlus, Quote, X } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
+import { TaskPlanEditor } from "@/components/task-plan-editor";
+import { useRole } from "@/hooks/use-role";
 import { Picker } from "@/components/ui/picker";
 import { StoryEmpty, StoryPill } from "@/components/history-story";
 import type { StoryTone } from "@/components/history-story";
@@ -255,6 +257,7 @@ function ReadView({
   const [notes, setNotes] = useState<Draft[]>([]);
   const [text, setText] = useState("");
   const [busy, setBusy] = useState<"revise" | "approve" | null>(null);
+  const role = useRole();
   const nextKey = useRef(1);
 
   // Markdown is memoized so text nodes (and the ranges on them) stay put.
@@ -418,6 +421,7 @@ function ReadView({
               </Button>
             </div>
             <div className="grid gap-2">
+              {role === "admin" && <TaskPlanEditor missionId={mission.id} tasks={mission.tasks} onChanged={onChanged} />}
               <Button
                 variant="secondary"
                 onClick={() => void control("revise_prd")}

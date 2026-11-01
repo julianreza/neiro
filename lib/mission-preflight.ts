@@ -11,6 +11,8 @@ import type { MissionCreateInput } from "@/lib/mission-input";
 
 export type PreflightCheck = { id: string; status: "pass" | "warning" | "blocked" | "unknown"; reason: string; href?: string };
 export type PreflightResult = { checkedAt: string; checks: PreflightCheck[] };
+type RuntimeInspection = { status: "pass" | "unknown" | "unavailable"; reason: string; model?: PreflightCheck };
+type PreflightDeps = { inspectRuntime: (agent: Agent) => Promise<RuntimeInspection> };
 const exec = promisify(execFile);
 
 /** Uses the same stage and fullstack preference as the orchestrator. */
@@ -19,7 +21,34 @@ export function choosePreflightAgent(agents: Agent[], stage: AgentStage): Agent 
   return candidates.find((agent) => agent.specialty.toLowerCase().includes("fullstack")) ?? candidates[0];
 }
 
-export async function missionPreflight(input: MissionCreateInput, testAgents?: Agent[]): Promise<PreflightResult> {
+async function inspectRuntime(agent: Agent): Promise<RuntimeInspection> {
+  if (asRuntime(agent.runtime) !== "hermes") {
+    const info = await listCliRuntime("ohmypi");
+    const status = !info.installed ? "unavailable" : info.reason ? "unknown" : "pass";
+    const reason = !info.installed ? `${agent.name}: Oh My Pi is not installed.` : info.reason ? `${agent.name}: model availability could not be checked.` : `${agent.name}: Oh My Pi is installed.`;
+    const found = info.models.some((model) => model.id === agent.model);
+    const model = info.installed && agent.model ? { id: `model:${agent.id}`, status: info.reason || !info.models.length ? "unknown" as const : found ? "pass" as const : "warning" as const, reason: found ? `${agent.name}: configured model is listed.` : `${agent.name}: configured model could not be confirmed.`, href: "/gateway" } : undefined;
+    return { status, reason, model };
+  }
+  try {
+    await resolveAgentEndpoint(agent);
+    const probe = await probeHermesAgent(agent);
+    const authFailed = !probe.ok && /status (401|403)\b/.test(probe.error ?? "");
+    const status = authFailed ? "unavailable" : !probe.ok || !probe.authVerified ? "unknown" : "pass";
+    const reason = authFailed ? `${agent.name}: Hermes rejected authentication.` : !probe.ok ? `${agent.name}: Hermes readiness could not be confirmed.` : !probe.authVerified ? `${agent.name}: Hermes is reachable, but authentication could not be verified.` : `${agent.name}: Hermes is reachable and authenticated.`;
+    let model: PreflightCheck | undefined;
+    if (probe.ok && agent.model) {
+      const catalog = await listHermesModelOptions(agent).catch(() => null);
+      const found = catalog?.models.some((option) => option.id === agent.model);
+      model = { id: `model:${agent.id}`, status: !catalog || !catalog.models.length ? "unknown" : found ? "pass" : "warning", reason: found ? `${agent.name}: configured model is listed.` : `${agent.name}: configured model could not be confirmed.`, href: "/gateway" };
+    }
+    return { status, reason, model };
+  } catch {
+    return { status: "unavailable", reason: `${agent.name}: Hermes URL or credentials are missing.` };
+  }
+}
+
+export async function missionPreflight(input: MissionCreateInput, testAgents?: Agent[], deps: PreflightDeps = { inspectRuntime }): Promise<PreflightResult> {
   const checks: PreflightCheck[] = [];
   const add = (id: string, status: PreflightCheck["status"], reason: string, href?: string) => checks.push({ id, status, reason, ...(href ? { href } : {}) });
   let repo = false;
@@ -46,6 +75,21 @@ export async function missionPreflight(input: MissionCreateInput, testAgents?: A
     }
   } else add("workspace", "warning", "No workspace selected; the agent runtime will choose its working folder.", "/projects");
 
+  if (!testAgents && repo && input.isolateWorkspace && input.maxParallelWorkers > 1) {
+    const { error } = await getSupabaseAdmin().from("mission_tasks").select("task_worktree_path,task_branch,task_integration_pending").limit(1);
+    if (error) add("task_isolation", "blocked", "Apply the Neiro v2 SQL migration before starting parallel isolated tasks.", "/gateway");
+    else add("task_isolation", "pass", "Parallel task isolation is available.");
+  }
+
+  if (!testAgents) {
+    const db = getSupabaseAdmin();
+    const [missionSchema, taskSchema] = await Promise.all([
+      db.from("missions").select("skip_qa,skip_review", { head: true }).limit(1),
+      db.from("mission_tasks").select("verification_wait_stage", { head: true }).limit(1),
+    ]);
+    add("verification_schema", missionSchema.error || taskSchema.error ? "blocked" : "pass", missionSchema.error || taskSchema.error ? "Apply the verification consent SQL migration before starting missions." : "Verification consent can be saved.", "/gateway");
+  }
+
   let agents = testAgents;
   if (!agents) {
     const { data, error } = await getSupabaseAdmin().from("agents").select("*").eq("enabled", true);
@@ -54,38 +98,29 @@ export async function missionPreflight(input: MissionCreateInput, testAgents?: A
   }
   const planner = choosePreflightAgent(agents, "orchestrator");
   const worker = choosePreflightAgent(agents, "workers") ?? planner;
+  if (repo && input.isolateWorkspace && input.maxParallelWorkers > 1 &&
+      agents.some((agent) => agent.enabled && ["workers", "qa", "reviewer"].includes(agent.stage) && asRuntime(agent.runtime) === "hermes")) {
+    add("task_runtime_isolation", "warning", "Hermes cannot enforce a separate directory per task. Parallel isolated tasks need Oh My Pi agents for coding, QA, and review.", "/agents");
+  }
   if (!planner) add("planner", "blocked", "No enabled orchestrator agent is available.", "/agents");
   else add("planner", "pass", `Planner: ${planner.name}.`);
   if (!worker) add("worker", "blocked", "No enabled coding agent or orchestrator fallback is available.", "/agents");
   else add("worker", "pass", `Coding fallback: ${worker.name}.`);
-  for (const [stage, label] of [["qa", "QA"], ["reviewer", "Review"]] as const) {
-    const agent = choosePreflightAgent(agents, stage);
-    add(stage, agent ? "pass" : "warning", agent ? `${label} agent: ${agent.name}.` : `No ${label} agent; this verification will be skipped.`, "/agents");
+  const qa = choosePreflightAgent(agents, "qa");
+  const reviewer = choosePreflightAgent(agents, "reviewer");
+  for (const [stage, label, agent] of [["qa", "QA", qa], ["reviewer", "Review", reviewer]] as const) {
+    if (!agent) add(stage, "warning", `No ${label} agent; this verification will be skipped.`, "/agents");
+    else {
+      const state = await deps.inspectRuntime(agent);
+      add(stage, state.status === "unavailable" ? "warning" : state.status, state.status === "unavailable" ? `${state.reason} ${label} will be skipped if you continue without verification.` : state.reason, "/agents");
+      if (state.model) checks.push(state.model);
+    }
   }
   const selected = [planner, worker, choosePreflightAgent(agents, "spec")].filter((agent): agent is Agent => Boolean(agent));
   for (const agent of [...new Map(selected.map((agent) => [agent.id, agent])).values()]) {
-    if (asRuntime(agent.runtime) !== "hermes") {
-      const info = await listCliRuntime("ohmypi");
-      add(`runtime:${agent.id}`, !info.installed ? "blocked" : info.reason ? "unknown" : "pass", !info.installed ? `${agent.name}: Oh My Pi is not installed.` : info.reason ? `${agent.name}: model availability could not be checked.` : `${agent.name}: Oh My Pi is installed.`, "/gateway");
-      if (info.installed && agent.model) {
-        const found = info.models.some((model) => model.id === agent.model);
-        add(`model:${agent.id}`, info.reason || info.models.length === 0 ? "unknown" : found ? "pass" : "warning", found ? `${agent.name}: configured model is listed.` : `${agent.name}: configured model could not be confirmed.`, "/gateway");
-      }
-      continue;
-    }
-    try {
-      resolveAgentEndpoint(agent);
-      const probe = await probeHermesAgent(agent);
-      const authFailed = !probe.ok && /status (401|403)\b/.test(probe.error ?? "");
-      add(`runtime:${agent.id}`, authFailed ? "blocked" : probe.ok ? "pass" : "unknown", probe.ok ? `${agent.name}: Hermes is reachable.` : authFailed ? `${agent.name}: Hermes rejected authentication.` : `${agent.name}: Hermes readiness could not be confirmed.`, "/gateway");
-      if (probe.ok && agent.model) {
-        const catalog = await listHermesModelOptions(agent).catch(() => null);
-        const found = catalog?.models.some((model) => model.id === agent.model);
-        add(`model:${agent.id}`, !catalog || !catalog.models.length ? "unknown" : found ? "pass" : "warning", found ? `${agent.name}: configured model is listed.` : `${agent.name}: configured model could not be confirmed.`, "/gateway");
-      }
-    } catch {
-      add(`runtime:${agent.id}`, "blocked", `${agent.name}: Hermes URL or credentials are missing.`, "/gateway");
-    }
+    const state = await deps.inspectRuntime(agent);
+    add(`runtime:${agent.id}`, state.status === "unavailable" ? "blocked" : state.status, state.reason, "/gateway");
+    if (state.model) checks.push(state.model);
   }
   return { checkedAt: new Date().toISOString(), checks };
 }

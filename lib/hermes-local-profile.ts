@@ -28,7 +28,7 @@ export async function localAgentEndpoint(id: string): Promise<{ profile: string;
   if (asRuntime(agent.runtime) !== "hermes") {
     throw new HermesSkillError("This is only for Hermes agents.", 409);
   }
-  const { baseUrl, apiKey } = resolveAgentEndpoint({ profile: agent.profile, url: agent.url, key_enc: agent.key_enc });
+  const { baseUrl, apiKey } = await resolveAgentEndpoint({ profile: agent.profile, url: agent.url, key_enc: agent.key_enc });
   let host = "";
   try {
     host = new URL(baseUrl).hostname;

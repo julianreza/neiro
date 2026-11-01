@@ -20,3 +20,9 @@ test("unparseable reports are unknown and recorded files are deduplicated", () =
   assert.equal(result.tasks[0].qa, "Unknown");
   assert.deepEqual(result.files, ["src/a.ts"]);
 });
+
+test("cost coverage makes missing run prices visible", () => {
+  const mission = { tasks: [], artifacts: [], runUsage: [{ costUsd: 0.12 }, { costUsd: null }] } as unknown as MissionDetailDTO;
+  assert.deepEqual(missionResult(mission).cost, { cost: 0.12, priced: 1, total: 2 });
+  assert.equal(missionResult({ ...mission, runUsage: undefined }).cost, null);
+});

@@ -30,6 +30,18 @@ export function hasPrProblem(lastError: string | null | undefined): boolean {
   return !!lastError && /(^|; )PR for "/.test(lastError);
 }
 
+export function taskProblem(taskId: string, reason: string): string {
+  return `Task [${taskId}]: ${reason}`;
+}
+
+export function taskProblemFor(lastError: string | null | undefined, taskId: string): string | null {
+  if (!lastError) return null;
+  const marker = `Task [${taskId}]: `;
+  const at = lastError.indexOf(marker);
+  if (at < 0) return null;
+  return lastError.slice(at + marker.length).split(/; (?:Task \[|PR for ")/, 1)[0].trim() || null;
+}
+
 export type NeedsYouItem = {
   kind: NeedsYouKind;
   missionId: string;
@@ -107,6 +119,7 @@ export function buildNeedsYou(missions: NeedsYouMission[], tasks: NeedsYouTask[]
 
   const budgetMissions = new Set<string>();
   const prMissions = new Set<string>();
+  const taskMissions = new Set<string>();
   for (const t of tasks) {
     const m = byId.get(t.missionId);
     if (!m || m.status === "cancelled" || m.status === "completed") continue;
@@ -126,6 +139,8 @@ export function buildNeedsYou(missions: NeedsYouMission[], tasks: NeedsYouTask[]
       if (budget) budgetMissions.add(m.id);
       const pr = budget ? null : prProblemFor(m.lastError, t.title);
       if (pr) prMissions.add(m.id);
+      const reason = budget || pr ? null : taskProblemFor(m.lastError, t.id);
+      if (reason) taskMissions.add(m.id);
       items.push({
         kind: budget ? "budget" : "task_failed",
         missionId: m.id,
@@ -136,6 +151,8 @@ export function buildNeedsYou(missions: NeedsYouMission[], tasks: NeedsYouTask[]
           ? (m.lastError as string)
           : pr
             ? `The PR could not be opened before Final review: ${pr}`
+            : reason
+              ? reason
             : `Failed after ${t.retries + 1} attempt(s). Retry it or mark it done.`,
         since: t.updatedAt ?? null,
       });
@@ -145,7 +162,7 @@ export function buildNeedsYou(missions: NeedsYouMission[], tasks: NeedsYouTask[]
   for (const m of missions) {
     // Needs-you covers active missions, including plans awaiting approval.
     // Completed/cancelled missions belong in history, not the action queue.
-    if ((m.status !== "running" && m.status !== "awaiting_plan_approval") || !m.lastError || budgetMissions.has(m.id) || prMissions.has(m.id)) continue;
+    if ((m.status !== "running" && m.status !== "awaiting_plan_approval") || !m.lastError || budgetMissions.has(m.id) || prMissions.has(m.id) || taskMissions.has(m.id)) continue;
     items.push({
       kind: "mission_error",
       missionId: m.id,

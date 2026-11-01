@@ -391,6 +391,9 @@ function TaskThread({
               gaveUp={task.stage === "Needs you" && m.kind === "failed-run" && m.attempt === task.retries}
             />
           ))}
+          {artifacts.filter((artifact) => artifact.taskId === (task.rowId ?? task.id) && artifact.kind === "steer_note").map((artifact) => (
+            <div key={artifact.id} className="story-ask task-chat-brief"><span className="story-meta">You · steering instruction</span><div className="story-ask-text">{artifact.content}</div></div>
+          ))}
           <TaskNext stage={task.stage} onInspect={() => onInspect(task.id)} reviewHref={reviewHref} retry={retry} />
         </div>
         {live && showSteps && (

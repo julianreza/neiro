@@ -1,3 +1,4 @@
+import { guardExternalPrompt } from "@/lib/system-one-gate";
 import { buildReviewPrompt, parseReviewOutput } from "@/lib/code-review";
 import type { CodeReviewStore, ReviewPatch } from "@/lib/code-reviews-store";
 import { fetchPr as realFetchPr, parsePrUrl, PrError, prSlug } from "@/lib/github-pr";
@@ -27,6 +28,7 @@ export type ReviewRunnerDeps = {
   /** The admin's edited review rules, or null for the default. */
   loadRules: () => Promise<string | null>;
   now: () => Date;
+  guardPrompt: (text: string) => Promise<"flagged" | "clear" | "unknown">;
 };
 
 /** A review stuck in `fetching` this long was cut off (crash, restart). */
@@ -54,6 +56,7 @@ async function resolveDeps(deps?: Partial<ReviewRunnerDeps>): Promise<ReviewRunn
       deps?.loadRules ??
       (deps?.reviews ? async () => null : (await import("@/lib/review-rules-store")).loadReviewRulesText),
     now: deps?.now ?? (() => new Date()),
+    guardPrompt: deps?.guardPrompt ?? (deps?.reviews ? async () => "unknown" : guardExternalPrompt),
   };
 }
 
@@ -122,6 +125,9 @@ async function startReview(review: CodeReview, d: ReviewRunnerDeps): Promise<boo
     pr = await d.fetchPr(ref);
   } catch (err: unknown) {
     return fail(d, review, "fetching", err instanceof PrError ? err.message : `Reading the PR failed: ${String(err)}`);
+  }
+  if (await d.guardPrompt(`${pr.title}\n\n${pr.body}`) === "flagged") {
+    return fail(d, review, "fetching", "The pull request text may contain instructions aimed at the reviewer. Inspect it before reviewing.");
   }
   await d.reviews.updateReview(review.id, {
     prTitle: pr.title || null,

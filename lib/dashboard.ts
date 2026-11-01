@@ -67,7 +67,7 @@ export type ActivityItem = {
 };
 
 export type DashboardSnapshot = PipeSnapshot & {
-  summary: { activeMissions: number; completedTasks24h: number | null };
+  summary: { activeMissions: number | null; completedTasks24h: number | null; completedTasksWithoutTime?: number | null };
   missions: MissionRow[];
   activity: ActivityItem[];
   /** Tokens of tasks last updated on each of the last TOKEN_DAYS local days, oldest first; the last one is today. */

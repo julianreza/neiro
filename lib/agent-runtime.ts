@@ -10,6 +10,7 @@ import {
   openHermesRunEventStream,
   startHermesRun,
   stopHermesRun,
+  steerHermesRun,
   submitHermesRunApproval,
   submitHermesRunClarify,
   type HermesControlDetails,
@@ -80,6 +81,12 @@ export async function stopRun(agent: Agent, runId: string): Promise<boolean> {
   return cliRuntimeOfRunId(runId) ? stopCliRun(runId) : stopHermesRun(agent, runId);
 }
 
+/** Route by run id so a runtime changed after launch cannot misroute steering. */
+export async function steerRun(agent: Agent, runId: string, text: string) {
+  if (cliRuntimeOfRunId(runId)) throw new UnsupportedRuntimeError();
+  return steerHermesRun(agent, runId, text);
+}
+
 /** A CLI session is just a key: the first run in it creates the real one. */
 export async function createSession(agent: Agent, title: string): Promise<string> {
   return cliOf(agent) ? `cli-${randomUUID()}` : createHermesSession(agent, title);
@@ -138,6 +145,12 @@ export async function forkSession(agent: Agent, sessionId: string, title?: strin
 export async function compactSession(agent: Agent, sessionId: string): Promise<void> {
   if (cliOf(agent)) throw new UnsupportedRuntimeError();
   await sendHermesSessionChat(agent, sessionId, { prompt: "/compact" });
+}
+
+/** Restore the checkpoint associated with a Hermes session. */
+export async function rollbackSession(agent: Agent, sessionId: string): Promise<void> {
+  if (cliOf(agent) || sessionId.startsWith("cli-")) throw new UnsupportedRuntimeError();
+  await sendHermesSessionChat(agent, sessionId, { prompt: "/rollback" });
 }
 
 const NO_CAPABILITIES: HermesServerCapabilities = { available: false, features: {}, endpoints: {} };

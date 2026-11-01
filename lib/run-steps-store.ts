@@ -2,6 +2,7 @@ import "server-only";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { compactSteps, readSavedSteps, RUN_ID } from "@/lib/run-steps";
 import type { LogStep } from "@/lib/run-events";
+import type { SubagentRun } from "@/lib/types";
 
 const TABLE = "run_steps";
 
@@ -61,4 +62,22 @@ export async function loadRunActivity(runIds: string[]): Promise<Record<string, 
   if (missingTable(error)) return {};
   if (error) throw new Error(error.message);
   return Object.fromEntries((data ?? []).map((row) => [row.run_id, { at: row.observed_at, terminal: row.terminal }]));
+}
+
+/**
+ * The sub-agents a task's run delegated to, kept on its mission_tasks row so
+ * the inspector shows them after the stream is gone. Best effort.
+ */
+export async function saveSubagentRuns(runId: string, steps: LogStep[]) {
+  const byId = new Map<string, SubagentRun>();
+  for (const step of steps) if (step.subagent) byId.set(step.subagent.delegationId, step.subagent);
+  if (byId.size === 0) return;
+  const { error } = await getSupabaseAdmin()
+    .from("mission_tasks")
+    .update({ subagent_runs: [...byId.values()] })
+    .eq("run_id", runId);
+  // Before 20261031000000_hermes_full_suite.sql the column is missing: skip.
+  if (error && error.code !== "42703" && error.code !== "PGRST204") {
+    console.warn("[run-steps] could not save sub-agents", runId, error.message);
+  }
 }

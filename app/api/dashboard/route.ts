@@ -2,6 +2,8 @@ import { NextResponse } from "next/server";
 import { connection } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { buildDashboard, TOKEN_DAYS } from "@/lib/dashboard";
+import { countCompletedTasks } from "@/lib/dashboard-counts";
+import { readCountedPages } from "@/lib/counted-pages";
 import { cliRuntimeOfRunId } from "@/lib/cli-runtime";
 import type { PipeTask } from "@/lib/dashboard";
 import { AppConfigError } from "@/lib/types";
@@ -52,14 +54,13 @@ export async function GET() {
     const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
     // A day longer than the chart, so the oldest local day is whole in any timezone.
     const tokenSince = new Date(Date.now() - (TOKEN_DAYS + 1) * 24 * 60 * 60 * 1000).toISOString();
-    const missionsRes = await db
+    const missionRows = await readCountedPages((from, to) => db
       .from("missions")
-      .select("id, title, status, phase")
+      .select("id, title, status, phase", { count: "exact" })
       .in("status", ["running", "awaiting_plan_approval"])
-      .order("updated_at", { ascending: false });
-    if (missionsRes.error) return NextResponse.json({ error: missionsRes.error.message }, { status: 500 });
+      .order("updated_at", { ascending: false }).order("id", { ascending: true }).range(from, to));
 
-    const missions = (missionsRes.data ?? []).map((r) => ({
+    const missions = missionRows.map((r) => ({
       id: String(r.id),
       title: String(r.title ?? ""),
       status: r.status as MissionStatus,
@@ -67,10 +68,16 @@ export async function GET() {
     }));
     const openIds = missions.map((m) => m.id);
 
-    const [openTasks, recentTasks, tokenRows, usageRows, askRows, completedCount] = await Promise.all([
-      openIds.length === 0
-        ? Promise.resolve({ data: [], error: null })
-        : db.from("mission_tasks").select(TASK_COLUMNS).in("mission_id", openIds),
+    const [openTaskRows, recentTasks, tokenRows, usageRows, askRows, completedCount, missionCount] = await Promise.all([
+      (async () => {
+        const rows: Record<string, unknown>[] = [];
+        for (let i = 0; i < openIds.length; i += 50) {
+          rows.push(...await readCountedPages((from, to) => db.from("mission_tasks")
+            .select(TASK_COLUMNS, { count: "exact" }).in("mission_id", openIds.slice(i, i + 50))
+            .order("id", { ascending: true }).range(from, to)) as unknown as Record<string, unknown>[]);
+        }
+        return rows;
+      })(),
       db
         .from("mission_tasks")
         .select(TASK_COLUMNS)
@@ -93,15 +100,15 @@ export async function GET() {
         .limit(TOKEN_LIMIT),
       // Chat and Ask questions are runs too; their tokens live on the question.
       askTokenRows(db, tokenSince),
-      db.from("mission_tasks").select("id", { count: "exact", head: true }).eq("stage", "Done").gte("updated_at", since).lte("updated_at", new Date().toISOString()),
+      countCompletedTasks(db, since, new Date().toISOString()),
+      db.from("missions").select("id", { count: "exact", head: true }).in("status", ["running", "awaiting_plan_approval"]),
     ]);
-    if (openTasks.error) return NextResponse.json({ error: openTasks.error.message }, { status: 500 });
     if (recentTasks.error) return NextResponse.json({ error: recentTasks.error.message }, { status: 500 });
     if (tokenRows.error) return NextResponse.json({ error: tokenRows.error.message }, { status: 500 });
 
     // A task can be both open and recent; count it once.
     const tasks = new Map<string, PipeTask>();
-    for (const row of [...(openTasks.data ?? []), ...(recentTasks.data ?? [])]) {
+    for (const row of [...openTaskRows, ...(recentTasks.data ?? [])]) {
       const task = toTask(row as Record<string, unknown>);
       tasks.set(task.id, task);
     }
@@ -144,7 +151,9 @@ export async function GET() {
       [...tokenTasks, ...asks],
       [...usage, ...asks],
     );
-    snapshot.summary.completedTasks24h = completedCount.error ? null : completedCount.count;
+    snapshot.summary.activeMissions = missionCount.error ? null : missionCount.count;
+    snapshot.summary.completedTasks24h = completedCount.completed;
+    snapshot.summary.completedTasksWithoutTime = completedCount.withoutTime;
     // Without the usage table the donut would show chat agents only; say why instead.
     if (usageRows.error) snapshot.agentTokensError = usageRows.error.message;
     return NextResponse.json(snapshot, { status: 200 });

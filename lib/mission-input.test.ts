@@ -18,6 +18,8 @@ test("parseMissionCreateBody applies defaults", () => {
       tokenBudget: null,
       mode: null,
       learnSkillOnDone: false,
+      autoApproveSafeTools: false,
+      allowSkippedVerification: false,
       attachments: [],
     },
   });
@@ -69,6 +71,7 @@ test("parseMissionCreateBody rejects invalid input", () => {
     [{}, /prompt/],
     [{ prompt: "   " }, /prompt/],
     [{ prompt: "x", pause_after_planning: "yes" }, /pause_after_planning/],
+    [{ prompt: "x", auto_approve_safe_tools: "yes" }, /auto_approve_safe_tools/],
     [{ prompt: "x", max_parallel_workers: 0 }, /max_parallel_workers/],
     [{ prompt: "x", max_parallel_workers: 11 }, /max_parallel_workers/],
     [{ prompt: "x", max_parallel_workers: 2.5 }, /max_parallel_workers/],

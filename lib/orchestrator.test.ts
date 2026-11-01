@@ -348,3 +348,174 @@ test("PRD revision: notes on v1 make the spec run write v2 with the notes, then 
   assert.equal(after.status, "awaiting_plan_approval");
   assert.equal(after.phase, "executing");
 });
+
+test("planning and spec runs record token usage once across concurrent ticks", async () => {
+  const { store, hermes, deps } = setup();
+  deps.runCost = async () => 0.012345;
+  store.seedAgent("orchestrator");
+  store.seedAgent("spec");
+  const mission = store.seedMission({ phase: "planning", runId: "run-plan-tokens", runAgentId: "orchestrator-agent" });
+  hermes.setRun("run-plan-tokens", { status: "completed", output: PLAN_OUTPUT, tokens: 123 });
+  await Promise.all([advanceMission(mission.id, deps), advanceMission(mission.id, deps)]);
+  Object.assign(store.missions.get(mission.id)!, { phase: "spec", runId: "run-spec-tokens", runAgentId: "spec-agent" });
+  hermes.setRun("run-spec-tokens", { status: "completed", output: "# PRD", tokens: 45 });
+  await Promise.all([advanceMission(mission.id, deps), advanceMission(mission.id, deps)]);
+  assert.deepEqual(store.tokenUsage.map(({ runId, stage, tokens, taskId }) => [runId, stage, tokens, taskId]), [
+    ["run-plan-tokens", "planning", 123, null], ["run-spec-tokens", "spec", 45, null],
+  ]);
+  assert.deepEqual(store.tokenUsage.map((usage) => usage.costUsd), [0.012345, 0.012345]);
+});
+
+test("learned skill installation is best effort and records the summary once", async () => {
+  const { store, hermes, deps } = setup();
+  store.seedAgent("orchestrator");
+  const mission = store.seedMission({ phase: "summarizing", learnSkillOnDone: true, runId: "run-summary", runAgentId: "orchestrator-agent" });
+  hermes.setRun("run-summary", { status: "completed", output: "Done.\n```skill\n---\nname: safe-test\ndescription: Test safely\n---\n\nRun tests.\n```" });
+  let savedName = "";
+  deps.installLearnedSkill = async (_agentId, name) => { savedName = name; throw new Error("not local"); };
+  await advanceMission(mission.id, deps);
+  assert.equal(savedName, "safe-test");
+  assert.equal(store.artifactsOf(mission.id, "learned_skill").length, 1);
+  assert.equal(store.missions.get(mission.id)?.status, "completed");
+});
+
+test("draining Hermes is recorded once for the currently running task", async () => {
+  const { store, hermes, deps } = setup();
+  store.seedAgent("workers");
+  const mission = store.seedMission({ phase: "executing" });
+  store.seedTask(mission.id, { taskKey: "T1", stage: "Coding", runId: "run-drain", runAgentId: "workers-agent" });
+  hermes.setRun("run-drain", { status: "running", shutdown_requested_at: 1730000000 });
+  await advanceMission(mission.id, deps);
+  await advanceMission(mission.id, deps);
+  assert.equal(store.artifactsOf(mission.id, "gateway_draining").length, 1);
+  assert.equal(store.artifactsOf(mission.id, "gateway_draining")[0].runId, "run-drain");
+});
+
+test("completed spec writes mission context to the isolated worktree before execution", async () => {
+  const { store, hermes, deps } = setup();
+  store.seedAgent("spec");
+  const mission = store.seedMission({ phase: "spec", worktreePath: "/tmp/example", runId: "run-spec-context", runAgentId: "spec-agent", prompt: "Create a widget" });
+  store.seedTask(mission.id, { taskKey: "T1" });
+  hermes.setRun("run-spec-context", { status: "completed", output: "# PRD\nA widget." });
+  let captured = "";
+  deps.writeWorktreeContext = async (_path, text) => { captured = text; };
+  await advanceMission(mission.id, deps);
+  assert.match(captured, /Create a widget/);
+  assert.match(captured, /# PRD/);
+  assert.equal(store.missions.get(mission.id)?.phase, "executing");
+});
+
+test("safe approval is claimed once across concurrent ticks and only approved once", async () => {
+  const { store, hermes, deps } = setup();
+  store.seedAgent("workers");
+  const mission = store.seedMission({ phase: "executing", autoApproveSafeTools: true });
+  const task = store.seedTask(mission.id, { stage: "Coding", taskKey: "T1", runId: "run-approval", runAgentId: "workers-agent" });
+  hermes.setRun("run-approval", { status: "running", controls: [{ kind: "approval", requestId: "request-safe", executionGeneration: 1, tool: "bash", command: "git status", choices: ["once", "deny"] }] });
+  let sent = 0;
+  deps.safeApproval = async () => true;
+  deps.hermes.submitApproval = async () => { sent++; return true; };
+  await Promise.all([advanceMission(mission.id, deps), advanceMission(mission.id, deps)]);
+  assert.equal(sent, 1);
+  assert.equal(store.artifactsOf(mission.id, "auto_approval").length, 1);
+  assert.equal(store.tasks.get(task.id)?.stage, "Coding");
+});
+
+test("parallel coding uses an isolated task worktree", async () => {
+  const { store, hermes, deps } = setup();
+  store.seedAgent("workers").runtime = "ohmypi";
+  const mission = store.seedMission({ phase: "executing", maxParallelWorkers: 2, workspacePath: "/repo/app", agentWorkspacePath: "/wt/app", worktreePath: "/wt", repoRoot: "/repo", workBranch: "neiro/example" });
+  const task = store.seedTask(mission.id, { taskKey: "T1" });
+  deps.taskWorkspace = {
+    prepare: async () => ({ worktreePath: "/task", branch: "neiro/example-task-t1" }),
+    merge: async () => "merged",
+  };
+  let cwd: string | undefined;
+  const start = hermes.startRun;
+  hermes.startRun = async (agent, input) => { cwd = input.cwd; return start(agent, input); };
+  await advanceMission(mission.id, deps);
+  assert.equal(cwd, "/task/app");
+  assert.equal(store.tasks.get(task.id)?.taskWorktreePath, "/task");
+  assert.equal(store.tasks.get(task.id)?.taskBranch, "neiro/example-task-t1");
+});
+
+test("isolated tasks do not start when the runtime cannot enforce the task directory", async () => {
+  const { store, hermes, deps } = setup();
+  store.seedAgent("workers");
+  const mission = store.seedMission({ phase: "executing", maxParallelWorkers: 2, workspacePath: "/repo", agentWorkspacePath: "/wt", worktreePath: "/wt", repoRoot: "/repo", workBranch: "neiro/example" });
+  const task = store.seedTask(mission.id, { taskKey: "T1" });
+  let prepared = false;
+  deps.taskWorkspace = { prepare: async () => { prepared = true; return { worktreePath: "/task", branch: "neiro/example-task-t1" }; }, merge: async () => "merged" };
+  await advanceMission(mission.id, deps);
+  assert.equal(prepared, false);
+  assert.equal(hermes.starts.length, 0);
+  assert.equal(store.tasks.get(task.id)?.stage, "Needs you");
+});
+
+test("isolated task is integrated exactly once after review passes", async () => {
+  const { store, hermes, deps } = setup();
+  store.seedAgent("reviewer");
+  const mission = store.seedMission({ phase: "executing", maxParallelWorkers: 2, worktreePath: "/wt", repoRoot: "/repo", workBranch: "neiro/example" });
+  const task = store.seedTask(mission.id, { taskKey: "T1", stage: "Final review", runId: "run-review", runAgentId: "reviewer-agent", taskWorktreePath: "/task", taskBranch: "neiro/example-task-t1" });
+  hermes.setRun("run-review", { status: "completed", output: "Looks good.\nVERDICT: APPROVED" });
+  let merges = 0;
+  deps.taskWorkspace = { prepare: async () => ({ worktreePath: "/task", branch: "neiro/example-task-t1" }), merge: async (_mission, _task, _title, after) => { merges++; await after?.(); return "merged"; } };
+  await advanceMission(mission.id, deps);
+  assert.equal(store.tasks.get(task.id)?.taskIntegrationPending, true);
+  assert.equal(store.artifactsOf(mission.id, "review_report")[0]?.title, `Task worktree review: ${task.title}`);
+  await Promise.all([advanceMission(mission.id, deps), advanceMission(mission.id, deps)]);
+  assert.equal(merges, 1);
+  assert.equal(store.tasks.get(task.id)?.stage, "Done");
+});
+
+test("an isolated merge conflict parks the task without deleting its worktree", async () => {
+  const { TaskMergeConflict } = await import("./worktree");
+  const { store, deps } = setup();
+  const mission = store.seedMission({ phase: "executing", maxParallelWorkers: 2, worktreePath: "/wt", repoRoot: "/repo", workBranch: "neiro/example" });
+  const task = store.seedTask(mission.id, { taskKey: "T1", stage: "Final review", taskIntegrationPending: true, taskWorktreePath: "/task", taskBranch: "neiro/example-task-t1" });
+  deps.taskWorkspace = { prepare: async () => ({ worktreePath: "/task", branch: "neiro/example-task-t1" }), merge: async () => { throw new TaskMergeConflict(["src/a.ts"]); } };
+  await advanceMission(mission.id, deps);
+  assert.equal(store.tasks.get(task.id)?.stage, "Needs you");
+  assert.equal(store.tasks.get(task.id)?.taskIntegrationPending, true);
+  assert.equal(store.tasks.get(task.id)?.taskWorktreePath, "/task");
+  assert.match(store.missions.get(mission.id)?.lastError ?? "", /src\/a.ts/);
+  store.missions.get(mission.id)!.lastErrorAt = "2026-01-01T00:00:00Z";
+  await advanceMission(mission.id, deps);
+  assert.match(store.missions.get(mission.id)?.lastError ?? "", /src\/a.ts/);
+  assert.equal(store.missions.get(mission.id)?.lastErrorAt, "2026-01-01T00:00:00Z");
+});
+
+test("a completed task recovers interrupted worktree cleanup before the mission summarizes", async () => {
+  const { store, deps } = setup();
+  const mission = store.seedMission({ phase: "executing", maxParallelWorkers: 2, worktreePath: "/wt", repoRoot: "/repo", workBranch: "neiro/example" });
+  const task = store.seedTask(mission.id, { taskKey: "T1", stage: "Done", taskWorktreePath: "/task", taskBranch: "neiro/example-task-t1" });
+  let attempts = 0;
+  deps.taskWorkspace = { prepare: async () => ({ worktreePath: "/task", branch: "neiro/example-task-t1" }), merge: async () => "merged", cleanup: async () => { attempts++; return attempts === 1 ? "busy" : "cleaned"; } };
+  await advanceMission(mission.id, deps);
+  assert.equal(store.missions.get(mission.id)?.phase, "executing");
+  assert.equal(store.tasks.get(task.id)?.taskWorktreePath, "/task");
+  await advanceMission(mission.id, deps);
+  assert.equal(store.tasks.get(task.id)?.taskWorktreePath, null);
+  assert.equal(store.missions.get(mission.id)?.phase, "summarizing");
+});
+
+test("explicit preflight consent skips an unavailable QA gate with recorded evidence", async () => {
+  const { store, hermes, deps } = setup();
+  store.seedAgent("qa");
+  const mission = store.seedMission({ phase: "executing", skipQa: true });
+  const task = store.seedTask(mission.id, { taskKey: "T1", stage: "QA check" });
+  await advanceMission(mission.id, deps);
+  assert.equal(store.tasks.get(task.id)?.stage, "Final review");
+  assert.equal(hermes.starts.length, 0);
+  assert.match(store.artifactsOf(mission.id, "gate_skipped")[0]?.content ?? "", /confirmed.*preflight/i);
+});
+
+test("a QA agent lost after preflight requires attention instead of silently skipping", async () => {
+  const { store, hermes, deps } = setup();
+  const mission = store.seedMission({ phase: "executing" });
+  const task = store.seedTask(mission.id, { taskKey: "T1", stage: "QA check" });
+  await advanceMission(mission.id, deps);
+  assert.equal(store.tasks.get(task.id)?.stage, "Needs you");
+  assert.equal(store.tasks.get(task.id)?.verificationWaitStage, "QA check");
+  assert.equal(hermes.starts.length, 0);
+  assert.equal(store.artifactsOf(mission.id, "gate_skipped").length, 0);
+});

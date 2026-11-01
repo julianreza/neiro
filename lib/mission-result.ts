@@ -2,6 +2,7 @@ import { extractGateVerdict } from "@/lib/orchestrator-parsers";
 import { parseReviewOutput, reviewPassed } from "@/lib/code-review";
 import { diffFileName } from "@/lib/reply-text";
 import type { MissionArtifact, MissionDetailDTO, MissionTask } from "@/lib/types";
+import { summarizeRunCosts } from "@/lib/usage-cost";
 
 export type Verification = "Passed" | "Failed" | "Skipped" | "Unknown";
 
@@ -25,6 +26,7 @@ export function missionResult(mission: MissionDetailDTO) {
   const end = Date.parse(mission.completedAt ?? "");
   return {
     summary: mission.artifacts.find((a) => a.kind === "mission_summary")?.content ?? null,
+    cost: mission.runUsage ? summarizeRunCosts(mission.runUsage) : null,
     tasks, files,
     retries: mission.tasks.reduce((sum, task) => sum + task.retries, 0),
     durationMs: Number.isFinite(start) && Number.isFinite(end) && end >= start ? end - start : null,

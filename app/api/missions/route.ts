@@ -1,4 +1,5 @@
 import { missionPreflight } from "@/lib/mission-preflight";
+import { verificationPolicy } from "@/lib/verification-policy";
 import { NextResponse } from "next/server";
 import { connection } from "next/server";
 import type { NextRequest } from "next/server";
@@ -163,6 +164,8 @@ export async function POST(request: NextRequest) {
     if (readiness.checks.some((check) => check.status === "blocked")) {
       return NextResponse.json({ error: "Mission is not ready to start.", ...readiness }, { status: 409 });
     }
+    const verification = verificationPolicy(readiness.checks, input.allowSkippedVerification);
+    if (!verification.ok) return NextResponse.json({ error: "Confirm before starting without unavailable verification.", ...readiness }, { status: 409 });
 
     const missionId = `mission-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 
@@ -216,6 +219,9 @@ export async function POST(request: NextRequest) {
         ...(input.mode !== null ? { mode: input.mode } : {}),
         // 20261031000000_hermes_full_suite.sql; only sent when used.
         ...(input.learnSkillOnDone ? { learn_skill_on_done: true } : {}),
+        ...(input.autoApproveSafeTools ? { auto_approve_safe_tools: true } : {}),
+        skip_qa: verification.skipQa,
+        skip_review: verification.skipReview,
         ...(input.attachments.length ? { attachments: input.attachments } : {}),
         ...workspaceColumns,
       })
@@ -223,8 +229,8 @@ export async function POST(request: NextRequest) {
       .single();
 
     if (createErr) {
-      const hint = /agent_workspace_path|work_branch|worktree_path|repo_root|base_branch|token_budget|\bmode\b|learn_skill_on_done|attachments/.test(createErr.message)
-        ? " Run the Supabase migrations (bun run db:push) first."
+      const hint = /agent_workspace_path|work_branch|worktree_path|repo_root|base_branch|token_budget|\bmode\b|learn_skill_on_done|auto_approve_safe_tools|skip_qa|skip_review|attachments/.test(createErr.message)
+        ? " Run the required SQL migrations in the Supabase SQL Editor first."
         : "";
       return NextResponse.json({ error: createErr.message + hint }, { status: 500 });
     }

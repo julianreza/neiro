@@ -48,6 +48,7 @@ import { countBySeverity, focusFiles } from "@/lib/code-review";
 import type { OpenPull } from "@/lib/github-pr";
 import type { ReviewSummary } from "@/lib/reviews-api";
 import type { CodeReview, ReviewFinding, ReviewSeverity, ReviewStatus, ReviewVerdict } from "@/lib/types";
+import { worktreeReviewHref } from "@/lib/worktree-reviews";
 
 /* ------------------------------------------------------------------ */
 /* Labels and colours                                                  */
@@ -117,6 +118,28 @@ function statusText(r: Pick<CodeReview, "status" | "verdict">) {
 function elapsed(fromIso: string, now: number) {
   const s = Math.max(0, Math.round((now - Date.parse(fromIso)) / 1000));
   return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, "0")}s`;
+}
+
+/** Worktree reports are mission artifacts; they are not GitHub PR reviews. */
+function WorktreeReviewList() {
+  const [reports, setReports] = useState<Array<{ id: string; missionId: string; title: string; createdAt: string }> | null>(null);
+  const [error, setError] = useState(false);
+  useEffect(() => {
+    const controller = new AbortController();
+    fetch("/api/reviews/worktree", { cache: "no-store", signal: controller.signal })
+      .then(async (response) => {
+        if (!response.ok) throw new Error("Unavailable");
+        return response.json() as Promise<{ reports: Array<{ id: string; missionId: string; title: string; createdAt: string }> }>;
+      })
+      .then((data) => setReports(Array.isArray(data.reports) ? data.reports : []))
+      .catch(() => { if (!controller.signal.aborted) setError(true); });
+    return () => controller.abort();
+  }, []);
+  return <section aria-label="Task worktree reviews" className="mt-4 border-t pt-4">
+    <h2 className="text-sm font-semibold">Task worktree reviews</h2>
+    <p className="cr-muted">Recent reports across projects, from isolated tasks before their changes are merged. Open the mission to read each report.</p>
+    {error ? <p role="status" className="cr-muted">Could not load task-worktree reviews.</p> : reports === null ? <p className="cr-muted">Loading…</p> : reports.length === 0 ? <p className="cr-muted">No task-worktree reviews recorded yet.</p> : <ul>{reports.map((report) => <li key={report.id} className="border-t py-2 text-sm"><Link className="cr-link break-words" href={worktreeReviewHref(report.missionId, report.id)}>{report.title}</Link><span className="cr-muted ml-2">{timeAgo(report.createdAt)}</span></li>)}</ul>}
+  </section>;
 }
 
 /* ------------------------------------------------------------------ */
@@ -400,6 +423,7 @@ export function CodeReviewBoard() {
           ))}
         </ul>
         )}
+        {view === "reviews" && source !== "manual" && <WorktreeReviewList />}
         <ReviewRulesButton canEdit={canAct} />
       </aside>
 

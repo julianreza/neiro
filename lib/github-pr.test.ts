@@ -315,3 +315,17 @@ test("fetchPrHead fetches the PR branch and refuses odd names and forks", async 
   const fork = fakeExec([["fetch", failed("fatal: couldn't find remote ref feat/x")]]);
   await assert.rejects(fetchPrHead("/repo", "feat/x", fork.exec), /forks are not supported/);
 });
+
+test("mergeMissionPr checks the mission branch and merges the chosen method", async () => {
+  const { mergeMissionPr } = await import("./github-pr");
+  const calls: string[][] = [];
+  const exec: Exec = async (_cmd, args) => {
+    calls.push(args);
+    if (args[0] === "pr" && args[1] === "view") return { stdout: JSON.stringify({ headRefName: "neiro/123", headRefOid: "a".repeat(40), isDraft: true, state: "OPEN" }), stderr: "" };
+    return { stdout: "", stderr: "" };
+  };
+  await mergeMissionPr({ owner: "org", repo: "repo", number: 7 }, "neiro/123", "rebase", "a".repeat(40), exec);
+  assert.ok(calls.some((args) => args.join(" ") === "pr ready 7 --repo org/repo"));
+  assert.ok(calls.some((args) => args.join(" ") === `pr merge 7 --repo org/repo --rebase --delete-branch --match-head-commit ${"a".repeat(40)}`));
+  await assert.rejects(mergeMissionPr({ owner: "org", repo: "repo", number: 7 }, "neiro/other", "squash", "a".repeat(40), exec));
+});

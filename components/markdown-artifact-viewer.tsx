@@ -12,6 +12,7 @@ import { Button } from "@/components/ui/button";
 
 export type ArtifactFile = {
   id?: string;
+  kind?: string;
   name: string;
   label: string;
   content: string;
@@ -44,10 +45,12 @@ export function MarkdownArtifactViewer({
   title,
   files,
   initialArtifactId,
+  agentIds,
 }: {
   title: string;
   files?: ArtifactFile[];
   initialArtifactId?: string | null;
+  agentIds?: { id: string; name: string }[];
 }) {
   const demoArtifacts: ArtifactFile[] = [
     {
@@ -63,6 +66,8 @@ export function MarkdownArtifactViewer({
     },
   ];
   const artifacts = files ?? demoArtifacts;
+  const [installAgent, setInstallAgent] = useState("");
+  const [installing, setInstalling] = useState(false);
   const [selected, setSelected] = useState(() => Math.max(0, artifacts.findIndex((file) => file.id === initialArtifactId)));
   const artifact = artifacts[Math.min(selected, artifacts.length - 1)];
   if (!artifact) {
@@ -99,7 +104,26 @@ export function MarkdownArtifactViewer({
           <span className="font-mono text-xs text-muted-foreground">
             {artifact.name}
           </span>
-          <div className="flex gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            {artifact.kind === "learned_skill" && agentIds && agentIds.length > 0 && <>
+              <label className="sr-only" htmlFor="install-skill-agent">Hermes agent</label>
+              <select id="install-skill-agent" value={installAgent} onChange={(event) => setInstallAgent(event.target.value)} className="max-w-40 rounded-md border bg-background px-2 py-1 text-xs">
+                <option value="">Select agent</option>
+                {agentIds.map((agent) => <option key={agent.id} value={agent.id}>{agent.name}</option>)}
+              </select>
+              <Button variant="outline" size="sm" disabled={!installAgent || installing} onClick={async () => {
+                const name = /^name\s*:\s*["']?([^\s"']+)/m.exec(artifact.content)?.[1];
+                if (!name) { toast.error("Skill name is missing"); return; }
+                setInstalling(true);
+                try {
+                  const response = await fetch(`/api/agents/${encodeURIComponent(installAgent)}/skills`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "save_local", name, content: artifact.content }) });
+                  const data = await response.json().catch(() => ({}));
+                  if (!response.ok) toast.error(typeof data.error === "string" ? data.error : "Could not install skill");
+                  else toast.success("Skill installed to Hermes");
+                } catch { toast.error("Could not reach Neiro"); }
+                finally { setInstalling(false); }
+              }}>{installing ? "Installing…" : "Install to Hermes Skills"}</Button>
+            </>}
             <Button
               variant="ghost"
               size="sm"

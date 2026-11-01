@@ -36,6 +36,7 @@ export function RunInspectorSheet({
   onUpdate,
   facts,
   onFork,
+  onSteer,
 }: {
   task: DemoTask | null;
   onClose: () => void;
@@ -44,10 +45,13 @@ export function RunInspectorSheet({
   facts?: InspectorFacts | null;
   /** Branch the task's session and retry Coding with these instructions. */
   onFork?: (id: string, instructions: string, keepOriginal: boolean) => Promise<boolean>;
+  onSteer?: (id: string, instructions: string) => Promise<boolean>;
 }) {
   const mobile = useIsMobile();
   const [reply, setReply] = useState("");
   const [forkNote, setForkNote] = useState("");
+  const [steerNote, setSteerNote] = useState("");
+  const [steering, setSteering] = useState(false);
   const [keepOriginal, setKeepOriginal] = useState(false);
   const [forking, setForking] = useState(false);
   const live = Boolean(facts);
@@ -158,6 +162,20 @@ export function RunInspectorSheet({
               <pre className="whitespace-pre-wrap font-mono text-xs leading-7">{`Task: ${task.title}\nStage: ${task.stage}\n\nI will inspect the requirements before changing code.\nBackend execution is unavailable in this UI preview.`}</pre>
             </div>
             </>
+            )}
+            {onSteer && (
+              <form className="space-y-3 border-t pt-4" onSubmit={async (event) => {
+                event.preventDefault();
+                if (!steerNote.trim() || steering) return;
+                setSteering(true);
+                try { if (await onSteer(task.id, steerNote.trim())) setSteerNote(""); }
+                finally { setSteering(false); }
+              }}>
+                <Label htmlFor="steer-note">Steer agent</Label>
+                <Textarea id="steer-note" maxLength={4000} required value={steerNote} onChange={(event) => setSteerNote(event.target.value)} placeholder="What should the agent do next?" aria-describedby="steer-note-help" />
+                <p id="steer-note-help" className="text-xs text-muted-foreground">Hermes applies this instruction after the next tool call.</p>
+                <Button type="submit" disabled={steering || !steerNote.trim()}>{steering ? "Sending…" : "Send instruction"}</Button>
+              </form>
             )}
             {facts?.canFork && onFork && (
               <form

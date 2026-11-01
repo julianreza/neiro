@@ -15,6 +15,7 @@
  * Task stages:    Queued → Coding → QA check → Final review → Done
  *                 (failed gates go back to Queued, or to "Needs you").
  */
+import path from "node:path";
 import {
   type HermesRunStatus,
   type HermesStartRunResult,
@@ -26,6 +27,7 @@ import {
   getRun as getAgentRun,
   resolveUnknownRun as resolveAgentUnknownRun,
   startRun as startAgentRun,
+  submitRunApproval as submitAgentApproval,
   type RunStartInput,
 } from "@/lib/agent-runtime";
 import { REPLY_SHAPES } from "@/lib/reply-format";
@@ -46,7 +48,9 @@ import {
   type TaskPatch,
 } from "@/lib/orchestrator-store";
 import {
-  createLayaRouter,
+  createConfiguredRouter,
+  calibrateRouterThreshold,
+  ROUTE_CONFIDENCE_THRESHOLD,
   isRouterEnabled,
   routeOutcome,
   type TaskRouter,
@@ -74,10 +78,18 @@ import {
   type MissionPr,
   type PrData,
 } from "@/lib/github-pr";
-import { hasPrProblem, prProblem } from "@/lib/needs-you";
+import { hasPrProblem, prProblem, taskProblem, taskProblemFor } from "@/lib/needs-you";
 import { readRepoRules, type RepoRules } from "@/lib/repo-rules";
 import { loadReviewRulesText } from "@/lib/review-rules-store";
-import { missionNeedsPr } from "@/lib/types";
+import { asRuntime, missionNeedsPr } from "@/lib/types";
+import { getSupabaseAdmin } from "@/lib/supabase";
+import { evaluateSafeApproval, guardExternalPrompt } from "@/lib/system-one-gate";
+import { isSyntheticRequestId } from "@/lib/approvals";
+import { writeWorktreeHermesContext, prepareTaskWorktree, mergeTaskWorktree, cleanupMergedTaskWorktree, TaskMergeConflict, type MissionWorkspace } from "@/lib/worktree";
+import { localAgentProfile } from "@/lib/hermes-local-profile";
+import { saveLearnedSkillFile } from "@/lib/hermes-skills";
+import { estimateAgentRunCost } from "@/lib/usage-cost";
+import { WORKTREE_REVIEW_PREFIX } from "@/lib/worktree-reviews";
 
 /* ------------------------------------------------------------------ */
 /* Dependencies                                                        */
@@ -95,6 +107,7 @@ export interface HermesClient {
   ): Promise<boolean>;
   forkSession?(agent: Agent, sessionId: string, title?: string): Promise<string>;
   getCapabilities?(agent: Agent): Promise<HermesServerCapabilities>;
+  submitApproval?: typeof submitAgentApproval;
 }
 
 export type OrchestratorDeps = {
@@ -128,6 +141,13 @@ export type OrchestratorDeps = {
    * real listener; when a custom store is passed (tests) it defaults to none.
    */
   watchRun?: ((agent: Agent, runId: string) => void) | null;
+  installLearnedSkill?: ((agentId: string, name: string, content: string) => Promise<void>) | null;
+  writeWorktreeContext?: typeof writeWorktreeHermesContext | null;
+  taskWorkspace?: { prepare: typeof prepareTaskWorktree; merge: typeof mergeTaskWorktree; cleanup?: typeof cleanupMergedTaskWorktree } | null;
+  safeApproval?: typeof evaluateSafeApproval;
+  guardPrText?: typeof guardExternalPrompt;
+  runCost?: typeof estimateAgentRunCost | null;
+  routerThreshold?: () => Promise<number>;
   /**
    * Git snapshots of the mission folder, for each coding attempt's diff.
    * Omit for real git; when a custom store is passed (tests) it defaults to none.
@@ -151,7 +171,21 @@ const realHermes: HermesClient = {
   resolveUnknownRun: resolveAgentUnknownRun,
   forkSession: forkAgentSession,
   getCapabilities: getAgentCapabilities,
+  submitApproval: submitAgentApproval,
 };
+
+let cachedCalibration: { until: number; threshold: number } | null = null;
+async function calibratedThreshold(): Promise<number> {
+  if (cachedCalibration && cachedCalibration.until > Date.now()) return cachedCalibration.threshold;
+  try {
+    const calibration = await calibrateRouterThreshold(getSupabaseAdmin());
+    const threshold = calibration?.accept ?? ROUTE_CONFIDENCE_THRESHOLD;
+    cachedCalibration = { threshold, until: Date.now() + 60 * 60_000 };
+    return threshold;
+  } catch {
+    return ROUTE_CONFIDENCE_THRESHOLD;
+  }
+}
 
 function resolveDeps(deps?: Partial<OrchestratorDeps>): OrchestratorDeps {
   return {
@@ -160,12 +194,22 @@ function resolveDeps(deps?: Partial<OrchestratorDeps>): OrchestratorDeps {
     now: deps?.now ?? (() => new Date()),
     newId: deps?.newId ?? (() => crypto.randomUUID()),
     router:
-      deps?.router !== undefined ? deps.router : isRouterEnabled() ? createLayaRouter() : null,
+      deps?.router !== undefined ? deps.router : isRouterEnabled() ? createConfiguredRouter() : null,
     notify: deps?.notify ?? (deps?.store ? undefined : supabaseNotifier),
     reviews: deps?.reviews !== undefined ? deps.reviews : deps?.store ? null : createCodeReviewStore(),
     github: deps?.github ?? { ensureMissionPr: realEnsureMissionPr, fetchPr: realFetchPr },
     reviewRules: deps?.reviewRules ?? (deps?.store ? async () => null : loadReviewRulesText),
     watchRun: deps?.watchRun !== undefined ? deps.watchRun : deps?.store ? null : watchRunSteps,
+    installLearnedSkill: deps?.installLearnedSkill !== undefined ? deps.installLearnedSkill : deps?.store ? null : async (agentId, name, content) => {
+      const profile = await localAgentProfile(agentId);
+      await saveLearnedSkillFile(profile, name, content);
+    },
+    safeApproval: deps?.safeApproval ?? evaluateSafeApproval,
+    guardPrText: deps?.guardPrText ?? (deps?.store ? async () => "unknown" : guardExternalPrompt),
+    runCost: deps?.runCost !== undefined ? deps.runCost : deps?.store ? null : estimateAgentRunCost,
+    routerThreshold: deps?.routerThreshold ?? (deps?.store ? async () => ROUTE_CONFIDENCE_THRESHOLD : calibratedThreshold),
+    taskWorkspace: deps?.taskWorkspace !== undefined ? deps.taskWorkspace : deps?.store ? null : { prepare: prepareTaskWorktree, merge: mergeTaskWorktree, cleanup: cleanupMergedTaskWorktree },
+    writeWorktreeContext: deps?.writeWorktreeContext !== undefined ? deps.writeWorktreeContext : deps?.store ? null : writeWorktreeHermesContext,
     workspace:
       deps?.workspace !== undefined
         ? deps.workspace
@@ -196,6 +240,8 @@ const FAILURE_STATUSES = new Set([
   "error",
   "cancelled",
   "canceled",
+  "interrupted",
+  "stopped",
   "expired",
   "expired_404",
 ]);
@@ -386,8 +432,13 @@ export async function advanceMission(
       break;
   }
 
-  if (ctx.problems.length > 0) {
-    await d.store.setMissionError(missionId, ctx.problems.join("; ").slice(0, MAX_ERROR_CHARS));
+  const retainedTaskProblems = detail.tasks.flatMap((task) => {
+    const reason = task.stage === "Needs you" ? taskProblemFor(detail.lastError, task.id) : null;
+    return reason ? [taskProblem(task.id, reason)] : [];
+  });
+  if (ctx.problems.length > 0 || retainedTaskProblems.length > 0) {
+    const message = [...new Set([...ctx.problems, ...retainedTaskProblems])].join("; ").slice(0, MAX_ERROR_CHARS);
+    if (message !== detail.lastError) await d.store.setMissionError(missionId, message);
   } else if (
     detail.lastError &&
     // A quiet tick must not erase the reason a task is still parked.
@@ -493,6 +544,26 @@ function specPrompt(m: MissionDetailDTO): string {
   ].join("\n");
 }
 
+async function recordMissionRunUsage(m: MissionDetailDTO, agent: Agent, run: HermesRunStatus, stage: string, d: OrchestratorDeps) {
+  if (!m.runId || (run.tokens ?? 0) <= 0) return;
+  await d.store.recordTokenUsage({
+    runId: m.runId, missionId: m.id, taskId: null, agentId: agent.id, agentName: agent.name,
+    stage, tokens: run.tokens ?? 0, model: run.runtime?.model || agent.model || run.model || null,
+    runtime: agent.runtime ?? "hermes", inputTokens: run.input_tokens,
+    outputTokens: run.output_tokens, cacheReadTokens: run.cache_read_tokens,
+    costUsd: await d.runCost?.(agent, run).catch(() => null) ?? null,
+  });
+}
+
+async function recordGatewayDraining(missionId: string, taskId: string | null, runId: string, run: HermesRunStatus, d: OrchestratorDeps) {
+  if (!run.shutdown_requested_at) return;
+  try {
+    await d.store.insertArtifactOnce({ missionId, taskId, title: "Hermes restarting", kind: "gateway_draining", content: "Hermes is draining for a restart; this run may be interrupted.", dedupeKey: `draining:${runId}`, runId });
+  } catch (error) {
+    console.warn("[orchestrator] could not record gateway restart", errorMessage(error));
+  }
+}
+
 async function stepMissionRun(m: MissionDetailDTO, d: OrchestratorDeps, ctx: PassContext) {
   const phase = m.phase as "planning" | "spec";
   const guard: MissionGuard = { phase, runId: m.runId, status: "running" };
@@ -565,6 +636,7 @@ async function stepMissionRun(m: MissionDetailDTO, d: OrchestratorDeps, ctx: Pas
   }
 
   const run = await d.hermes.getRun(agent, m.runId);
+  await recordGatewayDraining(m.id, null, m.runId, run, d);
   if (isUnknownRun(run)) {
     const verdict = await resolveUnknown(agent, run, d);
     // Released: the next tick starts the phase again. Otherwise keep the run
@@ -578,6 +650,8 @@ async function stepMissionRun(m: MissionDetailDTO, d: OrchestratorDeps, ctx: Pas
     d.watchRun?.(agent, m.runId);
     return;
   }
+
+  await recordMissionRunUsage(m, agent, run, phase, d);
 
   const output = (run.output ?? "").trim();
   if (outcome === "failure" || !output) {
@@ -631,11 +705,15 @@ async function stepMissionRun(m: MissionDetailDTO, d: OrchestratorDeps, ctx: Pas
     runId: m.runId,
     runStartedAt: m.runStartedAt,
   });
-  await enterExecuting(m, guard, d);
+  await enterExecuting(m, guard, d, output);
 }
 
 /** spec → executing; pauses for operator approval when requested. */
-async function enterExecuting(m: MissionDetailDTO, guard: MissionGuard, d: OrchestratorDeps) {
+async function enterExecuting(m: MissionDetailDTO, guard: MissionGuard, d: OrchestratorDeps, newPrd?: string) {
+  if (m.worktreePath && d.writeWorktreeContext) {
+    const latestPrd = newPrd ?? prdVersions(m.artifacts, m.id).at(-1)?.artifact.content ?? "";
+    await d.writeWorktreeContext(m.worktreePath, `# Mission objective\n\n${m.prompt}\n\n# Product requirements\n\n${latestPrd || "No PRD available."}\n`);
+  }
   const moved = await d.store.updateMissionIf(m.id, guard, {
     phase: "executing",
     runId: null,
@@ -699,6 +777,10 @@ async function stepSummarize(m: MissionDetailDTO, d: OrchestratorDeps, ctx?: Pas
           content: outcome.skill.content,
           dedupeKey: `skill:${m.id}`,
         });
+        if (m.runAgentId && d.installLearnedSkill) {
+          try { await d.installLearnedSkill(m.runAgentId, outcome.skill.name, outcome.skill.content); }
+          catch (error) { console.warn("[orchestrator] learned skill not installed", { missionId: m.id, error: errorMessage(error) }); }
+        }
       }
     }
   }
@@ -780,6 +862,7 @@ async function stepSkillRun(
   const run = await d.hermes.getRun(agent, m.runId);
   const outcome = classifyRun(run.status);
   if (outcome === "pending" && !isUnknownRun(run)) return "waiting";
+  if (!isUnknownRun(run)) await recordMissionRunUsage(m, agent, run, "summarizing", d);
   if (outcome !== "success") return null;
   const output = (run.output ?? "").trim();
   const summary = output.replace(/```skill[\s\S]*?```/i, "").trim();
@@ -792,6 +875,21 @@ async function stepSkillRun(
 
 async function stepTasks(m: MissionDetailDTO, d: OrchestratorDeps, ctx: PassContext) {
   if (m.tasks.length > 0 && m.tasks.every((t) => t.stage === "Done")) {
+    for (const task of m.tasks) {
+      if (!task.taskWorktreePath && !task.taskBranch) continue;
+      const mission = isolatedMissionWorkspace(m);
+      if (!mission || !task.taskWorktreePath || !task.taskBranch || !d.taskWorkspace?.cleanup) {
+        ctx.problems.push(`Task ${task.title} has an incomplete worktree cleanup configuration.`);
+        return;
+      }
+      try {
+        if (await d.taskWorkspace.cleanup(mission, { worktreePath: task.taskWorktreePath, branch: task.taskBranch }) === "busy") return;
+        if (!(await d.store.updateTaskIf(task.id, { stage: "Done", runId: null }, { taskWorktreePath: null, taskBranch: null }))) return;
+      } catch (error) {
+        ctx.problems.push(`Task ${task.title} was merged, but cleanup needs attention: ${errorMessage(error)}`);
+        return;
+      }
+    }
     await d.store.updateMissionIf(
       m.id,
       { phase: "executing", runId: null, status: "running" },
@@ -805,7 +903,28 @@ async function stepTasks(m: MissionDetailDTO, d: OrchestratorDeps, ctx: PassCont
     if (t.taskKey) stageByKey.set(t.taskKey, t.stage);
   }
 
+  const batched = new Set<string>();
+  if (d.router?.decideMany) {
+    const ready = m.tasks.filter((task) => task.stage === "Queued" && !task.routingStatus && !task.runId && (task.taskKey !== null || task.depends.length === 0) && task.depends.every((key) => stageByKey.get(key) === "Done"));
+    const locked: MissionTask[] = [];
+    for (const task of ready) {
+      if (await lockRouting(task, d, ctx)) locked.push(task);
+      batched.add(task.id);
+    }
+    if (locked.length) {
+      let decisions: Map<string, import("@/lib/task-router").RouteDecision> | null = null;
+      let failure: unknown = null;
+      try { decisions = await d.router.decideMany(locked, await d.store.listAllEnabledAgents()); }
+      catch (error) { failure = error; }
+      for (const task of locked) {
+        const decision = decisions?.get(task.id);
+        const router: TaskRouter = { decide: async () => { if (!decision) throw failure ?? new Error("Router returned no decision"); return decision; } };
+        await routeTask(task, router, d, ctx, true);
+      }
+    }
+  }
   for (const task of m.tasks) {
+    if (batched.has(task.id)) continue;
     if (task.stage === "Done" || task.stage === "Needs you" || task.stage === "Awaiting routing") {
       continue;
     }
@@ -869,14 +988,30 @@ async function stepTask(
     return;
   }
 
+  // Review passed: merge an isolated task under its own guarded claim.
+  if (task.stage === "Final review" && task.taskIntegrationPending && task.runId === null) {
+    await integrateIsolatedTask(m, task, d, ctx);
+    return;
+  }
+
   // Active stage without a run: start that stage's run (or skip a missing gate).
   if (task.runId === null) {
+    const qa = task.stage === "QA check";
+    const isReview = task.stage === "Final review";
+    if ((qa && m.skipQa) || (isReview && m.skipReview)) {
+      await d.store.insertArtifactOnce({ missionId: m.id, taskId: task.id, title: `${qa ? "QA" : "Review"} skipped: ${task.title}`, kind: "gate_skipped", content: `The operator confirmed at preflight that ${qa ? "QA" : "review"} was unavailable and may be skipped.`, dedupeKey: `${qa ? "qa" : "review"}:${task.id}:${task.retries}` });
+      await d.store.updateTaskIf(task.id, guard, isReview && task.taskWorktreePath ? { taskIntegrationPending: true } : { stage: qa ? "Final review" : "Done" });
+      return;
+    }
     const agent = await pickTaskAgent(task.stage, task, d);
     if (!agent) {
-      if (task.stage === "QA check" || task.stage === "Final review") {
-        const qa = task.stage === "QA check";
-        await d.store.insertArtifactOnce({ missionId: m.id, taskId: task.id, title: `${qa ? "QA" : "Review"} skipped: ${task.title}`, kind: "gate_skipped", content: `No enabled ${qa ? "QA" : "review"} agent was available.`, dedupeKey: `${qa ? "qa" : "review"}:${task.id}:${task.retries}` });
-        await d.store.updateTaskIf(task.id, guard, { stage: qa ? "Final review" : "Done" });
+      if (qa || isReview) {
+        const reason = `No enabled ${qa ? "QA" : "review"} agent is available. Enable an agent and retry.`;
+        const parked = await d.store.updateTaskIf(task.id, guard, { stage: "Needs you", verificationWaitStage: qa ? "QA check" : "Final review" });
+        if (parked) {
+          ctx.problems.push(taskProblem(task.id, reason));
+          await safeNotify(d.notify, { kind: "task_needs_you", missionId: m.id, taskId: task.id, title: "Verification needs attention", body: reason, dedupeKey: `verification:${task.id}:${task.retries}` });
+        }
       } else {
         ctx.problems.push(`No enabled worker agent for task "${task.title}"`);
       }
@@ -892,7 +1027,7 @@ async function stepTask(
     const claimedTask = { ...task, runId: token };
     // Build / Fix: the task's work goes into the mission PR before it is reviewed.
     let review: MissionReviewRun | null = null;
-    if (task.stage === "Final review" && missionNeedsPr(m.mode)) {
+    if (task.stage === "Final review" && missionNeedsPr(m.mode) && !task.taskWorktreePath) {
       review = await openMissionPr(m, claimedTask, d, ctx);
       if (!review) return;
     }
@@ -914,6 +1049,7 @@ async function stepTask(
   }
 
   const run = await d.hermes.getRun(agent, task.runId);
+  await recordGatewayDraining(m.id, task.id, task.runId, run, d);
   if (isUnknownRun(run)) {
     const verdict = await resolveUnknown(agent, run, d);
     if (verdict === "resolved") {
@@ -930,7 +1066,7 @@ async function stepTask(
   if (outcome === "pending") {
     // Keep its steps for the task chat, even with no one watching (cron).
     d.watchRun?.(agent, task.runId);
-    await trackPendingControls(m, task, guard, run, d);
+    await trackPendingControls(m, task, guard, run, d, agent);
     return;
   }
 
@@ -955,6 +1091,7 @@ async function stepTask(
       inputTokens: run.input_tokens,
       outputTokens: run.output_tokens,
       cacheReadTokens: run.cache_read_tokens,
+      costUsd: await d.runCost?.(agent, run).catch(() => null) ?? null,
     });
   }
 
@@ -999,7 +1136,7 @@ async function stepTask(
   await d.store.insertArtifactOnce({
     missionId: m.id,
     taskId: task.id,
-    title: `${isQa ? "QA Report" : "Review Report"}: ${task.title}`,
+    title: !isQa && task.taskWorktreePath ? `${WORKTREE_REVIEW_PREFIX}${task.title}` : `${isQa ? "QA Report" : "Review Report"}: ${task.title}`,
     kind: isQa ? "qa_report" : "review_report",
     content: output,
     dedupeKey: `${isQa ? "qa" : "review"}:${task.id}:${task.retries}`,
@@ -1014,7 +1151,7 @@ async function stepTask(
 
   // Final review: a JSON answer (the PR review prompt) decides, and its
   // findings go to the task's row on /reviews.
-  if (!isQa && missionNeedsPr(m.mode)) {
+  if (!isQa && missionNeedsPr(m.mode) && !task.taskWorktreePath) {
     const parsed = parseReviewOutput(output);
     if (parsed.ok) passed = reviewPassed(parsed.verdict, parsed.findings);
     await finishMissionReview(task, d, reviewPatchFrom(parsed, output, run.tokens ?? 0));
@@ -1026,11 +1163,46 @@ async function stepTask(
   }
 
   await d.store.updateTaskIf(task.id, guard, {
-    stage: isQa ? "Final review" : "Done",
+    ...(!isQa && task.taskWorktreePath ? { taskIntegrationPending: true } : { stage: isQa ? "Final review" as const : "Done" as const }),
     tokens,
     ...facts,
     ...clearRun,
   });
+}
+
+/** Merge a reviewed task only once, then publish the mission PR under the same lock. */
+async function integrateIsolatedTask(m: MissionDetailDTO, task: MissionTask, d: OrchestratorDeps, ctx: PassContext) {
+  const mission = isolatedMissionWorkspace(m);
+  if (!mission || !task.taskWorktreePath || !task.taskBranch || !d.taskWorkspace) {
+    ctx.problems.push(`Task ${task.title} has an incomplete isolated worktree configuration.`);
+    return;
+  }
+  const token = CLAIM_PREFIX + d.newId();
+  const idle: TaskGuard = { stage: "Final review", runId: null };
+  if (!(await d.store.updateTaskIf(task.id, idle, { runId: token, runStartedAt: d.now().toISOString() }))) return;
+  const claimed: TaskGuard = { stage: "Final review", runId: token };
+  let markedDone = false;
+  try {
+    const result = await d.taskWorkspace.merge(mission, { worktreePath: task.taskWorktreePath, branch: task.taskBranch }, task.title, async () => {
+      if (missionNeedsPr(m.mode)) {
+        const github = d.github ?? { ensureMissionPr: realEnsureMissionPr, fetchPr: realFetchPr };
+        const pr = await github.ensureMissionPr(m, task.title);
+        if (!(await d.store.updateMissionIf(m.id, { phase: "executing", runId: m.runId, status: "running" }, { prUrl: pr.url, prNumber: pr.number }))) throw new Error("Mission changed while opening its PR.");
+      }
+      markedDone = await d.store.updateTaskIf(task.id, claimed, { stage: "Done", runId: null, runAgentId: null, runStartedAt: null, taskIntegrationPending: false });
+      if (!markedDone) throw new Error("Task changed while integrating its branch.");
+    });
+    if (result === "busy") { await d.store.updateTaskIf(task.id, claimed, { runId: null, runStartedAt: null }); return; }
+    if (markedDone) await d.store.updateTaskIf(task.id, { stage: "Done", runId: null }, { taskWorktreePath: null, taskBranch: null });
+  } catch (error) {
+    const reason = error instanceof TaskMergeConflict ? `Merge conflict: ${error.files.join(", ")}` : errorMessage(error);
+    if (markedDone) { ctx.problems.push(`Task ${task.title} was merged, but cleanup needs attention: ${reason}`); return; }
+    const parked = await d.store.updateTaskIf(task.id, claimed, { stage: "Needs you", runId: null, runStartedAt: null });
+    if (parked) {
+      ctx.problems.push(taskProblem(task.id, reason));
+      await safeNotify(d.notify, { kind: "task_needs_you", missionId: m.id, taskId: task.id, title: "Task integration needs you", body: reason, dedupeKey: `integration:${task.id}:${task.retries}` });
+    }
+  }
 }
 
 /** Cache tokens and the real provider/model of a finished run, added to the task. */
@@ -1054,6 +1226,7 @@ async function trackPendingControls(
   guard: TaskGuard,
   run: HermesRunStatus,
   d: OrchestratorDeps,
+  agent: Agent,
 ) {
   const controls = run.controls ?? [];
   const before = (task.pendingControls ?? []).map((c) => c.requestId).join("|");
@@ -1071,6 +1244,16 @@ async function trackPendingControls(
   for (const control of controls) {
     if (control.kind !== "approval" || known.has(control.requestId)) continue;
     const what = control.command ? `${control.tool ?? "a tool"}: ${control.command}` : (control.tool ?? "a tool");
+    if ((m.autoApproveSafeTools || process.env.NEIRO_AUTO_APPROVE_SAFE === "on") && task.runId && !isSyntheticRequestId(control.requestId) && control.choices.includes("once") && d.hermes.submitApproval && d.store.claimAutoApproval && d.safeApproval) {
+      let approved = false;
+      try {
+        if (await d.safeApproval(control) && await d.store.claimAutoApproval(task.runId, control.requestId)) {
+          approved = await d.hermes.submitApproval(agent, task.runId, "once", { requestId: control.requestId, executionGeneration: control.executionGeneration });
+          if (approved) await d.store.insertArtifactOnce({ missionId: m.id, taskId: task.id, title: "Safe tool approved once", kind: "auto_approval", content: what, dedupeKey: `auto-approval:${task.runId}:${control.requestId}`, runId: task.runId });
+        }
+      } catch (error) { console.warn("[orchestrator] safe approval failed", errorMessage(error)); }
+      if (approved) continue;
+    }
     await safeNotify(d.notify, {
       kind: "task_needs_you",
       missionId: m.id,
@@ -1118,7 +1301,8 @@ async function recordAttemptDiff(m: MissionDetailDTO, task: MissionTask, d: Orch
   if (!d.workspace) return;
   try {
     const snap = m.artifacts.find((a) => a.dedupeKey === `snap:${task.id}:${task.retries}`)?.content ?? null;
-    const diff = await d.workspace.diff(m.agentWorkspacePath || m.workspacePath, snap);
+    const taskMission = taskWorkspaceMission(m, task);
+    const diff = await d.workspace.diff(taskMission.agentWorkspacePath || taskMission.workspacePath, snap);
     if (!diff) return;
     await d.store.insertArtifactOnce({
       missionId: m.id,
@@ -1206,12 +1390,7 @@ function isMissingColumnError(err: unknown): boolean {
  * tick first takes the `routing` lock with a guarded update, so an
  * overlapping tick that loses the race never calls the router.
  */
-async function routeTask(
-  task: MissionTask,
-  router: TaskRouter,
-  d: OrchestratorDeps,
-  ctx: PassContext,
-) {
+async function lockRouting(task: MissionTask, d: OrchestratorDeps, ctx: PassContext): Promise<boolean> {
   const now = d.now().toISOString();
   const unrouted: TaskGuard = { stage: "Queued", runId: null, routingStatus: null };
   let locked: boolean;
@@ -1226,9 +1405,20 @@ async function routeTask(
     if (!isMissingColumnError(err)) throw err;
     console.error("[orchestrator] routing columns missing", { taskId: task.id, error: errorMessage(err) });
     if (!ctx.problems.includes(ROUTING_MIGRATION_HINT)) ctx.problems.push(ROUTING_MIGRATION_HINT);
-    return;
+    return false;
   }
-  if (!locked) return;
+  return locked;
+
+}
+
+async function routeTask(
+  task: MissionTask,
+  router: TaskRouter,
+  d: OrchestratorDeps,
+  ctx: PassContext,
+  alreadyLocked = false,
+) {
+  if (!alreadyLocked && !(await lockRouting(task, d, ctx))) return;
 
   const lockGuard: TaskGuard = { stage: "Queued", runId: null, routingStatus: "routing" };
 
@@ -1237,7 +1427,8 @@ async function routeTask(
     const decision = await router.decide(task, agents);
     const agent = agents.find((a) => a.id === decision.agentId);
     if (!agent) throw new Error(`Laya picked an unknown agent: ${decision.agentId}`);
-    const outcome = routeOutcome(decision);
+    const threshold = await d.routerThreshold?.().catch(() => ROUTE_CONFIDENCE_THRESHOLD) ?? ROUTE_CONFIDENCE_THRESHOLD;
+    const outcome = routeOutcome(decision, threshold);
 
     const routed = await d.store.updateTaskIf(task.id, lockGuard, {
       stage: outcome.stage,
@@ -1498,6 +1689,18 @@ function taskPrompt(m: MissionDetailDTO, task: MissionTask): string {
   }
 }
 
+function isolatedMissionWorkspace(m: MissionDetailDTO): Extract<MissionWorkspace, { kind: "worktree" }> | null {
+  if (!m.worktreePath || !m.repoRoot || !m.workBranch || m.maxParallelWorkers <= 1) return null;
+  return { kind: "worktree", path: m.agentWorkspacePath || m.worktreePath, worktreePath: m.worktreePath, repoRoot: m.repoRoot, branch: m.workBranch, baseRef: m.baseBranch || "HEAD" };
+}
+
+function taskWorkspaceMission(m: MissionDetailDTO, task: MissionTask): MissionDetailDTO {
+  if (!task.taskWorktreePath || !task.taskBranch || !m.worktreePath) return m;
+  const relative = path.relative(m.worktreePath, m.agentWorkspacePath || m.worktreePath);
+  if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) throw new Error("Mission workspace is outside its worktree.");
+  return { ...m, agentWorkspacePath: path.join(task.taskWorktreePath, relative), worktreePath: task.taskWorktreePath, workBranch: task.taskBranch };
+}
+
 /**
  * Start the Hermes run for a task that this tick has already claimed
  * (`task.runId` is our claim token), then swap the token for the run id.
@@ -1514,12 +1717,34 @@ async function startTaskRun(
   const release = () =>
     d.store.updateTaskIf(task.id, claimGuard, { runId: null, runStartedAt: null });
 
+  const isolated = isolatedMissionWorkspace(m);
   const agent = knownAgent ?? (await pickTaskAgent(task.stage, task, d));
   if (!agent) {
     await release();
     ctx.problems.push(`No enabled agent for ${task.stage} on task "${task.title}"`);
     return;
   }
+  if (isolated && asRuntime(agent.runtime) === "hermes") {
+    const reason = "Hermes cannot enforce a separate working directory for this run. Use one worker or an Oh My Pi agent for parallel isolated tasks.";
+    const parked = await d.store.updateTaskIf(task.id, claimGuard, { stage: "Needs you", runId: null, runStartedAt: null });
+    if (parked) {
+      ctx.problems.push(taskProblem(task.id, reason));
+      await safeNotify(d.notify, { kind: "task_needs_you", missionId: m.id, taskId: task.id, title: "Task isolation needs attention", body: reason, dedupeKey: `isolation:${task.id}:${task.retries}` });
+    }
+    return;
+  }
+  if (task.stage === "Coding" && isolated && d.taskWorkspace && !task.taskWorktreePath) {
+    try {
+      const worktree = await d.taskWorkspace.prepare(isolated, task.id, task.taskKey);
+      const saved = await d.store.updateTaskIf(task.id, claimGuard, { taskWorktreePath: worktree.worktreePath, taskBranch: worktree.branch });
+      if (!saved) return;
+      task = { ...task, taskWorktreePath: worktree.worktreePath, taskBranch: worktree.branch };
+    } catch (error) {
+      await release();
+      throw error;
+    }
+  }
+  const taskMission = taskWorkspaceMission(m, task);
 
   // Only an agent with a budget needs its spend looked up.
   const agentUsed = agent.tokenBudget ? await d.store.agentMissionTokens(m.id, agent.id) : null;
@@ -1569,7 +1794,7 @@ async function startTaskRun(
   // so the task chat can show exactly what this attempt changed.
   if (task.stage === "Coding" && d.workspace) {
     try {
-      const snap = await d.workspace.snapshot(m.agentWorkspacePath || m.workspacePath);
+      const snap = await d.workspace.snapshot(taskMission.agentWorkspacePath || taskMission.workspacePath);
       if (snap) {
         await d.store.insertArtifactOnce({
           missionId: m.id,
@@ -1588,10 +1813,10 @@ async function startTaskRun(
   let started: HermesStartRunResult;
   try {
     started = await d.hermes.startRun(agent, {
-      prompt: review?.prompt ?? taskPrompt(m, task),
+      prompt: review?.prompt ?? taskPrompt(taskMission, task),
       sessionId,
       sessionKey: memoryKey(m),
-      cwd: m.agentWorkspacePath || m.workspacePath || undefined,
+      cwd: taskMission.agentWorkspacePath || taskMission.workspacePath || undefined,
       idempotencyKey: `${TASK_STAGE_KEY[task.stage]}-${task.id}-${task.retries}`,
     });
   } catch (err: unknown) {
@@ -1726,6 +1951,16 @@ async function openMissionPr(
       // pr_url column not migrated yet: the PR still exists and is reviewed.
       console.warn("[orchestrator] could not save the mission PR", errorMessage(err));
     }
+  }
+
+  if (await d.guardPrText?.(`${data.title}\n\n${data.body}`) === "flagged") {
+    const reason = "The pull request text may contain instructions aimed at the reviewer. Inspect it before reviewing.";
+    const parked = await d.store.updateTaskIf(task.id, claimGuard, { stage: "Needs you", runId: null, runAgentId: null, runStartedAt: null });
+    if (parked) {
+      ctx.problems.push(taskProblem(task.id, reason));
+      await safeNotify(d.notify, { kind: "task_needs_you", missionId: m.id, taskId: task.id, title: "Pull request review needs attention", body: reason, dedupeKey: `pr-guard:${task.id}:${task.retries}` });
+    }
+    return null;
   }
 
   let reviewId: string | null = null;

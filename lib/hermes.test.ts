@@ -3,12 +3,14 @@ import assert from "node:assert/strict";
 import {
   buildModelOptions,
   cleanSessionKey,
+  createHermesSession,
   clearHermesCapabilitiesCache,
   forkHermesSession,
   getHermesDetailedInventory,
   getHermesRun,
   getHermesServerCapabilities,
   readinessOf,
+  probeHermesAgent,
   resolveHermesUnknownRun,
   startHermesRun,
   submitHermesRunApproval,
@@ -58,6 +60,20 @@ afterEach(() => {
 });
 
 const header = (call: Call, name: string) => new Headers(call.init?.headers).get(name);
+
+test("session creation accepts Hermes nested session responses", async () => {
+  stub((call) => call.init?.method === "POST" ? Response.json({ object: "hermes.session", session: { id: "session-123" } }, { status: 201 }) : Response.json({}));
+  assert.equal(await createHermesSession(agent, "Task"), "session-123");
+  assert.equal(calls[1].url, "https://hermes.example/api/sessions/session-123");
+});
+
+test("a public health endpoint cannot hide rejected Hermes credentials", async () => {
+  stub((call) => call.url.endsWith("/health/detailed") ? new Response("Unauthorized", { status: 401 }) : Response.json({ status: "ok" }));
+  const result = await probeHermesAgent(agent);
+  assert.equal(result.ok, false);
+  assert.match(result.error ?? "", /401/);
+  assert.equal(calls.length, 1);
+});
 
 test("the session key header is cleaned and capped at 256 characters", async () => {
   assert.equal(cleanSessionKey("neiro:project:1\r\nX-Evil: 1\0"), "neiro:project:1X-Evil: 1");
@@ -212,4 +228,45 @@ test("fork returns the new session id", async () => {
   assert.equal(await forkHermesSession(agent, "s1", "Fork: x"), "api_2");
   assert.ok(calls[0].url.endsWith("/api/sessions/s1/fork"));
   assert.deepEqual(calls[0].body, { title: "Fork: x" });
+});
+
+test("encrypted custom credentials are decrypted before sending to Hermes", async () => {
+  const { encryptAgentKey } = await import("./crypto-keys");
+  const previous = process.env.NEIRO_ENCRYPTION_KEY;
+  process.env.NEIRO_ENCRYPTION_KEY = "test-hermes-encryption-key";
+  try {
+    const encrypted = await encryptAgentKey("custom-credential");
+    stub(() => Response.json({ run_id: "r1" }));
+    await startHermesRun({ ...agent, key_enc: encrypted }, { prompt: "hello" });
+    assert.equal(header(calls[0], "Authorization"), "Bearer custom-credential");
+  } finally {
+    if (previous === undefined) delete process.env.NEIRO_ENCRYPTION_KEY;
+    else process.env.NEIRO_ENCRYPTION_KEY = previous;
+  }
+});
+
+test("steering sends trimmed input to the active Hermes run and surfaces rejection", async () => {
+  const { steerHermesRun } = await import("./hermes");
+  stub(() => Response.json({ accepted: true }));
+  assert.deepEqual(await steerHermesRun(agent, "run/a", "  Check tests  "), { ok: true, status: 200 });
+  assert.equal(calls[0].url, "https://hermes.example/v1/runs/run%2Fa/steer");
+  assert.deepEqual(calls[0].body, { input: "Check tests" });
+  stub(() => new Response("Run finished", { status: 409 }));
+  assert.deepEqual(await steerHermesRun(agent, "run/a", "x"), { ok: false, status: 409, error: "Run finished" });
+});
+
+test("steering does not route an Oh My Pi run to Hermes", async () => {
+  const { steerRun } = await import("./agent-runtime");
+  const { UnsupportedRuntimeError } = await import("./types");
+  await assert.rejects(steerRun(agent, "omp_7cce91df-3b59-477b-a6fa-9bf782921835", "check"), UnsupportedRuntimeError);
+});
+
+test("session chat preserves agent instructions and rollback uses Hermes session", async () => {
+  const { sendHermesSessionChat } = await import("./hermes");
+  const { rollbackSession } = await import("./agent-runtime");
+  stub(() => Response.json({ response: "ok" }));
+  await sendHermesSessionChat(agent, "session-1", { prompt: "hello", instructions: "Be concise" });
+  assert.equal(calls[0].body?.instructions, "Be concise");
+  await rollbackSession(agent, "session-1");
+  assert.equal(calls[1].body?.message, "/rollback");
 });

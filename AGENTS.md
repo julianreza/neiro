@@ -1,6 +1,6 @@
 # neiro
 
-Next.js 16.4.3 App Router application built with React 19.3, TypeScript 5, and Tailwind CSS v4 (`@tailwindcss/turbopack`), managed with Bun (`bun@1.4.4`). Currently at initial scaffold stage (`app/`, `public/`) with no `src/` directory or test runner configured.
+Next.js 16.4.3 App Router mission-control dashboard for Hermes and Oh My Pi, built with React 19.3, TypeScript 5, Tailwind CSS v4, Supabase Postgres, and the bundled Laya task router, managed with Bun (`bun@1.4.4`).
 
 <!-- BEGIN:nextjs-agent-rules -->
 
@@ -20,9 +20,13 @@ This block is written and re-added by `next dev` — verify at `node_modules/nex
 - Start production server: `bun run start`
 - Lint (ESLint 9 flat config in `eslint.config.mjs`): `bun run lint`
 - Typecheck: `bunx next typegen && bunx tsc --noEmit` (`next typegen` generates `.next/types/` required by `next-env.d.ts` and `tsconfig.json` on a clean checkout)
-- Tests: none configured yet (no `test` script in `package.json`)
+- Tests: `bun run test` (Bun unit and integration tests), `bun run test:e2e` (Playwright)
+- Migrations: `bun run db:new <name>` and `bun run db:push`; never edit an applied migration.
 
 ## Conventions
+
+- Authentication is enforced by `proxy.ts`. GET handlers reading uncached state call `await connection()` from `next/server`.
+- Orchestrator state transitions use guarded updates and idempotency keys when starting runs.
 
 - Directory layout: App Router files live at repo root in `app/` (`layout.tsx`, `page.tsx`, `globals.css`) and static assets in `public/`; there is no `src/` directory.
 - Imports & TypeScript: `"strict": true` in `tsconfig.json`; `@/*` aliases the repo root (`./*`). Use `import type` for type-only imports, double quotes, semicolons, and 2-space indentation.

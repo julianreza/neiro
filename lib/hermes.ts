@@ -1,3 +1,4 @@
+import { decryptAgentKey } from "@/lib/crypto-keys";
 import { isSyntheticRequestId, normalizePendingControls } from "@/lib/approvals";
 import { AppConfigError } from "@/lib/types";
 import type { Agent, ApprovalChoice, PendingControl, ReasoningEffort } from "@/lib/types";
@@ -8,15 +9,16 @@ export type HermesEndpointConfig = {
   profilePrefix: string;
 };
 
-export function resolveAgentEndpoint(
+export async function resolveAgentEndpoint(
   agent?: Pick<Agent, "profile" | "url" | "key_enc"> | null,
-): HermesEndpointConfig {
+): Promise<HermesEndpointConfig> {
   const customUrl = agent?.url?.trim();
   const envUrl = process.env.HERMES_DEFAULT_URL?.trim();
   const rawBaseUrl = customUrl || envUrl || "";
   const baseUrl = rawBaseUrl.replace(/\/+$/, "");
 
-  const customKey = agent?.key_enc?.trim();
+  const storedKey = agent?.key_enc?.trim();
+  const customKey = storedKey ? await decryptAgentKey(storedKey) : undefined;
   const envKey = process.env.HERMES_DEFAULT_KEY?.trim();
   const apiKey = customKey || envKey || "";
 
@@ -40,7 +42,7 @@ async function hermesFetch(
   options: RequestInit = {},
   customSignal?: AbortSignal,
 ): Promise<Response> {
-  const { baseUrl, apiKey, profilePrefix } = resolveAgentEndpoint(agent);
+  const { baseUrl, apiKey, profilePrefix } = await resolveAgentEndpoint(agent);
   const url = `${baseUrl}${profilePrefix}${path}`;
 
   const headers = new Headers(options.headers || {});
@@ -59,6 +61,19 @@ async function hermesFetch(
 }
 
 type HermesAgentRef = Pick<Agent, "profile" | "url" | "key_enc">;
+
+export type HermesSteerResult = { ok: boolean; status: number; error?: string };
+
+/** Queue an instruction for a running Hermes agent. */
+export async function steerHermesRun(agent: Agent, runId: string, text: string): Promise<HermesSteerResult> {
+  const res = await hermesFetch(agent, `/v1/runs/${encodeURIComponent(runId)}/steer`, {
+    method: "POST", body: JSON.stringify({ input: text.trim() }),
+  });
+  if (res.ok) return { ok: true, status: res.status };
+  const message = (await res.text().catch(() => "")).trim().slice(0, 1000);
+  return { ok: false, status: res.status, error: message || `HTTP ${res.status}` };
+}
+
 
 const textOf = (v: unknown): string | undefined => (typeof v === "string" && v.trim() ? v.trim() : undefined);
 const numOf = (v: unknown): number | undefined => (typeof v === "number" && Number.isFinite(v) ? v : undefined);
@@ -92,6 +107,8 @@ export type HermesProbeResult = {
   details?: Record<string, unknown>;
   readiness?: HermesReadiness;
   error?: string;
+  /** A public health endpoint confirms reachability, not the API credential. */
+  authVerified?: boolean;
 };
 
 /** The readiness fields of /health/detailed, wherever this Hermes version puts them. */
@@ -125,6 +142,9 @@ export async function probeHermesAgent(agent: Agent): Promise<HermesProbeResult>
     const latencyMs = Date.now() - startTime;
 
     if (!res.ok) {
+      if (res.status === 401 || res.status === 403) {
+        return { ok: false, latencyMs, error: `Hermes returned status ${res.status}: ${res.statusText}`, authVerified: false };
+      }
       const fallbackRes = await hermesFetch(agent, "/health");
       if (!fallbackRes.ok) {
         return {
@@ -133,7 +153,7 @@ export async function probeHermesAgent(agent: Agent): Promise<HermesProbeResult>
           error: `Hermes returned status ${res.status}: ${res.statusText}`,
         };
       }
-      return { ok: true, latencyMs, status: "healthy", readiness: { status: "healthy" } };
+      return { ok: true, latencyMs, status: "healthy", readiness: { status: "healthy" }, authVerified: false };
     }
 
     const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
@@ -144,6 +164,7 @@ export async function probeHermesAgent(agent: Agent): Promise<HermesProbeResult>
 
     return {
       ok: true,
+      authVerified: true,
       latencyMs,
       status: statusVal,
       capabilities: capabilitiesVal,
@@ -180,7 +201,7 @@ export function clearHermesCapabilitiesCache(): void {
 
 /** GET /v1/capabilities, cached for a minute per server + profile. Never throws for a missing route. */
 export async function getHermesServerCapabilities(agent?: HermesAgentRef): Promise<HermesServerCapabilities> {
-  const { baseUrl, profilePrefix } = resolveAgentEndpoint(agent);
+  const { baseUrl, profilePrefix } = await resolveAgentEndpoint(agent);
   const key = `${baseUrl}|${profilePrefix}`;
   const hit = capabilitiesCache.get(key);
   if (hit && Date.now() - hit.at < CAPABILITIES_TTL_MS) return hit.value;
@@ -295,15 +316,8 @@ export async function createHermesSession(
   }
 
   const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
-  const idCandidate = data.id;
-  const sessionIdCandidate = data.session_id;
-
-  const sessionId =
-    typeof idCandidate === "string"
-      ? idCandidate
-      : typeof sessionIdCandidate === "string"
-        ? sessionIdCandidate
-        : null;
+  const nested = data.session && typeof data.session === "object" ? data.session as Record<string, unknown> : {};
+  const sessionId = textOf(data.id) ?? textOf(data.session_id) ?? textOf(nested.id) ?? textOf(nested.session_id);
 
   if (!sessionId) {
     throw new Error("No session id returned from Hermes");
@@ -530,13 +544,15 @@ export type HermesRunStatus = {
   /** Prompt (in) and completion (out) tokens, when the run reports them. */
   input_tokens?: number;
   output_tokens?: number;
+  estimated_cost_usd?: number;
+  cost_status?: string;
   runtime?: HermesRunRuntime;
   /** Set while the server drains for shutdown. */
   shutdown_requested_at?: number;
 };
 
 const ENDED_RUN_STATUSES = new Set([
-  "completed", "succeeded", "success", "failed", "error", "cancelled", "canceled", "stopped",
+  "completed", "succeeded", "success", "failed", "error", "cancelled", "canceled", "stopped", "interrupted",
 ]);
 
 /** The model a Hermes session ran on, or undefined when Hermes cannot say. */
@@ -640,6 +656,9 @@ export async function getHermesRun(
   const outTokens = numOf(usage?.output_tokens) ?? numOf(usage?.completion_tokens);
   if (inTokens !== undefined) result.input_tokens = inTokens;
   if (outTokens !== undefined) result.output_tokens = outTokens;
+  const estimatedCost = numOf(usage?.estimated_cost_usd);
+  if (estimatedCost !== undefined && estimatedCost >= 0) result.estimated_cost_usd = estimatedCost;
+  if (typeof usage?.cost_status === "string") result.cost_status = usage.cost_status;
   if (runtime) result.runtime = runtime;
   const shutdown = numOf(data.shutdown_requested_at);
   if (shutdown !== undefined) result.shutdown_requested_at = shutdown;
@@ -737,6 +756,7 @@ export async function forkHermesSession(agent: Agent, sessionId: string, title?:
 
 export type HermesSessionChatInput = {
   prompt: string;
+  instructions?: string;
   /** data: or http(s) image URLs. */
   images?: string[];
   model?: string;
@@ -753,6 +773,7 @@ function sessionChatBody(input: HermesSessionChatInput): Record<string, unknown>
         ]
       : input.prompt,
   };
+  if (input.instructions?.trim()) body.instructions = input.instructions.trim();
   if (input.model?.trim()) body.model = input.model.trim();
   if (input.modelOptions && Object.keys(input.modelOptions).length) body.model_options = input.modelOptions;
   return body;
@@ -929,6 +950,10 @@ export type HermesModelOption = {
   id: string;
   provider: string;
   providerName: string;
+  /** USD per million tokens when Hermes reports a numeric rate. */
+  pricing?: { input?: number; output?: number; cacheRead?: number };
+  supportsVision?: boolean;
+  supportsReasoning?: boolean;
 };
 
 export type HermesModelOptions = {
@@ -944,8 +969,8 @@ export type HermesModelOptions = {
  *
  * Runs use the configured provider override, or Hermes' current provider.
  */
-export async function listHermesModelOptions(agent?: Pick<Agent, "profile" | "url" | "key_enc">): Promise<HermesModelOptions> {
-  const res = await hermesFetch(agent, "/api/model/options");
+export async function listHermesModelOptions(agent?: Pick<Agent, "profile" | "url" | "key_enc">, opts?: { refresh?: boolean; signal?: AbortSignal }): Promise<HermesModelOptions> {
+  const res = await hermesFetch(agent, opts?.refresh ? "/api/model/options?refresh=1" : "/api/model/options", {}, opts?.signal);
   if (!res.ok) {
     const text = await res.text().catch(() => "");
     throw new Error(`Failed to read Hermes model options (${res.status}): ${text}`);
@@ -959,10 +984,18 @@ export async function listHermesModelOptions(agent?: Pick<Agent, "profile" | "ur
 
   const seen = new Set<string>();
   const models: HermesModelOption[] = [];
-  const add = (id: string, provider: string, providerName: string) => {
-    if (!id || seen.has(id)) return;
-    seen.add(id);
-    models.push({ id, provider, providerName });
+  const add = (id: string, provider: string, providerName: string, extra: Partial<HermesModelOption> = {}) => {
+    const key = `${provider}\0${id}`;
+    if (!id || seen.has(key)) return;
+    seen.add(key);
+    models.push({ id, provider, providerName, ...extra });
+  };
+  const number = (v: unknown): number | undefined => {
+    if (typeof v === "number") return Number.isFinite(v) && v >= 0 ? v : undefined;
+    if (v === "free") return 0;
+    if (typeof v !== "string" || !/^\$?\d+(?:\.\d+)?$/.test(v.trim())) return undefined;
+    const n = Number(v.trim().replace(/^\$/, ""));
+    return Number.isFinite(n) ? n : undefined;
   };
 
   for (const raw of providers) {
@@ -970,14 +1003,26 @@ export async function listHermesModelOptions(agent?: Pick<Agent, "profile" | "ur
     const p = raw as Record<string, unknown>;
     const slug = typeof p.slug === "string" ? p.slug : "";
     const name = typeof p.name === "string" ? p.name : slug;
-    const usable = providerOverride ? slug === providerOverride : p.is_current === true;
+    const usable = p.authenticated !== false && (providerOverride ? slug === providerOverride : p.authenticated === true || (p.authenticated === undefined && p.is_current === true));
     if (!usable || !Array.isArray(p.models)) continue;
+    const pricing = p.pricing && typeof p.pricing === "object" ? p.pricing as Record<string, unknown> : {};
+    const capabilities = p.capabilities && typeof p.capabilities === "object" ? p.capabilities as Record<string, unknown> : {};
     for (const m of p.models) {
-      if (typeof m === "string") add(m, slug, name);
+      if (typeof m !== "string") continue;
+      const price = pricing[m] && typeof pricing[m] === "object" ? pricing[m] as Record<string, unknown> : {};
+      const caps = capabilities[m] && typeof capabilities[m] === "object" ? capabilities[m] as Record<string, unknown> : {};
+      const input = number(price.input), output = number(price.output), cacheRead = number(price.cache);
+      const rates = { ...(input !== undefined && { input }), ...(output !== undefined && { output }), ...(cacheRead !== undefined && { cacheRead }) };
+      add(m, slug, name, {
+        ...(Object.keys(rates).length > 0 && { pricing: rates }),
+        ...(typeof caps.vision === "boolean" && { supportsVision: caps.vision }),
+        ...(typeof caps.reasoning === "boolean" && { supportsReasoning: caps.reasoning }),
+      });
     }
   }
 
-  if (currentModel && (!providerOverride || providerOverride === currentProvider)) {
+  const currentRow = providers.find((raw) => raw && typeof raw === "object" && (raw as Record<string, unknown>).slug === currentProvider) as Record<string, unknown> | undefined;
+  if (currentModel && currentRow?.authenticated !== false && (!providerOverride || providerOverride === currentProvider)) {
     add(currentModel, currentProvider, currentProvider);
   }
 

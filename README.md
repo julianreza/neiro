@@ -111,14 +111,21 @@ All settings live in `.env.local`. See `.env.example` for the full list.
 | `SUPABASE_SERVICE_ROLE_KEY` | ✅ | Server-only service-role key. |
 | `HERMES_DEFAULT_URL` | ✅ | Hermes agent server, e.g. `http://127.0.0.1:8642`. |
 | `HERMES_DEFAULT_KEY` | ✅ | Hermes API key. |
+| `NEIRO_ENCRYPTION_KEY` | | Stable secret used to encrypt newly saved custom agent keys. Falls back to `DASHBOARD_SECRET` when unset. |
 | `HERMES_PROVIDER_SLUG` | | Force one provider. Empty uses each Hermes profile's own. |
 | `NEIRO_ROUTER` | | `on` lets Laya pick the agent per task. `off` claims tasks directly. |
 | `NEIRO_LAYA_MODEL_PATH` | | Local Laya model dir or Hugging Face repo id. Empty turns the router off. |
+| `NEIRO_ROUTER_PROVIDER` | | `laya` for the local model or `jev` for TypeSafe's hosted System One API. |
+| `TYPESAFE_API_KEY` / `TYPESAFE_MODEL` | | Server-only Jev credential and model when using the hosted router. |
+| `NEIRO_AUTO_APPROVE_SAFE` | | `on` opts into the narrow safe-command approval gate; uncertain decisions still need a person. |
 | `NEIRO_ROUTER_TIMEOUT_MS` | | Max time per routing decision. Default `5000`. |
 | `NEIRO_LOCAL_TICK` | | `on` / `off`. Unset means on under `bun run dev`, off under `next start`. |
 | `NEIRO_LOCAL_TICK_MS` | | Local tick interval. Default `15000`, minimum `5000`. |
 | `NEIRO_WORKTREE_ROOT` | | Where mission worktrees go. Default `~/.neiro/worktrees`. |
 | `NEIRO_TRUSTED_PROXY_HOPS` | | Trusted reverse proxies for the login limiter. Default `0`. |
+
+> [!IMPORTANT]
+> Keep the encryption secret stable and backed up. Changing `NEIRO_ENCRYPTION_KEY`, or `DASHBOARD_SECRET` when used as the fallback, makes previously encrypted custom agent keys unreadable. Existing plaintext keys remain readable until they are updated.
 
 > [!CAUTION]
 > Never put the service-role key in a `NEXT_PUBLIC_*` variable. Next.js ships those to the browser. Neiro refuses to start the admin client if `NEXT_PUBLIC_SUPABASE_SERVICE_ROLE_KEY` is set.
@@ -146,6 +153,14 @@ flowchart LR
 
 A mission's workspace folder must exist on the machine running Neiro and Hermes. If it is a git repo, Neiro creates a worktree on a new branch `neiro/<mission>` under `~/.neiro/worktrees/`. Coding, QA and Review all happen there.
 
+With multiple workers and isolation enabled, each task gets its own branch and worktree. A reviewed task merges into the mission branch; conflicts leave the task worktree intact and move the task to **Needs you**. Oh My Pi can enforce a per-run working directory. Hermes does not currently expose that guarantee through Neiro's run integration, so use one worker for Hermes or use Oh My Pi agents for isolated parallel coding, QA, and review. The operator must resolve conflicts before retrying.
+
+If a process stops after a task is merged, the next tick retries cleanup before summarizing. Cleanup preserves the worktree if it contains new changes or ignored files other than Neiro's generated `.hermes.md`; inspect or move those files before retrying. A merge lock older than 10 minutes is reported for manual inspection rather than automatically removed.
+
+Apply `supabase/manual/20261102_neiro_v2_suite.sql` and then `supabase/manual/20261103_neiro_task_plan.sql` in the Supabase SQL Editor. The second script adds the task-plan editor and integration state; earlier migrations remain unchanged.
+
+Apply `supabase/manual/20261104_task_completion_time.sql` to record future task completion times. Existing completed tasks remain undated because their last update does not prove when they finished; the dashboard reports how many lack that evidence.
+
 To roll back, cancel the mission, then:
 
 ```bash
@@ -165,19 +180,21 @@ gh auth login
 ```
 
 - **By PR**: paste `https://github.com/<owner>/<repo>/pull/<n>`. An enabled agent with the `reviewer` stage reads the diff and answers with a verdict, a design gate and findings. Nothing is posted to GitHub until you press **Post to GitHub**.
-- **From missions**: in **Build** and **Fix** missions, each task commits its work, pushes `neiro/<mission>` to `origin` and opens (or reuses) one draft PR before its Final review. That review shows up on the page. If the PR cannot be opened (no `origin`, `gh` not logged in), the task goes to **Needs you** with the reason.
+- **From missions**: in **Build** and **Fix** missions, Neiro pushes `neiro/<mission>` to `origin` and opens (or reuses) one draft PR. For isolated parallel tasks, review happens in the task worktree before the task is merged into the mission branch and the PR is updated. If the PR cannot be opened (no `origin`, `gh` not logged in), the task goes to **Needs you** with the reason.
 - Only `neiro/...` branches are ever pushed. Run `supabase/migrations/20261030000400_code_reviews.sql` and `20261030000500_code_review_design.sql` first.
+
+The mission **Result** tab separates completion from recorded QA and review evidence. Its cost is an estimate for the runs with available pricing, not an invoice: catalog rates may be rounded and subscriptions, caching, or tool charges can differ. Runs without a usable price remain unpriced.
 
 ### 🧪 Live vs demo data
 
-Every page loads from its API first. If the API is down, it shows sample data with a visible **"Demo data — reason"** badge.
+Pages load their APIs first. When supported, select **View demo** after a loading error to inspect labelled sample data; sample actions do not write to live services. A failed refresh keeps the last successful data with a timestamp.
 
 | Page | Live source | Writes when live | Demo fallback |
 | --- | --- | --- | --- |
-| Mission control | `/api/missions`, `/api/missions/:id` | Launch, approve plan, cancel, task controls | Sample missions, launch disabled |
-| AI team | `/api/agents` | Create, edit, enable/disable, delete, restore starters | Sample agents, edits disabled |
-| Schedules | `/api/schedules` (Hermes jobs) | Create, edit, enable, and delete jobs | Sample schedules |
-| Gateway | `/api/gateway/status`, `/api/agents/models`, `/api/agents/runtimes` | None | Sample Hermes catalog, health unknown |
+| Mission control | `/api/missions`, `/api/missions/:id` | Launch, approve plan, cancel, task controls | Opt-in sample missions, launch disabled |
+| AI team | `/api/agents` | Create, edit, enable/disable, delete, restore starters | Opt-in sample agents, edits disabled |
+| Schedules | `/api/schedules` (Hermes jobs) | Create, edit, enable, and delete jobs | Opt-in sample schedules |
+| Gateway | `/api/gateway/status`, `/api/agents/models`, `/api/agents/runtimes` | None | Opt-in sample Hermes catalog, health unknown |
 
 ## 📁 Project layout
 

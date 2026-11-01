@@ -128,3 +128,71 @@ test("withTimeout: a call that never finishes is rejected", async () => {
   await assert.rejects(withTimeout(new Promise<never>(() => {}), 20), /timed out after 20 ms/);
   assert.equal(await withTimeout(Promise.resolve(7), 20), 7);
 });
+
+test("Jev router posts typed questions and projects validated answers", async () => {
+  const { createJevRouter } = await import("./task-router");
+  const originalFetch = globalThis.fetch;
+  const before = { key: process.env.TYPESAFE_API_KEY, base: process.env.TYPESAFE_BASE_URL };
+  process.env.TYPESAFE_API_KEY = "test-key";
+  process.env.TYPESAFE_BASE_URL = "https://jev.example";
+  try {
+    globalThis.fetch = (async (input, init) => {
+      assert.equal(String(input), "https://jev.example/v1/systemone");
+      assert.equal(new Headers(init?.headers).get("Authorization"), "Bearer test-key");
+      const body = JSON.parse(String(init?.body));
+      assert.equal(body.model, "jev-latest");
+      assert.equal(body.questions.agent_id.type, "choice");
+      return Response.json({ answers: {
+        agent_id: { type: "choice", choice: "backend-worker", confidence: 0.91, probabilities: { "backend-worker": 0.91, "qa-inspector": 0.09 } },
+        urgency: { type: "score", score: 1, probabilities: { "0": 0.1, "1": 0.8, "2": 0.1 } },
+        needs_human: { type: "noul", noul: 0.1 },
+      } });
+    }) as typeof fetch;
+    const decision = await createJevRouter().decide({ title: "Fix bug", agentName: "", result: "" } as never, agents);
+    assert.deepEqual(decision, { agentId: "backend-worker", urgency: 1, needsHuman: false, confidence: 0.91 });
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (before.key === undefined) delete process.env.TYPESAFE_API_KEY; else process.env.TYPESAFE_API_KEY = before.key;
+    if (before.base === undefined) delete process.env.TYPESAFE_BASE_URL; else process.env.TYPESAFE_BASE_URL = before.base;
+  }
+});
+
+test("Jev tournament handles over 32 agents and requests a human for uncalibrated tournament confidence", async () => {
+  const { createJevRouter } = await import("./task-router");
+  const beforeKey = process.env.TYPESAFE_API_KEY;
+  const beforeFetch = globalThis.fetch;
+  process.env.TYPESAFE_API_KEY = "key";
+  let requests = 0;
+  try {
+    globalThis.fetch = (async (_url, init) => {
+      requests++;
+      const body = JSON.parse(String(init?.body));
+      const answers = Object.fromEntries(Object.entries(body.questions as Record<string, { type: string; criteria?: Record<string, unknown> }>).map(([id, q]) => [id, q.type === "choice"
+        ? { type: "choice", choice: Object.keys(q.criteria ?? {})[0], confidence: .99 }
+        : q.type === "noul" ? { type: "noul", noul: .1 }
+          : { type: "score", score: 1 }]));
+      return Response.json({ answers });
+    }) as typeof fetch;
+    const roster = Array.from({ length: 40 }, (_, i) => agent(`agent-${i}`, "workers"));
+    const result = await createJevRouter().decide({ title: "Fix", result: null, agentName: "" } as never, roster);
+    assert.ok(requests >= 2);
+    assert.ok(roster.some((entry) => entry.id === result.agentId));
+    assert.equal(result.confidence, 0);
+    assert.equal(routeOutcome(result).stage, "Awaiting routing");
+  } finally {
+    globalThis.fetch = beforeFetch;
+    if (beforeKey === undefined) delete process.env.TYPESAFE_API_KEY; else process.env.TYPESAFE_API_KEY = beforeKey;
+  }
+});
+
+test("router calibration ignores incomplete outcomes and measures human overrides", async () => {
+  const { calibrateRouteOutcomes } = await import("./task-router");
+  assert.equal(await calibrateRouteOutcomes([]), null);
+  const result = await calibrateRouteOutcomes([
+    { laya_agent_id: "a", human_agent_id: null, route_confidence: .9 },
+    { laya_agent_id: "b", human_agent_id: "c", route_confidence: .5 },
+    { laya_agent_id: null, human_agent_id: null, route_confidence: .8 },
+    { laya_agent_id: "c", human_agent_id: null, route_confidence: -1 },
+  ]);
+  assert.deepEqual(result, { accept: .9, escalate: 0, samples: 2 });
+});

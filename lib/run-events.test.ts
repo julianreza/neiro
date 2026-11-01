@@ -13,6 +13,12 @@ test("tool, approval, error and done events become labelled steps", () => {
   assert.equal(parseRunEvent("   "), null);
 });
 
+test("an internal response or tool completion does not claim the run finished", () => {
+  assert.notEqual(parseRunEvent(JSON.stringify({ type: "response.output_item.done" }))?.kind, "done");
+  assert.notEqual(parseRunEvent(JSON.stringify({ type: "tool.completed" }))?.kind, "done");
+  assert.equal(parseRunEvent(JSON.stringify({ type: "run.completed" }))?.kind, "done");
+});
+
 test("the SSE event name is used when the payload has no type", () => {
   assert.equal(parseRunEvent(JSON.stringify({ message: "x" }), "error")?.kind, "error");
 });

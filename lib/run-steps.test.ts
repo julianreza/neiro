@@ -17,6 +17,15 @@ test("the collector reads frames split across chunks", () => {
   assert.ok(c.steps().length >= 1);
 });
 
+test("only run terminal events end activity; failed runs also end it", () => {
+  const observed: boolean[] = [];
+  const collector = createStepCollector((event) => observed.push(event.terminal));
+  for (const type of ["tool.completed", "response.output_item.done", "subagent.complete", "run.failed"]) {
+    collector.feed(`data: ${JSON.stringify({ type })}\n\n`);
+  }
+  assert.deepEqual(observed, [false, false, false, true]);
+});
+
 test("compactSteps drops answer text and cuts long details", () => {
   const steps: LogStep[] = [
     { kind: "tool", text: "Ran read_file", detail: "x".repeat(5000), at: "2026-10-31T10:00:00Z" },

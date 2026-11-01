@@ -52,10 +52,11 @@ export function ProjectComposer({
   const [retries, setRetries] = useState(String(defaults.max_retries ?? 2));
   const [tokenBudget, setTokenBudget] = useState(defaults.token_budget == null ? "" : String(defaults.token_budget));
   const [learnSkill, setLearnSkill] = useState(false);
+  const [autoApproveSafeTools, setAutoApproveSafeTools] = useState(false);
   const [images, setImages] = useState<ImageAttachment[]>([]);
   const [launching, setLaunching] = useState(false);
   const [pending, setPending] = useState<{ checks: PreflightCheck[]; body: Record<string, unknown>; pause: boolean; signature: string } | null>(null);
-  const inputSignature = JSON.stringify([projectId, prompt, workspace, pause, baseBranch, isolate, workers, retries, tokenBudget, learnSkill, images]);
+  const inputSignature = JSON.stringify([projectId, prompt, workspace, pause, baseBranch, isolate, workers, retries, tokenBudget, learnSkill, autoApproveSafeTools, images]);
   const latestInput = useRef(inputSignature);
   useEffect(() => { latestInput.current = inputSignature; }, [inputSignature]);
 
@@ -89,6 +90,7 @@ export function ProjectComposer({
           max_retries: parseIntOr(retries, 2),
           token_budget: parseIntOr(tokenBudget, 0),
           learn_skill_on_done: learnSkill || undefined,
+          auto_approve_safe_tools: autoApproveSafeTools || undefined,
           attachments: images.length ? images : undefined,
         };
       const check = await fetch("/api/missions/preflight", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
@@ -215,6 +217,10 @@ export function ProjectComposer({
               <Label htmlFor="pause-plan">Pause after PRD review</Label>
             </div>
             <div className="flex items-center gap-3">
+              <Switch id="auto-approve-safe-tools" checked={autoApproveSafeTools} onCheckedChange={setAutoApproveSafeTools} aria-describedby="auto-approve-help" />
+              <div><Label htmlFor="auto-approve-safe-tools">Auto-approve safe checks</Label><p id="auto-approve-help" className="text-xs text-muted-foreground">Only narrowly allowed read-only commands with a confident System One assessment; other requests still need approval.</p></div>
+            </div>
+            <div className="flex items-center gap-3">
               <Switch
                 id="learn-skill"
                 checked={learnSkill}
@@ -224,7 +230,7 @@ export function ProjectComposer({
               <div>
                 <Label htmlFor="learn-skill">Learn a skill when done</Label>
                 <p id="learn-skill-help" className="text-xs text-muted-foreground">
-                  The summary also drafts a SKILL.md from what worked. Nothing is installed.
+                  The summary drafts a SKILL.md and attempts to install it in the local Hermes profile without overwriting an existing skill.
                 </p>
               </div>
             </div>
@@ -258,7 +264,11 @@ export function ProjectComposer({
         {pending && pending.signature !== inputSignature && <p className="text-sm text-destructive">Mission settings changed. Close this dialog and check again.</p>}
         <DialogFooter>
           <Button variant="outline" disabled={launching} onClick={() => setPending(null)}>Close</Button>
-          <Button disabled={launching || !pending || pending.signature !== inputSignature || pending.checks.some((check) => check.status === "blocked")} onClick={() => { if (pending && latestInput.current === pending.signature) void createMission(pending.body, pending.pause); }}>Continue without verification</Button>
+          <Button disabled={launching || !pending || pending.signature !== inputSignature || pending.checks.some((check) => check.status === "blocked")} onClick={() => {
+            if (!pending || latestInput.current !== pending.signature) return;
+            const skip = pending.checks.some((check) => (check.id === "qa" || check.id === "reviewer") && check.status === "warning");
+            void createMission({ ...pending.body, ...(skip ? { allow_skipped_verification: true } : {}) }, pending.pause);
+          }}>{pending?.checks.some((check) => (check.id === "qa" || check.id === "reviewer") && check.status === "warning") ? "Continue without verification" : "Continue with warnings"}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

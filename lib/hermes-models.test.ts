@@ -35,3 +35,32 @@ test("uses the run provider override instead of the current provider", async () 
   const result = await listHermesModelOptions();
   assert.deepEqual(result.models.map((model) => model.id), ["gpt"]);
 });
+
+test("includes all authenticated providers with refresh and per-model metadata", async () => {
+  delete process.env.HERMES_PROVIDER_SLUG;
+  process.env.HERMES_DEFAULT_URL = "https://default.example";
+  process.env.HERMES_DEFAULT_KEY = "key";
+  let url = "";
+  globalThis.fetch = (async (input) => {
+    url = String(input);
+    return Response.json({ provider: "alpha", model: "a", providers: [
+      { slug: "alpha", name: "Alpha", authenticated: true, is_current: true, models: ["a"], pricing: { a: { input: "$1.50", output: "$3", cache: "$0.25" } }, capabilities: { a: { reasoning: true, vision: false } } },
+      { slug: "beta", name: "Beta", authenticated: true, models: ["b"] },
+      { slug: "offline", authenticated: false, models: ["x"] },
+    ] });
+  }) as typeof fetch;
+  const result = await listHermesModelOptions(undefined, { refresh: true });
+  assert.ok(url.includes("refresh=1"));
+  assert.deepEqual(result.models.map((m) => m.id), ["a", "b"]);
+  assert.deepEqual(result.models[0].pricing, { input: 1.5, output: 3, cacheRead: .25 });
+  assert.equal(result.models[0].supportsReasoning, true);
+  assert.equal(result.models[0].supportsVision, false);
+});
+
+test("does not advertise a current provider that Hermes says is unauthenticated", async () => {
+  delete process.env.HERMES_PROVIDER_SLUG;
+  process.env.HERMES_DEFAULT_URL = "https://default.example";
+  process.env.HERMES_DEFAULT_KEY = "key";
+  globalThis.fetch = (async () => Response.json({ provider: "offline", model: "x", providers: [{ slug: "offline", authenticated: false, is_current: true, models: ["x"] }] })) as typeof fetch;
+  assert.deepEqual((await listHermesModelOptions()).models, []);
+});

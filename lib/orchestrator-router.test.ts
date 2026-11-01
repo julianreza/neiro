@@ -295,3 +295,28 @@ test("router off: a Queued task is claimed directly, exactly as before", async (
   assert.equal(after.routingStatus, null);
   assert.equal(hermes.starts.length, 1);
 });
+
+test("batch routing claims each ready task once across overlapping ticks", async () => {
+  const { store, deps, mission, task } = setup();
+  const second = store.seedTask(mission.id, { taskKey: "T2", title: "Build API" });
+  let batches = 0;
+  const routedIds: string[] = [];
+  deps.router = {
+    decide: async () => { throw new Error("individual routing should not run"); },
+    decideMany: async (tasks) => { batches++; routedIds.push(...tasks.map((entry) => entry.id)); return new Map(tasks.map((entry) => [entry.id, confident])); },
+  };
+  await Promise.all([advanceMission(mission.id, deps), advanceMission(mission.id, deps)]);
+  assert.ok(batches >= 1 && batches <= 2);
+  assert.deepEqual(routedIds.sort(), [task.id, second.id].sort());
+  assert.equal(store.tasks.get(task.id)?.stage, "Routed");
+  assert.equal(store.tasks.get(second.id)?.stage, "Routed");
+});
+
+test("a failed batch falls back for every claimed task", async () => {
+  const { store, deps, mission, task } = setup();
+  const second = store.seedTask(mission.id, { taskKey: "T2", title: "Build API" });
+  deps.router = { decide: async () => { throw new Error("unexpected"); }, decideMany: async () => { throw new Error("offline"); } };
+  await advanceMission(mission.id, deps);
+  assert.equal(store.tasks.get(task.id)?.routingStatus, "fallback");
+  assert.equal(store.tasks.get(second.id)?.routingStatus, "fallback");
+});

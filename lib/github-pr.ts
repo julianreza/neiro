@@ -536,3 +536,27 @@ export async function fetchPrHead(checkout: string, headRef: string, exec: Exec 
   }
   return `origin/${headRef}`;
 }
+
+/** Merge only the PR belonging to the mission's own Neiro branch. */
+export async function mergeMissionPr(ref: PrRef, branch: string, method: "squash" | "merge" | "rebase", expectedHead: string, exec: Exec = defaultExec): Promise<void> {
+  if (!isPushableBranch(branch)) throw new PrError("forbidden_branch", "Only a Neiro mission branch can be merged.");
+  if (!/^[0-9a-f]{40,64}$/i.test(expectedHead)) throw new PrError("command_failed", "Invalid mission commit.");
+  if (!["squash", "merge", "rebase"].includes(method)) throw new PrError("command_failed", "Invalid merge method.");
+  const repo = prSlug(ref);
+  try {
+    const view = await exec("gh", ["pr", "view", String(ref.number), "--repo", repo, "--json", "headRefName,headRefOid,isDraft,state"]);
+    const details = JSON.parse(view.stdout) as { headRefName?: unknown; headRefOid?: unknown; isDraft?: unknown; state?: unknown };
+    if (details.headRefName !== branch || details.headRefOid !== expectedHead || details.state !== "OPEN" || typeof details.isDraft !== "boolean") throw new PrError("forbidden_branch", "The open PR does not match this mission branch.");
+    if (details.isDraft) await exec("gh", ["pr", "ready", String(ref.number), "--repo", repo]);
+    await exec("gh", ["pr", "merge", String(ref.number), "--repo", repo, `--${method}`, "--delete-branch", "--match-head-commit", expectedHead]);
+  } catch (error) {
+    if (error instanceof PrError) throw error;
+    // gh may merge successfully but fail while deleting a checked-out local branch.
+    try {
+      const check = await exec("gh", ["pr", "view", String(ref.number), "--repo", repo, "--json", "headRefName,headRefOid,state"]);
+      const current = JSON.parse(check.stdout) as { headRefName?: unknown; headRefOid?: unknown; state?: unknown };
+      if (current.state === "MERGED" && current.headRefName === branch && current.headRefOid === expectedHead) return;
+    } catch { /* Surface the original error when the outcome cannot be verified. */ }
+    throw ghError(error, "Merging the mission PR; check GitHub before retrying");
+  }
+}

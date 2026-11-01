@@ -4,7 +4,9 @@ import { getSupabaseAdmin } from "@/lib/supabase";
 import { advanceMission, reportAdvanceError } from "@/lib/orchestrator";
 import { mapArtifactRow, mapMissionRow } from "@/lib/orchestrator-store";
 import { AppConfigError } from "@/lib/types";
-import { discardMissionWorktree, planWorktreeDiscard } from "@/lib/worktree";
+import { discardMissionWorktree, missionWorktreeHead, planWorktreeDiscard } from "@/lib/worktree";
+import { mergeMissionPr, parsePrUrl } from "@/lib/github-pr";
+import { usersAdminSession } from "@/lib/users-api";
 import { formatPrdNotes, parsePrdNotes, prdNotesKey, prdVersions } from "@/lib/prd";
 
 type RouteContext = {
@@ -18,9 +20,9 @@ export async function POST(request: NextRequest, context: RouteContext) {
     const body = await request.json();
     const action = body?.action;
 
-    if (!action || !["approve_plan", "revise_prd", "cancel", "resume", "discard_worktree"].includes(action)) {
+    if (!action || !["approve_plan", "revise_prd", "cancel", "resume", "discard_worktree", "merge_pr"].includes(action)) {
       return NextResponse.json(
-        { error: "Invalid action. Expected 'approve_plan', 'revise_prd', 'cancel', 'resume' or 'discard_worktree'" },
+        { error: "Invalid mission control action." },
         { status: 400 }
       );
     }
@@ -99,6 +101,33 @@ export async function POST(request: NextRequest, context: RouteContext) {
         { ok: true, mission: data ? mapMissionRow(data as Record<string, unknown>) : null },
         { status: 200 },
       );
+    }
+
+    if (action === "merge_pr") {
+      if (!(await usersAdminSession(request))) return NextResponse.json({ error: "Only an admin can merge a mission PR." }, { status: 403 });
+      const method = body?.method ?? "squash";
+      if (method !== "squash" && method !== "merge" && method !== "rebase") return NextResponse.json({ error: "Invalid merge method." }, { status: 400 });
+      const { data: row, error: readError } = await supabase.from("missions").select("id,status,pr_url,work_branch,worktree_path,repo_root,pr_merged_at").eq("id", id).maybeSingle();
+      if (readError) return NextResponse.json({ error: /pr_merged_at/i.test(readError.message) ? "Apply the Neiro v2 SQL migration before merging." : readError.message }, { status: 500 });
+      if (!row) return NextResponse.json({ error: "Mission not found." }, { status: 404 });
+      const ref = parsePrUrl(row.pr_url);
+      if (row.pr_merged_at) return NextResponse.json({ error: "This mission PR is already marked as merged." }, { status: 409 });
+      if (row.status !== "completed" || !ref || !row.repo_root || !row.worktree_path || !row.work_branch) return NextResponse.json({ error: "A completed mission with a PR and isolated worktree is required." }, { status: 409 });
+      let head: string;
+      try { head = await missionWorktreeHead(row.repo_root, row.worktree_path, row.work_branch); }
+      catch (error) { return NextResponse.json({ error: error instanceof Error ? error.message : "Worktree is not ready." }, { status: 409 }); }
+      try { await mergeMissionPr(ref, row.work_branch, method, head); }
+      catch (error) { return NextResponse.json({ error: error instanceof Error ? error.message : "Merge failed. Check GitHub before retrying." }, { status: 502 }); }
+      const warnings: string[] = [];
+      const { error: saveError } = await supabase.from("missions").update({ pr_merged_at: new Date().toISOString() }).eq("id", id);
+      if (saveError) warnings.push("The PR merged, but the merge date could not be saved. Apply the v2 SQL migration.");
+      try {
+        if (await missionWorktreeHead(row.repo_root, row.worktree_path, row.work_branch) !== head) throw new Error("The worktree changed after merging.");
+        await discardMissionWorktree({ repoRoot: row.repo_root, worktreePath: row.worktree_path, branch: row.work_branch });
+        const { error: cleanupError } = await supabase.from("missions").update({ work_branch: null, worktree_path: null, agent_workspace_path: null }).eq("id", id);
+        if (cleanupError) warnings.push("The worktree was removed but its database record could not be updated.");
+      } catch (error) { warnings.push(`The PR merged, but worktree cleanup was skipped: ${error instanceof Error ? error.message : "unknown error"}`); }
+      return NextResponse.json({ ok: true, merged: true, warnings });
     }
 
     if (action === "discard_worktree") {

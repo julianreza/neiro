@@ -2,13 +2,24 @@
  * Read a run's SSE event stream into steps, and shrink them for storage.
  * Pure: shared by the events proxy (which saves them) and tests.
  */
-import { appendStep, parseRunEvent, type LogStep } from "@/lib/run-events";
+import { appendStep, isTerminalRunEventType, parseRunEvent, type LogStep } from "@/lib/run-events";
 
 export const RUN_ID = /^[A-Za-z0-9_.:-]{1,120}$/;
 
 const MAX_STEPS = 300;
 const MAX_TEXT = 4000;
 const MAX_DETAIL = 2000;
+
+function terminalRunEvent(data: string, eventName?: string): boolean {
+  if (data.trim() === "[DONE]") return true;
+  try {
+    const value = JSON.parse(data) as { type?: unknown; event?: unknown } | null;
+    const type = typeof value?.type === "string" ? value.type : typeof value?.event === "string" ? value.event : eventName;
+    return typeof type === "string" && isTerminalRunEventType(type);
+  } catch {
+    return typeof eventName === "string" && isTerminalRunEventType(eventName);
+  }
+}
 
 /** Feed it raw SSE text as it arrives; `steps()` is everything parsed so far. */
 export function createStepCollector(onEvent?: (event: { at: string; terminal: boolean }) => void) {
@@ -26,7 +37,7 @@ export function createStepCollector(onEvent?: (event: { at: string; terminal: bo
       const now = Date.now();
       const parsed = step?.at ? Date.parse(step.at) : NaN;
       const time = new Date(Number.isFinite(parsed) ? Math.min(parsed, now) : now).toISOString();
-      onEvent?.({ at: time, terminal: step?.kind === "done" });
+      onEvent?.({ at: time, terminal: terminalRunEvent(data.join("\n"), name) });
     }
     if (step) steps = appendStep(steps, { ...step, at: step.at ?? new Date().toISOString() }, MAX_STEPS);
   };

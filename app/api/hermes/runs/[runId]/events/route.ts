@@ -4,28 +4,9 @@ import type { NextRequest } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { openRunEventStream } from "@/lib/agent-runtime";
 import { createStepCollector } from "@/lib/run-steps";
-import { recordRunActivity, saveRunSteps } from "@/lib/run-steps-store";
+import { recordRunActivity, saveRunSteps, saveSubagentRuns } from "@/lib/run-steps-store";
 import { AppConfigError } from "@/lib/types";
-import type { Agent, SubagentRun } from "@/lib/types";
-import type { LogStep } from "@/lib/run-events";
-
-/**
- * The sub-agents a task's run delegated to, kept on its mission_tasks row so
- * the inspector shows them after the stream is gone. Best effort.
- */
-async function saveSubagentRuns(runId: string, steps: LogStep[]) {
-  const byId = new Map<string, SubagentRun>();
-  for (const step of steps) if (step.subagent) byId.set(step.subagent.delegationId, step.subagent);
-  if (byId.size === 0) return;
-  const { error } = await getSupabaseAdmin()
-    .from("mission_tasks")
-    .update({ subagent_runs: [...byId.values()] })
-    .eq("run_id", runId);
-  // Before 20261031000000_hermes_full_suite.sql the column is missing: skip.
-  if (error && error.code !== "42703" && error.code !== "PGRST204") {
-    console.warn("[run-steps] could not save sub-agents", runId, error.message);
-  }
-}
+import type { Agent } from "@/lib/types";
 
 type RouteContext = {
   params: Promise<{ runId: string }>;

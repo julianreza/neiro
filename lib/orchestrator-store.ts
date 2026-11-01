@@ -1,6 +1,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { writeDroppingMissing } from "@/lib/missing-column";
+import { mapRunUsage } from "@/lib/run-usage";
 import { APPROVAL_CHOICES, asReasoningEffort, asRuntime, MISSION_MODES } from "@/lib/types";
 import type {
   Agent,
@@ -62,6 +63,10 @@ export type TaskPatch = Partial<
     tokens: number;
     retries: number;
     resultOutput: string | null;
+    taskWorktreePath: string | null;
+    taskBranch: string | null;
+    taskIntegrationPending: boolean;
+    verificationWaitStage: "QA check" | "Final review" | null;
     sessionId: string | null;
     cacheReadTokens: number;
     cacheWriteTokens: number;
@@ -125,6 +130,7 @@ export type TokenUsageRow = {
   inputTokens?: number;
   outputTokens?: number;
   cacheReadTokens?: number;
+  costUsd?: number | null;
 };
 
 export interface OrchestratorStore {
@@ -149,6 +155,7 @@ export interface OrchestratorStore {
   insertArtifactOnce(row: NewArtifactRow): Promise<void>;
   /** Record a finished run's tokens; a run id already recorded is ignored. */
   recordTokenUsage(row: TokenUsageRow): Promise<void>;
+  claimAutoApproval?(runId: string, requestId: string): Promise<boolean>;
   /**
    * Tokens this agent's own runs spent in this mission, from
    * agent_token_usage; null when that table cannot be read.
@@ -228,6 +235,9 @@ export function mapMissionRow(row: Row): Mission {
     status: (row.status as MissionStatus) || "running",
     phase: (row.phase as MissionPhase) || "planning",
     pauseAfterPlanning: Boolean(row.pause_after_planning ?? false),
+    autoApproveSafeTools: Boolean(row.auto_approve_safe_tools ?? false),
+    skipQa: Boolean(row.skip_qa ?? false),
+    skipReview: Boolean(row.skip_review ?? false),
     maxParallelWorkers: Number(row.max_parallel_workers ?? 3),
     maxRetries: Number(row.max_retries ?? 2),
     workspacePath: str(row.workspace_path),
@@ -275,6 +285,10 @@ export function mapTaskRow(row: Row): MissionTask {
     runAgentId: str(row.run_agent_id),
     runStartedAt: str(row.run_started_at),
     resultOutput: str(row.result_output),
+    taskWorktreePath: str(row.task_worktree_path),
+    taskBranch: str(row.task_branch),
+    taskIntegrationPending: Boolean(row.task_integration_pending ?? false),
+    verificationWaitStage: row.verification_wait_stage === "QA check" || row.verification_wait_stage === "Final review" ? row.verification_wait_stage : null,
     sessionId: str(row.session_id),
     cacheReadTokens: Number(row.cache_read_tokens ?? 0) || 0,
     cacheWriteTokens: Number(row.cache_write_tokens ?? 0) || 0,
@@ -382,6 +396,10 @@ function taskPatchToRow(patch: TaskPatch): Row {
   if (patch.tokens !== undefined) row.tokens = patch.tokens;
   if (patch.retries !== undefined) row.retries = patch.retries;
   if (patch.resultOutput !== undefined) row.result_output = patch.resultOutput;
+  if (patch.taskWorktreePath !== undefined) row.task_worktree_path = patch.taskWorktreePath;
+  if (patch.taskBranch !== undefined) row.task_branch = patch.taskBranch;
+  if (patch.taskIntegrationPending !== undefined) row.task_integration_pending = patch.taskIntegrationPending;
+  if (patch.verificationWaitStage !== undefined) row.verification_wait_stage = patch.verificationWaitStage;
   if (patch.sessionId !== undefined) row.session_id = patch.sessionId;
   if (patch.cacheReadTokens !== undefined) row.cache_read_tokens = patch.cacheReadTokens;
   if (patch.cacheWriteTokens !== undefined) row.cache_write_tokens = patch.cacheWriteTokens;
@@ -446,20 +464,7 @@ export function createSupabaseStore(client?: SupabaseClient): OrchestratorStore 
         // Token usage is extra: a missing table just means no footer facts.
         runUsage: uRes.error
           ? []
-          : (uRes.data ?? []).map((r) => {
-              const row = r as Row;
-              return {
-                runId: String(row.run_id ?? ""),
-                taskId: String(row.task_id ?? ""),
-                stage: String(row.stage ?? ""),
-                tokens: Number(row.tokens) || 0,
-                model: row.model ? String(row.model) : null,
-                inputTokens: row.input_tokens == null ? null : Number(row.input_tokens) || 0,
-                outputTokens: row.output_tokens == null ? null : Number(row.output_tokens) || 0,
-                cacheReadTokens: row.cache_read_tokens == null ? null : Number(row.cache_read_tokens) || 0,
-                at: String(row.created_at ?? ""),
-              };
-            }),
+          : (uRes.data ?? []).map((r) => mapRunUsage(r as Row)),
       };
     },
 
@@ -580,6 +585,14 @@ export function createSupabaseStore(client?: SupabaseClient): OrchestratorStore 
       if (error) throw new Error(error.message);
     },
 
+    async claimAutoApproval(runId, requestId) {
+      const { data, error } = await db().from("auto_approval_claims")
+        .upsert({ run_id: runId, request_id: requestId }, { onConflict: "run_id,request_id", ignoreDuplicates: true })
+        .select("run_id");
+      if (error) throw new Error(error.message);
+      return Boolean(data?.length);
+    },
+
     async recordTokenUsage(row) {
       const base = {
         run_id: row.runId,
@@ -599,8 +612,8 @@ export function createSupabaseStore(client?: SupabaseClient): OrchestratorStore 
       };
       // Columns from later migrations are dropped if missing; the tokens always land.
       const { error } = await writeDroppingMissing(
-        { ...base, model: row.model ?? null, runtime: row.runtime ?? null, ...split },
-        ["model", "runtime", "input_tokens", "output_tokens", "cache_read_tokens"],
+        { ...base, model: row.model ?? null, runtime: row.runtime ?? null, cost_usd: row.costUsd ?? null, ...split },
+        ["model", "runtime", "input_tokens", "output_tokens", "cache_read_tokens", "cost_usd"],
         write,
         "token-usage",
       );

@@ -29,6 +29,7 @@ export type RouteDecision = {
 export interface TaskRouter {
   /** Rejects on load failure, timeout or an invalid answer; the caller falls back. */
   decide(task: MissionTask, agents: Agent[]): Promise<RouteDecision>;
+  decideMany?(tasks: MissionTask[], agents: Agent[]): Promise<Map<string, RouteDecision>>;
 }
 
 /** Below this, or when Laya flags needs_human, the task waits at the human gate. */
@@ -45,7 +46,9 @@ type RouterEnv = Record<string, string | undefined>;
 /** Off when NEIRO_ROUTER=off or no model path is configured. */
 export function isRouterEnabled(env: RouterEnv = process.env): boolean {
   if ((env.NEIRO_ROUTER ?? "").trim().toLowerCase() === "off") return false;
-  return Boolean(env.NEIRO_LAYA_MODEL_PATH?.trim());
+  return (env.NEIRO_ROUTER_PROVIDER ?? "laya").trim().toLowerCase() === "jev"
+    ? Boolean(env.TYPESAFE_API_KEY?.trim())
+    : Boolean(env.NEIRO_LAYA_MODEL_PATH?.trim());
 }
 
 export function routerTimeoutMs(env: RouterEnv = process.env): number {
@@ -138,11 +141,11 @@ export type RouteOutcome = {
   reason: string | null;
 };
 
-export function routeOutcome(decision: RouteDecision): RouteOutcome {
+export function routeOutcome(decision: RouteDecision, threshold = ROUTE_CONFIDENCE_THRESHOLD): RouteOutcome {
   const reasons: string[] = [];
-  if (decision.confidence < ROUTE_CONFIDENCE_THRESHOLD) {
+  if (decision.confidence < threshold) {
     reasons.push(
-      `Keyakinan ${decision.confidence.toFixed(2)} di bawah ${ROUTE_CONFIDENCE_THRESHOLD}`,
+      `Keyakinan ${decision.confidence.toFixed(2)} di bawah ${threshold}`,
     );
   }
   if (decision.needsHuman) reasons.push("Laya menandai perlu manusia");
@@ -182,17 +185,112 @@ export function withTimeout<T>(work: Promise<T>, ms: number): Promise<T> {
   return Promise.race([work, timeout]).finally(() => clearTimeout(timer));
 }
 
+/** Tournament scores only describe the final round, so require human approval. */
+export async function decideTournament(runner: unknown, task: MissionTask, agents: Agent[]): Promise<RouteDecision> {
+  if (agents.length === 0) throw new Error("No enabled agents to route to");
+  const { questionsFromJsonSchema, answersToJson, predictTournament } = await import("laya-ts");
+  const questions = questionsFromJsonSchema(buildDecisionSchema(agents.slice(0, 1)));
+  questions.agent_id = { ...questions.agent_id, criteria: Object.fromEntries(agents.map((agent) => [agent.id, `${agent.name} (${agent.role}): ${agent.specialty}`])) };
+  const result = await predictTournament(runner, buildRouteText(task), questions, 16);
+  const answers = result.answers as unknown as Record<string, Record<string, unknown>>;
+  const chosen = answers.agent_id?.choice;
+  if (typeof chosen !== "string" || !agents.some((agent) => agent.id === chosen)) throw new Error("Router chose an unknown agent");
+  const values = answersToJson(answers, buildDecisionSchema(agents.filter((agent) => agent.id === chosen)));
+  return parseDecision({ values, confidence: { agent_id: 0 } }, agents);
+}
+
 export function createLayaRouter(): TaskRouter {
   return {
     async decide(task, agents) {
       const schema = buildDecisionSchema(agents);
       const run = async () => {
         const model = await loadModel();
+        if (agents.length > 32) return decideTournament(model, task, agents);
         // No minConfidence: it would project a low-confidence agent_id to null.
         const result = await model.decide(buildRouteText(task), schema, { returnDetails: true });
         return parseDecision(result, agents);
       };
       return withTimeout(run(), routerTimeoutMs());
     },
+    async decideMany(tasks, agents) {
+      const run = async () => {
+        const model = await loadModel();
+        if (agents.length > 32) {
+          const decisions = await Promise.all(tasks.map((task) => decideTournament(model, task, agents)));
+          return new Map(tasks.map((task, index) => [task.id, decisions[index]]));
+        }
+        const results = await model.decideBatch(tasks.map(buildRouteText), buildDecisionSchema(agents), { returnDetails: true });
+        if (results.length !== tasks.length) throw new Error("Laya returned an incomplete batch");
+        return new Map(tasks.map((task, index) => [task.id, parseDecision(results[index], agents)]));
+      };
+      return withTimeout(run(), routerTimeoutMs());
+    },
   };
+}
+
+/** The cloud runner never forwards credentials or response bodies in errors. */
+export function createJevPredictor() {
+      const key = process.env.TYPESAFE_API_KEY?.trim();
+      if (!key) throw new Error("TYPESAFE_API_KEY is not configured");
+      const base = new URL(process.env.TYPESAFE_BASE_URL?.trim() || "https://api.typesafe.ai");
+      if (base.protocol !== "https:" && !(base.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(base.hostname))) throw new Error("Jev requires an HTTPS endpoint");
+      const modelName = process.env.TYPESAFE_MODEL?.trim() || "jev-latest";
+      return async (state: unknown, questions: Record<string, unknown>) => {
+        const res = await fetch(`${base.toString().replace(/\/$/, "")}/v1/systemone`, {
+          method: "POST", headers: { "Authorization": `Bearer ${key}`, "Content-Type": "application/json" },
+          body: JSON.stringify({ model: modelName, state, questions }), signal: AbortSignal.timeout(routerTimeoutMs()),
+        });
+        if (!res.ok) throw new Error(`Jev request failed (HTTP ${res.status})`);
+        const result: unknown = await res.json();
+        if (!result || typeof result !== "object" || !("answers" in result) || !result.answers || typeof result.answers !== "object") throw new Error("Jev returned invalid answers");
+        return result as { answers: Record<string, Record<string, unknown>> };
+      };
+}
+
+export async function systemOneRunner() {
+  if (!isRouterEnabled()) throw new Error("System One router is not configured");
+  if (process.env.NEIRO_ROUTER_PROVIDER?.trim().toLowerCase() === "jev") return { predict: createJevPredictor() };
+  return await loadModel();
+}
+
+/** Jev's API returns the same typed answer shapes used by laya-ts. */
+export function createJevRouter(): TaskRouter {
+  return {
+    async decide(task, agents) {
+      const { questionsFromJsonSchema, answersToJson } = await import("laya-ts");
+      const predict = createJevPredictor();
+      if (agents.length > 32) return decideTournament({ predict }, task, agents);
+      const schema = buildDecisionSchema(agents);
+      const answers = (await predict(buildRouteText(task), questionsFromJsonSchema(schema))).answers;
+      const values = answersToJson(answers, schema);
+      return parseDecision({ values, confidence: { agent_id: Number(answers.agent_id?.confidence ?? 0) } }, agents);
+    },
+  };
+}
+
+export function createConfiguredRouter(): TaskRouter {
+  return process.env.NEIRO_ROUTER_PROVIDER?.trim().toLowerCase() === "jev" ? createJevRouter() : createLayaRouter();
+}
+
+export type RouterCalibrationRow = { laya_agent_id: string | null; human_agent_id: string | null; route_confidence: number | null };
+
+/** Agreement is a proxy for correctness, not proof that an unreviewed choice was correct. */
+export async function calibrateRouteOutcomes(rows: RouterCalibrationRow[]): Promise<{ accept: number; escalate: number; samples: number } | null> {
+  const valid = rows.filter((row) => row.laya_agent_id && typeof row.route_confidence === "number" && Number.isFinite(row.route_confidence) && row.route_confidence >= 0 && row.route_confidence <= 1);
+  if (!valid.length) return null;
+  const { calibrateReliability } = await import("laya-ts");
+  const [accept, escalate] = calibrateReliability(valid.map((row) => row.route_confidence as number), valid.map((row) => !row.human_agent_id || row.human_agent_id === row.laya_agent_id), { targetAccuracy: .9 });
+  return { accept, escalate, samples: valid.length };
+}
+
+/** Load every completed routing outcome, not only the first database page. */
+export async function calibrateRouterThreshold(supabase: import("@supabase/supabase-js").SupabaseClient) {
+  const rows: RouterCalibrationRow[] = [];
+  for (let from = 0; ; from += 1000) {
+    const { data, error } = await supabase.from("mission_tasks").select("laya_agent_id,human_agent_id,route_confidence").eq("stage", "Done").not("laya_agent_id", "is", null).order("id").range(from, from + 999);
+    if (error) throw new Error(error.message);
+    rows.push(...(data ?? []) as RouterCalibrationRow[]);
+    if ((data?.length ?? 0) < 1000) break;
+  }
+  return calibrateRouteOutcomes(rows);
 }

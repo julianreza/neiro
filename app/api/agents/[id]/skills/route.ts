@@ -4,6 +4,7 @@ import {
   installSkill,
   listSkills,
   searchSkills,
+  saveLearnedSkillFile,
   setSkillEnabled,
   uninstallSkill,
 } from "@/lib/hermes-skills";
@@ -37,6 +38,11 @@ export async function POST(request: NextRequest, context: RouteContext) {
     const profile = await localAgentProfile(id);
     const body = (await request.json().catch(() => null)) as Record<string, unknown> | null;
     switch (body?.action) {
+      case "save_local": {
+        if (typeof body.name !== "string" || typeof body.content !== "string") return NextResponse.json({ error: "Skill name and content are required." }, { status: 400 });
+        await saveLearnedSkillFile(profile, body.name, body.content);
+        return NextResponse.json({ ok: true, profile });
+      }
       case "install":
         await installSkill(profile, body.identifier);
         break;

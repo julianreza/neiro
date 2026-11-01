@@ -33,6 +33,8 @@ export type MissionCreateInput = {
   mode: MissionMode | null;
   /** Summarizing also drafts a SKILL.md. */
   learnSkillOnDone: boolean;
+  autoApproveSafeTools: boolean;
+  allowSkippedVerification: boolean;
   /** Screenshots for the planner (validated data: URLs). */
   attachments: ImageAttachment[];
 };
@@ -141,6 +143,9 @@ export function parseMissionCreateBody(body: unknown): MissionCreateParseResult 
     return { ok: false, error: "learn_skill_on_done must be a boolean" };
   }
 
+  if (b.auto_approve_safe_tools !== undefined && typeof b.auto_approve_safe_tools !== "boolean") return { ok: false, error: "auto_approve_safe_tools must be a boolean" };
+  if (b.allow_skipped_verification !== undefined && typeof b.allow_skipped_verification !== "boolean") return { ok: false, error: "allow_skipped_verification must be a boolean" };
+
   const attached = validateAttachments(b.attachments);
   if (!attached.ok) return attached;
 
@@ -150,6 +155,8 @@ export function parseMissionCreateBody(body: unknown): MissionCreateParseResult 
       title,
       prompt,
       learnSkillOnDone: b.learn_skill_on_done === true,
+      autoApproveSafeTools: b.auto_approve_safe_tools === true,
+      allowSkippedVerification: b.allow_skipped_verification === true,
       attachments: attached.images,
       pauseAfterPlanning: b.pause_after_planning === true,
       maxParallelWorkers: workers.value,

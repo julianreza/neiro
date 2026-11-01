@@ -5,6 +5,7 @@ import Link from "next/link";
 import { GitBranch, GitPullRequest, ScanSearch, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
+import { useRole } from "@/hooks/use-role";
 import {
   Dialog,
   DialogClose,
@@ -38,6 +39,9 @@ const STOPPED = new Set(["cancelled", "completed"]);
  */
 export function WorktreeBar({ missionId, branch, baseBranch, status, onDiscarded, prUrl, prNumber, reviewHref }: WorktreeBarProps) {
   const [open, setOpen] = useState(false);
+  const [mergeOpen, setMergeOpen] = useState(false);
+  const [method, setMethod] = useState<"squash" | "merge" | "rebase">("squash");
+  const role = useRole();
   const [busy, setBusy] = useState(false);
   const stopped = STOPPED.has(status);
 
@@ -62,6 +66,20 @@ export function WorktreeBar({ missionId, branch, baseBranch, status, onDiscarded
     } finally {
       setBusy(false);
     }
+  }
+
+  async function merge() {
+    setBusy(true);
+    try {
+      const response = await fetch(`/api/missions/${encodeURIComponent(missionId)}/control`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "merge_pr", method }) });
+      const data = await response.json().catch(() => ({})) as { error?: string; warnings?: string[] };
+      if (!response.ok) { toast.error(data.error ?? "Merge failed. Check GitHub before retrying."); return; }
+      if (data.warnings?.length) toast.warning(data.warnings.join(" "));
+      else toast.success("PR merged and worktree removed");
+      setMergeOpen(false);
+      onDiscarded();
+    } catch { toast.error("Connection lost. Check GitHub before retrying."); }
+    finally { setBusy(false); }
   }
 
   return (
@@ -93,7 +111,8 @@ export function WorktreeBar({ missionId, branch, baseBranch, status, onDiscarded
           </Link>
         )}
       </p>
-      <div className="flex items-center gap-3">
+      <div className="flex flex-wrap items-center gap-3">
+        {status === "completed" && prUrl && role === "admin" && <Button size="sm" onClick={() => setMergeOpen(true)}><GitPullRequest aria-hidden="true" /> Merge PR…</Button>}
         {!stopped && (
           <span id="discard-worktree-reason" className="text-xs text-muted-foreground">
             Cancel the mission first
@@ -111,6 +130,14 @@ export function WorktreeBar({ missionId, branch, baseBranch, status, onDiscarded
           Discard worktree…
         </Button>
       </div>
+      <Dialog open={mergeOpen} onOpenChange={(next) => !busy && setMergeOpen(next)}>
+        <DialogContent>
+          <DialogHeader><DialogTitle>Merge this pull request?</DialogTitle><DialogDescription>GitHub will merge the matching mission commit and delete its branch. Neiro will then remove the clean mission worktree. Review the PR first.</DialogDescription></DialogHeader>
+          <label htmlFor="mission-merge-method" className="text-sm font-medium">Merge method</label>
+          <select id="mission-merge-method" className="rounded-md border bg-background p-2" value={method} onChange={(event) => setMethod(event.target.value as typeof method)}><option value="squash">Squash</option><option value="merge">Merge commit</option><option value="rebase">Rebase</option></select>
+          <DialogFooter><DialogClose asChild><Button variant="outline" disabled={busy}>Cancel</Button></DialogClose><Button disabled={busy} onClick={() => void merge()}>{busy ? "Merging…" : "Merge PR"}</Button></DialogFooter>
+        </DialogContent>
+      </Dialog>
       <Dialog open={open} onOpenChange={(next) => !busy && setOpen(next)}>
         <DialogContent>
           <DialogHeader>

@@ -83,6 +83,17 @@ test("no enabled reviewer agent fails the review with a clear message", async ()
   assert.equal(hermes.starts.length, 0);
 });
 
+test("a flagged pull request stops before launching the reviewer", async () => {
+  const { reviews, store, hermes, deps } = setup();
+  store.seedAgent("reviewer");
+  const review = reviews.seed();
+  deps.guardPrompt = async () => "flagged";
+  await advanceCodeReviews(deps);
+  assert.equal(reviews.rows.get(review.id)?.status, "failed");
+  assert.match(reviews.rows.get(review.id)?.error ?? "", /may contain instructions/i);
+  assert.equal(hermes.starts.length, 0);
+});
+
 test("a gh failure fails the review with its cause", async () => {
   const { reviews, store, hermes, deps } = setup(async () => {
     throw new PrError("gh_auth", "The gh CLI is not logged in. Run `gh auth login` on the neiro host.");

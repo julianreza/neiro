@@ -21,7 +21,7 @@ export async function GET(request: Request) {
     }
     const profile = params.get("profile");
     if (profile !== null) agent = { url: agent?.url ?? "", key_enc: agent?.key_enc, profile };
-    const options = await listHermesModelOptions(agent);
+    const options = await listHermesModelOptions(agent, { refresh: params.get("refresh") === "1" });
     return NextResponse.json(options, { status: 200 });
   } catch (err: unknown) {
     if (err instanceof AppConfigError) {

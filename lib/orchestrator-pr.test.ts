@@ -188,6 +188,18 @@ test("a PR that cannot be opened parks the task in Needs you with the reason", a
   assert.match(items[0].detail, /PR could not be opened before Final review: The gh CLI is not logged in/);
 });
 
+test("flagged pull request text parks a mission task before starting its reviewer", async () => {
+  const { store, hermes, reviews, deps } = setup();
+  deps.guardPrText = async () => "flagged";
+  const { mission, task } = seed(store);
+  await advanceMission(mission.id, deps);
+  assert.equal(store.tasks.get(task.id)?.stage, "Needs you");
+  assert.equal(hermes.starts.length, 0);
+  assert.equal(reviews.rows.size, 0);
+  assert.match(store.missions.get(mission.id)?.lastError ?? "", /pull request text may contain/i);
+  assert.equal(store.missions.get(mission.id)?.prUrl, PR.url);
+});
+
 test("Quick plan and older missions review without a PR, as before", async () => {
   for (const mode of ["plan", null] as const) {
     const { store, hermes, reviews, calls, deps } = setup();

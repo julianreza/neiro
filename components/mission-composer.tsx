@@ -190,6 +190,19 @@ export function MissionComposer({
     askChanged.current = onAskChange;
   }, [onAskChange]);
   const [mode, setMode] = useState<ComposerMode>("ask");
+  const [triage, setTriage] = useState<{ prompt: string; suggestedMode: string; complexity: number; recommendedWorkers: number; ambiguous: boolean } | null>(null);
+  useEffect(() => {
+    const text = prompt.trim();
+    if (mode === "ask" || text.length < 20 || text.length > 8000) return;
+    const controller = new AbortController();
+    const timer = setTimeout(() => {
+      fetch("/api/missions/preflight", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "triage", prompt: text }), signal: controller.signal })
+        .then((response) => response.ok ? response.json() : null)
+        .then((body) => { if (!controller.signal.aborted && body?.suggestion) setTriage({ prompt: text, ...body.suggestion }); })
+        .catch(() => undefined);
+    }, 1000);
+    return () => { clearTimeout(timer); controller.abort(); };
+  }, [prompt, mode]);
   const [ask, setAsk] = useState<AskState>({ phase: "idle" });
   // Tool calls the answering agent waits on; shown as Allow / Deny in its bubble.
   const [askApprovals, setAskApprovals] = useState<{ runId: string; list: PendingApproval[] } | null>(null);
@@ -494,6 +507,7 @@ export function MissionComposer({
             })}
           </div>
           {compact && <p className="composer-hint">{info.detail}</p>}
+          {mode !== "ask" && triage?.prompt === prompt.trim() && <p className="text-xs text-muted-foreground" role="status">Suggestion: {triage.suggestedMode} · complexity {triage.complexity}/3 · {triage.recommendedWorkers} workers{triage.ambiguous ? " · consider pausing for PRD review" : ""}</p>}
           <div className="flex flex-wrap items-center gap-2 text-sm" aria-label="Mission templates">
             <span className="text-muted-foreground">Templates:</span>
             {([
@@ -501,6 +515,7 @@ export function MissionComposer({
               { label: "Fix failing tests", mode: "fix" as const, text: "Failing tests or error:\n\nExpected behavior:\n\nAcceptance criteria:\n- Reproduce the failure\n- Fix the cause\n- Verify the affected tests" },
             ]).map((template) => (
               <button key={template.label} type="button" className="rounded-lg border px-2 py-1 hover:bg-secondary focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary" onClick={() => {
+                if (prompt.trim() && !window.confirm("Replace your current draft with this template?")) return;
                 setMode(template.mode);
                 onPromptChange(template.text);
                 inputRef.current?.focus();
