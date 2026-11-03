@@ -191,6 +191,7 @@ type CliRun = {
   child?: ChildProcess;
   idempotencyKey?: string;
   endedAt?: number;
+  stopRequested?: boolean;
   /** Oh My Pi tool calls waiting for Allow / Deny, oldest first. */
   pending: PendingApproval[];
   /** Writes one RPC frame to the CLI (Oh My Pi only). */
@@ -368,11 +369,12 @@ export async function startCliRun(runtime: CliRuntime, input: CliStartInput): Pr
     }
   });
 
-  child.on("error", (err) => finish(run, "failed", err.message));
+  child.on("error", (err) => { if (!run.stopRequested) finish(run, "failed", err.message); });
   child.on("close", (code) => {
     if (run.status !== "running") return;
     run.output = (finalSeen?.output ?? (lastText || streamed)).trim();
     run.tokens = finalSeen?.tokens ?? stepTokens;
+    if (run.stopRequested) return finish(run, "cancelled", "Stopped by you");
     if (finalSeen && !finalSeen.ok) return finish(run, "failed", finalSeen.error);
     if (finalSeen || code === 0) return finish(run, "completed");
     const tail = stderr.trim().split("\n").slice(-3).join(" ").slice(0, 400);
@@ -394,11 +396,11 @@ export type CliRunStatus = {
 export function getCliRun(runId: string): CliRunStatus {
   const run = runs.get(runId);
   if (!run) {
-    return { run_id: runId, status: "expired_404", error: "This run ended when the server restarted.", pending_controls: [] };
+    return { run_id: runId, status: "unknown", error: "The CLI run is unavailable; its process state cannot be confirmed.", pending_controls: [] };
   }
   return {
     run_id: runId,
-    status: run.status,
+    status: run.status === "running" && run.stopRequested ? "stopping" : run.status,
     output: run.output || undefined,
     tokens: run.tokens,
     error: run.error,
@@ -424,9 +426,10 @@ export function answerCliApproval(runId: string, approved: boolean, requestId?: 
 export function stopCliRun(runId: string): boolean {
   const run = runs.get(runId);
   if (!run || run.status !== "running") return false;
+  if (run.stopRequested) return true;
+  run.stopRequested = true;
   run.send?.({ type: "abort" });
   run.child?.kill("SIGTERM");
-  finish(run, "cancelled", "Stopped by you");
   return true;
 }
 

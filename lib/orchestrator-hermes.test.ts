@@ -166,6 +166,7 @@ test("a finished run adds its cache tokens and the model it really ran on", asyn
 test("runFacts leaves fields alone when the run says nothing", () => {
   assert.deepEqual(runFacts({ cacheReadTokens: 3 } as MissionTask, { run_id: "r", status: "completed" }), {
     pendingControls: [],
+    approval: false,
   });
 });
 

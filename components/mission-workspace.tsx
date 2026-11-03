@@ -40,6 +40,7 @@ import { RunInspectorSheet, type InspectorFacts } from "@/components/run-inspect
 import { WorktreeBar } from "@/components/worktree-bar";
 import { DeleteButton } from "@/components/delete-button";
 import { useRole } from "@/hooks/use-role";
+import { CostSources } from "@/components/cost-sources";
 import {
   MarkdownArtifactViewer,
   type ArtifactFile,
@@ -166,7 +167,7 @@ function parseMissionDetail(json: unknown): MissionView | null {
       id: t.taskKey ?? t.id.slice(0, 8),
       rowId: t.id,
       runId: t.runId && !t.runId.startsWith("claim:") ? t.runId : null,
-      runAgentId: t.runAgentId ?? t.agentId ?? null,
+      runAgentId: t.runAgentId ?? null,
       title: t.title,
       stage: t.stage,
       agent: t.agentName || "Unassigned",
@@ -190,6 +191,7 @@ function parseMissionDetail(json: unknown): MissionView | null {
         runtimeProvider: t.runtimeProvider ?? null,
         runtimeModel: t.runtimeModel ?? null,
         subagentRuns: t.subagentRuns ?? [],
+        runAgentId: t.runAgentId ?? null,
         canFork: Boolean(t.sessionId) && !t.runId && t.stage !== "Done",
       },
     })),
@@ -199,7 +201,7 @@ function parseMissionDetail(json: unknown): MissionView | null {
     runUsage: m.runUsage ?? [],
     // Coding outputs live in the task chat, not in the Artifacts list.
     // Fork notes are instructions to the agent, shown in the task chat.
-    artifacts: m.artifacts.filter((a) => a.kind !== "coding_output" && a.kind !== "fork_note" && a.kind !== "workspace_snapshot" && a.kind !== "run_failure").map((a) => ({
+    artifacts: m.artifacts.filter((a) => a.kind !== "coding_output" && a.kind !== "fork_note" && a.kind !== "workspace_snapshot" && a.kind !== "run_failure" && a.kind !== "run_cost_provenance").map((a) => ({
       id: a.id,
       kind: a.kind,
       name: a.kind === "learned_skill" ? "SKILL.md" : `${a.kind.toUpperCase()}.md`,
@@ -218,12 +220,14 @@ function parseRouteAgents(json: unknown): RouteAgentOption[] {
   if (!Array.isArray(rows)) throw new Error("Malformed agents response");
   return rows
     .filter((r): r is Record<string, unknown> => typeof r === "object" && r !== null)
-    .filter((r) => r.enabled !== false)
     .map((r) => ({
       id: String(r.id ?? ""),
       name: String(r.name ?? r.id ?? ""),
       stage: String(r.stage ?? "workers"),
       model: String(r.model ?? ""),
+      enabled: r.enabled !== false,
+      runtime: String(r.runtime ?? "hermes"),
+      localSkillInstallation: r.localSkillInstallation === true,
     }))
     .filter((a) => a.id !== "");
 }
@@ -299,7 +303,7 @@ export function MissionWorkspace({
   // Live missions only offer live agents: demo agents could not be assigned for real.
   const routeAgents: RouteAgentOption[] = isLive
     ? agentList.source === "live"
-      ? agentList.data
+      ? agentList.data.filter((agent) => agent.enabled !== false)
       : []
     : demoRouteAgents;
   const [routingBusy, setRoutingBusy] = useState<Set<string>>(() => new Set());
@@ -653,7 +657,7 @@ export function MissionWorkspace({
                 {mission.result ? <>
                   <div><h3 className="font-semibold">Mission summary</h3>{mission.result.summary ? <AgentMarkdown text={mission.result.summary} /> : <p className="text-sm text-muted-foreground">No summary recorded yet.</p>}</div>
                   <p className="text-sm text-muted-foreground">{mission.status === "completed" ? "Completed" : "In progress"} · {mission.result.retries} retries · QA passed {mission.result.qaPassed}/{mission.result.qaKnown} known · {mission.result.durationMs === null ? "Duration unavailable" : `${Math.round(mission.result.durationMs / 60000)} min including waiting`}</p>
-                  {!isDemo && <div className="text-sm"><h3 className="font-semibold">Estimated model cost</h3><p className="text-muted-foreground">{mission.result.cost?.cost == null ? "No cost estimate available." : `~$${mission.result.cost.cost.toFixed(6)} · ${mission.result.cost.priced}/${mission.result.cost.total} recorded runs priced.`} Estimates use available Hermes rates and may differ from billing, subscriptions, cache adjustments, or tool charges.</p></div>}
+                  {!isDemo && <div className="text-sm"><h3 className="font-semibold">Reported or estimated model cost</h3><p className="text-muted-foreground">{mission.result.cost?.cost == null ? "No cost information available." : `~$${mission.result.cost.cost.toFixed(6)} · ${mission.result.cost.priced}/${mission.result.cost.total} recorded runs priced.`} Totals may differ from billing, subscriptions, cache adjustments, or tool charges.</p><CostSources totals={mission.result.costSources} /></div>}
                   <div><h3 className="font-semibold">Verification by task</h3><ul className="divide-y">{mission.result.tasks.map((task) => <li key={task.id} className="flex flex-wrap justify-between gap-2 py-2 text-sm"><span>{task.title}</span><span>QA: {task.qa} · Review: {task.review}</span></li>)}</ul>{mission.result.tasks.length === 0 && <p className="text-sm text-muted-foreground">No tasks recorded.</p>}</div>
                   <div><h3 className="font-semibold">Recorded changes</h3>{mission.result.files.length ? <ul className="list-inside list-disc break-all text-sm">{mission.result.files.map((file) => <li key={file}>{file}</li>)}</ul> : <p className="text-sm text-muted-foreground">No changes recorded.</p>}{mission.result.filesMayBeIncomplete && <p className="text-sm text-muted-foreground">A recorded diff was truncated; this list may be incomplete.</p>}</div>
                   {mission.lastError && <p className="text-sm">Outstanding issue: {mission.lastError}</p>}
@@ -780,7 +784,9 @@ export function MissionWorkspace({
                   title={mission.title}
                   initialArtifactId={typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("artifact") : null}
                   files={isLive ? mission.artifacts : undefined}
-                  agentIds={isLive && role === "admin" ? routeAgents.map((agent) => ({ id: agent.id, name: agent.name })) : undefined}
+                  agentIds={isLive && role === "admin" && agentList.source === "live" ? agentList.data.map((agent) => ({ id: agent.id, name: agent.name, available: agent.localSkillInstallation === true, reason: agent.runtime !== "hermes" ? "Hermes only" : "Local profile unavailable" })) : undefined}
+                  missionId={isLive ? mission.id : undefined}
+                  onInstalled={detail.reload}
                 />
               </TabsContent>
             </Tabs>

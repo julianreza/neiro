@@ -176,7 +176,7 @@ export function updateDemoTask(
 }
 
 /** Agents a human can pick at the routing gate (mirrors the seeded agents). */
-export type RouteAgentOption = { id: string; name: string; stage: string; model: string };
+export type RouteAgentOption = { id: string; name: string; stage: string; model: string; enabled?: boolean; localSkillInstallation?: boolean; runtime?: string };
 export const demoRouteAgents: RouteAgentOption[] = [
   { id: "pm-orchestrator", name: "Neiro PM", stage: "orchestrator", model: "Claude Opus 4.6" },
   { id: "spec-writer", name: "Scribe PRD", stage: "spec", model: "Claude Sonnet 4.6" },

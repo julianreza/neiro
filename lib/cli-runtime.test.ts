@@ -110,7 +110,7 @@ after(async () => {
 async function waitDone(runId: string) {
   for (let i = 0; i < 100; i++) {
     const run = getCliRun(runId);
-    if (run.status !== "running") return run;
+    if (run.status !== "running" && run.status !== "stopping") return run;
     await new Promise((r) => setTimeout(r, 30));
   }
   throw new Error("run did not finish");
@@ -184,6 +184,7 @@ test("the same idempotency key starts one run, and stop cancels it", async () =>
   assert.deepEqual(a, b);
   if (a.kind !== "started") return;
   assert.equal(stopCliRun(a.runId), true);
-  assert.equal(getCliRun(a.runId).status, "cancelled");
-  assert.equal(getCliRun("omp_00000000-0000-0000-0000-000000000000").status, "expired_404");
+  assert.equal(getCliRun(a.runId).status, "stopping");
+  assert.equal((await waitDone(a.runId)).status, "cancelled");
+  assert.equal(getCliRun("omp_00000000-0000-0000-0000-000000000000").status, "unknown");
 });

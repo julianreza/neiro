@@ -3,6 +3,7 @@ import { advanceCodeReviews } from "@/lib/code-review-runner";
 import { advanceActiveMissions } from "@/lib/orchestrator";
 import { advanceAllRooms } from "@/lib/rooms-runtime";
 import { deliverBotReplies } from "@/lib/bot-replies";
+import { reconcileAsks } from "@/lib/reconcile-asks";
 
 export type TickResult = {
   advancedCount: number;
@@ -38,6 +39,7 @@ export async function runTick(): Promise<TickResult> {
   }
   // Group rooms (Bot Mode): one turn step per running room.
   errors.push(...(await advanceAllRooms()));
+  errors.push(...(await reconcileAsks().catch((err: unknown) => [`Chat reconciliation: ${String(err)}`])));
   // /ask answers going back to Telegram.
   errors.push(...(await deliverBotReplies().catch((err: unknown) => [`Bot replies: ${String(err)}`])));
   return { advancedCount, errors, tickedAt };

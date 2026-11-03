@@ -3,6 +3,7 @@ import { test } from "node:test";
 import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { execFileSync } from "node:child_process";
 import { parseMissionCreateBody } from "@/lib/mission-input";
 import { missionPreflight, choosePreflightAgent } from "@/lib/mission-preflight";
 import type { Agent } from "@/lib/types";
@@ -47,4 +48,24 @@ test("unavailable verification agents warn without blocking required runtimes", 
   assert.equal(result.checks.find((check) => check.id === "qa")?.status, "warning");
   assert.equal(result.checks.some((check) => check.status === "blocked"), false);
   assert.equal(result.checks.find((check) => check.id === "reviewer")?.status, "pass");
+});
+
+test("parallel worktree preflight blocks a Hermes worker and warns for a Hermes verifier", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "neiro-preflight-git-"));
+  try {
+    execFileSync("git", ["init", "-q", dir]);
+    execFileSync("git", ["-C", dir, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "--allow-empty", "-qm", "init"]);
+    const parsed = parseMissionCreateBody({ prompt: "test", mode: "plan", workspace_path: dir, max_parallel_workers: 2 });
+    assert.equal(parsed.ok, true);
+    if (!parsed.ok) return;
+    const planner = { ...agent("planner", "fullstack"), stage: "orchestrator" as const };
+    const worker = { ...agent("worker", "fullstack"), runtime: "hermes" as const };
+    const qa = { ...agent("qa", "qa"), stage: "qa" as const, runtime: "hermes" as const };
+    const probe = { inspectRuntime: async () => ({ status: "pass" as const, reason: "Ready" }) };
+    const blocked = await missionPreflight(parsed.value, [planner, worker, qa], probe);
+    assert.equal(blocked.checks.find((check) => check.id === "task_runtime_isolation")?.status, "blocked");
+    const optional = await missionPreflight(parsed.value, [planner, { ...worker, runtime: "ohmypi" }, qa], probe);
+    assert.equal(optional.checks.find((check) => check.id === "qa")?.status, "warning");
+    assert.equal(optional.checks.some((check) => check.status === "blocked"), false);
+  } finally { await rm(dir, { recursive: true, force: true }); }
 });

@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { connection } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { AppConfigError } from "@/lib/types";
+import { mapPendingControls } from "@/lib/orchestrator-store";
 
 export type ActiveRunDTO = {
   missionId: string;
@@ -24,7 +25,7 @@ export async function GET() {
     const db = getSupabaseAdmin();
     const { data: tasks, error } = await db
       .from("mission_tasks")
-      .select("id, mission_id, title, stage, run_id, run_agent_id, agent_id, agent_name, tokens, run_started_at, approval")
+      .select("id, mission_id, title, stage, run_id, run_agent_id, agent_id, agent_name, tokens, run_started_at, pending_controls")
       .not("run_id", "is", null)
       .not("run_id", "like", "claim:%")
       .in("stage", ["Coding", "QA check", "Final review"])
@@ -47,11 +48,11 @@ export async function GET() {
       taskTitle: String(t.title ?? ""),
       stage: String(t.stage),
       runId: String(t.run_id),
-      agentId: (t.run_agent_id ?? t.agent_id ?? null) as string | null,
+      agentId: (t.run_agent_id ?? null) as string | null,
       agentName: String(t.agent_name ?? ""),
       tokens: Number(t.tokens ?? 0),
       startedAt: (t.run_started_at ?? null) as string | null,
-      needsApproval: Boolean(t.approval),
+      needsApproval: mapPendingControls(t.pending_controls).length > 0,
     }));
     return NextResponse.json({ runs }, { status: 200 });
   } catch (err: unknown) {

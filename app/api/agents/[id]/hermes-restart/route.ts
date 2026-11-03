@@ -5,6 +5,9 @@ import { restartHermesGateway } from "@/lib/hermes-gateway";
 import { HermesSkillError } from "@/lib/hermes-skills";
 import { hermesCliFailure, localAgentEndpoint } from "@/lib/hermes-local-profile";
 import { usersAdminSession } from "@/lib/users-api";
+import { agentActivity } from "@/lib/agent-activity";
+import { resolveAgentEndpoint } from "@/lib/hermes";
+import { asRuntime } from "@/lib/types";
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -24,8 +27,19 @@ export async function POST(request: NextRequest, context: RouteContext) {
     const endpoint = await localAgentEndpoint(id);
 
     if (!interrupt) {
-      const { data } = await getSupabaseAdmin().from("agents").select("name").eq("active_run", true);
-      const busy = (data ?? []).map((a: { name: string }) => a.name);
+      const db = getSupabaseAdmin();
+      const activity = await agentActivity(db);
+      const { data, error } = await db.from("agents").select("id,name,runtime,profile,url,key_enc");
+      if (error) throw new Error(error.message);
+      const target = new URL(endpoint.baseUrl);
+      const local = new Set(["localhost", "127.0.0.1", "::1", "[::1]"]);
+      const busy: string[] = [];
+      for (const agent of data ?? []) {
+        if (!activity.has(agent.id) || asRuntime(agent.runtime) !== "hermes") continue;
+        const resolved = await resolveAgentEndpoint(agent);
+        const candidate = new URL(resolved.baseUrl);
+        if (candidate.protocol === target.protocol && candidate.port === target.port && local.has(candidate.hostname) && local.has(target.hostname)) busy.push(agent.name);
+      }
       if (busy.length) {
         return NextResponse.json(
           { error: `${busy.join(", ")} ${busy.length > 1 ? "are" : "is"} on a run. Restarting stops it.`, busy: true },

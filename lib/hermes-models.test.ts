@@ -44,7 +44,7 @@ test("includes all authenticated providers with refresh and per-model metadata",
   globalThis.fetch = (async (input) => {
     url = String(input);
     return Response.json({ provider: "alpha", model: "a", providers: [
-      { slug: "alpha", name: "Alpha", authenticated: true, is_current: true, models: ["a"], pricing: { a: { input: "$1.50", output: "$3", cache: "$0.25" } }, capabilities: { a: { reasoning: true, vision: false } } },
+      { slug: "alpha", name: "Alpha", authenticated: true, is_current: true, models: ["a"], pricing: { a: { input: "$1.50", output: "$3", cache: "$0.25" } }, capabilities: { a: { reasoning: true, vision: false, tools: true } } },
       { slug: "beta", name: "Beta", authenticated: true, models: ["b"] },
       { slug: "offline", authenticated: false, models: ["x"] },
     ] });
@@ -55,6 +55,7 @@ test("includes all authenticated providers with refresh and per-model metadata",
   assert.deepEqual(result.models[0].pricing, { input: 1.5, output: 3, cacheRead: .25 });
   assert.equal(result.models[0].supportsReasoning, true);
   assert.equal(result.models[0].supportsVision, false);
+  assert.equal(result.models[0].supportsTools, true);
 });
 
 test("does not advertise a current provider that Hermes says is unauthenticated", async () => {

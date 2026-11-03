@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { useLiveData } from "@/hooks/use-live-data";
 import { DataSourceBadge, DataSourceFailure } from "@/components/data-source-badge";
 import {
@@ -40,7 +40,9 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
-import { ModelPicker, type RuntimeModels } from "@/components/model-picker";
+import { ModelPicker, type ModelOption, type RuntimeModels } from "@/components/model-picker";
+import { CostSources } from "@/components/cost-sources";
+import type { RunCostSource } from "@/lib/run-cost-sources";
 import { asRuntime, OHMYPI_EFFORTS, REASONING_EFFORTS, type AgentRuntime } from "@/lib/types";
 import { Label } from "@/components/ui/label";
 import { Picker } from "@/components/ui/picker";
@@ -184,16 +186,23 @@ const presets = [
   },
 ] as const;
 
-type HermesModel = { id: string; providerName: string };
+type HermesModel = ModelOption;
 const noHermesModels: HermesModel[] = [];
+type AgentCost = { cost: number | null; priced: number; total: number; costSources?: Record<RunCostSource, { cost: number; count: number }> };
+const noAgentCost: AgentCost = { cost: null, priced: 0, total: 0 };
+function parseAgentCost(json: unknown): AgentCost {
+  const value = json as AgentCost;
+  if (!value || typeof value.priced !== "number" || typeof value.total !== "number" || !(value.cost === null || typeof value.cost === "number")) throw new Error("Malformed agent cost response");
+  return value;
+}
 
 function parseHermesModels(json: unknown): HermesModel[] {
   const rows = (json as { models?: unknown } | null)?.models;
   if (!Array.isArray(rows)) throw new Error("Malformed /api/agents/models response");
   return rows.flatMap((row) => {
-    const r = row as { id?: unknown; providerName?: unknown };
+    const r = row as ModelOption;
     return typeof r.id === "string"
-      ? [{ id: r.id, providerName: typeof r.providerName === "string" ? r.providerName : "" }]
+      ? [{ ...r, providerName: typeof r.providerName === "string" ? r.providerName : "" }]
       : [];
   });
 }
@@ -291,6 +300,13 @@ async function sendJson(url: string, method: string, body?: unknown): Promise<st
 
 export function AgentsManager() {
   const live = useLiveData<Agent[]>("/api/agents", starters, parseAgents);
+  const reloadAgents = live.reload;
+  useEffect(() => {
+    const refresh = () => { if (!document.hidden) reloadAgents(); };
+    const timer = setInterval(refresh, 15_000);
+    document.addEventListener("visibilitychange", refresh);
+    return () => { clearInterval(timer); document.removeEventListener("visibilitychange", refresh); };
+  }, [reloadAgents]);
   const readOnly = live.source !== "live";
   const agents: Agent[] = live.source === "live" || live.source === "demo" ? live.data : [];
   const [draft, setDraft] = useState<Agent | null>(null);
@@ -306,6 +322,7 @@ export function AgentsManager() {
     parseHermesModels,
   );
   const modelOptions = hermesModels.source === "live" ? hermesModels.data : [];
+  const agentCost = useLiveData<AgentCost>(savedAgent ? `/api/agents/${encodeURIComponent(savedAgent.id)}/usage` : null, noAgentCost, parseAgentCost);
   // The local omp CLI and its models, read when the form opens.
   const cli = useLiveData<CliRuntimes>(draft ? "/api/agents/runtimes" : null, noCliRuntimes, parseCliRuntimes);
   const cliStatus = (info: CliInfo): RuntimeModels["status"] =>
@@ -415,6 +432,7 @@ export function AgentsManager() {
     const before = agents.find((a) => a.id === saved.id);
     const { reasoningEffort, serviceTier, ...rest } = saved;
     const payload: Record<string, unknown> = { ...rest };
+    delete payload.activeRun;
     if (reasoningEffort || before?.reasoningEffort) payload.reasoningEffort = reasoningEffort;
     if (serviceTier || before?.serviceTier) payload.serviceTier = serviceTier;
 
@@ -880,6 +898,7 @@ export function AgentsManager() {
               </div>
               <div className="space-y-2">
                 <Label htmlFor="agent-model">Model</Label>
+                <Button type="button" variant="ghost" size="sm" disabled={Boolean(unsavedEndpoint)} onClick={hermesModels.refresh}>Refresh models</Button>
                 <ModelPicker
                   id="agent-model"
                   runtime={draft.runtime}
@@ -918,6 +937,7 @@ export function AgentsManager() {
                         ? `${RUNTIME_LABEL[draft.runtime].hint} is not installed on this computer.`
                         : "Works in the mission's project folder and asks Allow / Deny in the chat before it writes or runs a command."}
                 </p>
+                {hermesModels.source === "live" && hermesModels.staleReason && <p role="status" className="text-xs text-muted-foreground">Last updated {new Date(hermesModels.lastUpdated).toLocaleTimeString()} · Refresh failed: {hermesModels.staleReason}</p>}
               </div>
               <div className="space-y-2">
                 <Label htmlFor="agent-token-budget">Token budget per mission</Label>
@@ -938,6 +958,8 @@ export function AgentsManager() {
                 <p id="agent-token-budget-help" className="text-xs text-muted-foreground">
                   This agent stops at Needs you after using this many tokens in one mission. Empty means no limit.
                 </p>
+                {savedAgent && <p className="text-xs text-muted-foreground">Recorded mission runs, all time: {agentCost.source === "live" ? agentCost.data.cost === null ? `— · ${agentCost.data.priced}/${agentCost.data.total} runs priced` : `~$${agentCost.data.cost.toFixed(6)} · ${agentCost.data.priced}/${agentCost.data.total} runs priced` : agentCost.source === "error" ? "Cost unavailable" : "Loading cost…"}. Reported or estimated model costs may differ from billing.</p>}
+                {savedAgent && agentCost.source === "live" && <CostSources totals={agentCost.data.costSources} />}
               </div>
               <div className="space-y-2">
                 <Label htmlFor="agent-prompt">System prompt</Label>

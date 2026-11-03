@@ -13,6 +13,7 @@ import {
 } from "@/lib/types";
 import { parseTokenBudget } from "@/lib/budget";
 import type { Agent, AgentPublic } from "@/lib/types";
+import { agentActivity } from "@/lib/agent-activity";
 
 export async function GET() {
   await connection();
@@ -28,11 +29,19 @@ export async function GET() {
       return NextResponse.json({ error: error.message }, { status: 500 });
     }
 
+    const activity = await agentActivity(supabase);
     const agents: AgentPublic[] = (data || []).map((row: Agent) => {
       const rest = { ...row };
       delete rest.key_enc;
+      let localSkillInstallation = false;
+      try {
+        const host = new URL(row.url?.trim() || process.env.HERMES_DEFAULT_URL?.trim() || "").hostname;
+        localSkillInstallation = (!row.runtime || row.runtime === "hermes") && ["localhost", "127.0.0.1", "::1", "[::1]"].includes(host);
+      } catch { /* An unconfigured endpoint cannot be installed locally. */ }
       return {
         ...rest,
+        localSkillInstallation,
+        active_run: activity.has(row.id),
         hasCustomKey: Boolean(row.key_enc || row.url),
       };
     });

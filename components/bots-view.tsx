@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { BotMessageSquare } from "lucide-react";
 import { BotRig, agentLook } from "@/components/agent-bot";
 import {
@@ -24,18 +24,21 @@ import { missionHref, timeAgo } from "@/lib/client-api";
 export function BotsView() {
   const role = useRole();
   const canSend = role === "admin";
-  const { bots } = useBots();
+  const { bots, error: botsError } = useBots();
   const rooms = useRooms();
   // `?room=<id>` (from Needs you) or `?bot=<agentId>` opens that one.
-  const [target, setTarget] = useState<ChatTarget | null>(() => {
-    if (typeof window === "undefined") return null;
-    const q = new URLSearchParams(window.location.search);
-    const room = q.get("room");
-    const bot = q.get("bot");
-    return room ? { kind: "room", id: room } : bot ? { kind: "bot", id: bot } : null;
-  });
+  const [target, setTarget] = useState<ChatTarget | null | undefined>(undefined);
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      const q = new URLSearchParams(window.location.search);
+      const room = q.get("room");
+      const bot = q.get("bot");
+      setTarget(room ? { kind: "room", id: room } : bot ? { kind: "bot", id: bot } : null);
+    }, 0);
+    return () => clearTimeout(timer);
+  }, []);
   // Nothing picked yet: the first bot.
-  const open: ChatTarget | null = target ?? (bots[0] ? { kind: "bot", id: bots[0].id } : null);
+  const open: ChatTarget | null = target === undefined ? null : target ?? (bots[0] ? { kind: "bot", id: bots[0].id } : null);
   const openBot = open?.kind === "bot" ? bots.find((b) => b.id === open.id) : undefined;
   const pick = (next: ChatTarget) => {
     setTarget(next);
@@ -58,6 +61,7 @@ export function BotsView() {
         </div>
       </div>
 
+      {botsError && <p className="project-note" role="alert">Bot activity unavailable or out of date: {botsError}</p>}
       <div className="chat-layout chat-layout-bots">
         <BotRail bots={bots} target={open ?? { kind: "thread" }} onPick={(id) => pick({ kind: "bot", id })} />
         <nav className="chat-list" aria-label="Rooms and bots">

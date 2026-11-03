@@ -1,4 +1,4 @@
-import { NextResponse } from "next/server";
+import { connection, NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 import {
   OWNER_SESSION,
@@ -102,6 +102,7 @@ export async function POST(request: NextRequest) {
 
 /** Who am I: `{ user, role }`, or 401. */
 export async function GET(request: NextRequest) {
+  await connection();
   const signed = await getRequestSession(request);
   const session = signed ? await sessionRoles().refresh(signed) : null;
   if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });

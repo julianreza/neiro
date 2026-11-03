@@ -13,6 +13,7 @@ import {
 } from "@/lib/types";
 import { parseTokenBudget } from "@/lib/budget";
 import type { Agent } from "@/lib/types";
+import { agentActivity } from "@/lib/agent-activity";
 
 type RouteContext = {
   params: Promise<{ id: string }>;
@@ -38,7 +39,7 @@ export async function GET(_request: NextRequest, context: RouteContext) {
       return NextResponse.json({ error: "Agent not found" }, { status: 404 });
     }
 
-    const publicAgent = { ...data };
+    const publicAgent = { ...data, active_run: (await agentActivity(supabase)).has(id) };
     delete publicAgent.key_enc;
     return NextResponse.json({ agent: publicAgent }, { status: 200 });
   } catch (err: unknown) {
@@ -58,6 +59,7 @@ export async function PATCH(request: NextRequest, context: RouteContext) {
 
   try {
     const body = await request.json();
+    if ("activeRun" in body || "active_run" in body) return NextResponse.json({ error: "Agent activity is read-only." }, { status: 400 });
     const supabase = getSupabaseAdmin();
 
     const allowedFields: Array<keyof Agent> = [
@@ -71,16 +73,13 @@ export async function PATCH(request: NextRequest, context: RouteContext) {
       "url",
       "key_enc",
       "enabled",
-      "activeRun",
       "tokenBudget",
     ];
 
     const updates: Record<string, unknown> = {};
     for (const key of allowedFields) {
       if (key in body) {
-        if (key === "activeRun") {
-          updates.active_run = body[key];
-        } else if (key === "key_enc") {
+        if (key === "key_enc") {
           if (body[key] !== null && typeof body[key] !== "string") return NextResponse.json({ error: "Agent key must be a string." }, { status: 400 });
           updates.key_enc = body[key] ? await encryptAgentKey(body[key]) : null;
         } else if (key === "tokenBudget") {
@@ -152,29 +151,14 @@ export async function DELETE(_request: NextRequest, context: RouteContext) {
   try {
     const supabase = getSupabaseAdmin();
 
-    // Check if agent has active runs
-    const { data: agentData } = await supabase
+    const { data: agentData, error: agentError } = await supabase
       .from("agents")
-      .select("active_run")
+      .select("id")
       .eq("id", id)
       .maybeSingle();
-
-    if (agentData?.active_run) {
-      return NextResponse.json(
-        { error: "Agent has active runs; stop them first" },
-        { status: 409 }
-      );
-    }
-
-    // Check if any mission_tasks have this agent currently running
-    const { data: activeTasks } = await supabase
-      .from("mission_tasks")
-      .select("id, stage")
-      .eq("agent_id", id)
-      .in("stage", ["Coding", "QA check", "Final review"])
-      .limit(1);
-
-    if (activeTasks && activeTasks.length > 0) {
+    if (agentError) throw new Error(agentError.message);
+    if (!agentData) return NextResponse.json({ error: "Agent not found" }, { status: 404 });
+    if ((await agentActivity(supabase)).has(id)) {
       return NextResponse.json(
         { error: "Agent has active runs; stop them first" },
         { status: 409 }

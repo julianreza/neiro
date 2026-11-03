@@ -1,4 +1,4 @@
-import { NextResponse } from "next/server";
+import { connection, NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 import { isRole } from "@/lib/auth";
 import { hashPassword, passwordProblem } from "@/lib/passwords";
@@ -7,6 +7,7 @@ import { usersAdminSession, usersFailure as failure } from "@/lib/users-api";
 
 export async function GET(request: NextRequest) {
   if (!(await usersAdminSession(request))) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  await connection();
   try {
     return NextResponse.json({ users: await listUsers() }, { status: 200 });
   } catch (err: unknown) {

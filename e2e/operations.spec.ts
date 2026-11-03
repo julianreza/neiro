@@ -6,7 +6,7 @@ const mission = {
   id: missionId, title: "Fixture mission", prompt: "Build fixture", status: "completed", phase: "done",
   maxRetries: 1, runId: null, runAgentId: null, runStartedAt: null, lastError: null,
   tasks: [], artifacts: [], runUsage: [],
-  result: { summary: "Fixture complete.", tasks: [], files: [], retries: 0, durationMs: 120000, qaPassed: 0, qaKnown: 0, filesMayBeIncomplete: false, cost: { cost: 0.12, priced: 1, total: 2 } },
+  result: { summary: "Fixture complete.", tasks: [], files: [], retries: 0, durationMs: 120000, qaPassed: 0, qaKnown: 0, filesMayBeIncomplete: false, cost: { cost: 0.12, priced: 1, total: 2 }, costSources: { reported: { cost: 0, count: 0 }, runtime_estimate: { cost: 0, count: 0 }, catalog_estimate: { cost: 0.12, count: 1 }, included: { cost: 0, count: 0 }, unknown: { cost: 0, count: 0 } } },
 };
 const dashboard = {
   summary: { activeMissions: 7, completedTasks24h: 3 },
@@ -67,15 +67,42 @@ test("completed mission opens Result and explains partial cost coverage", async 
   await expect(page.getByRole("tab", { name: "Result" })).toHaveAttribute("data-state", "active");
   await expect(page.getByText("Fixture complete.")).toBeVisible();
   await expect(page.getByText(/\$0\.120000 · 1\/2 recorded runs priced/)).toBeVisible();
+  await expect(page.getByText("Catalog estimate: $0.120000 · 1 run")).toBeVisible();
   await page.getByRole("tab", { name: /Board/ }).click();
   await expect(page.getByRole("tab", { name: /Board/ })).toHaveAttribute("data-state", "active");
 });
 
+test("learned skills are installed from the saved artifact after admin review", async ({ page }) => {
+  const artifact = { id: "skill-1", kind: "learned_skill", title: "Learned skill", content: "---\nname: fixture-skill\ndescription: A fixture\n---\n\nInstructions\n", createdAt: "2026-01-01T00:00:00Z" };
+  let payload = false ? { action: "", missionId: "", artifactId: "" } : null;
+  await page.route(`**/api/missions/${missionId}`, (route) => route.fulfill({ json: { mission: { ...mission, artifacts: [artifact] } } }));
+  await page.route("**/api/agents", (route) => route.fulfill({ json: { agents: [{ id: "agent-1", name: "Local Hermes", stage: "workers", model: "model", runtime: "hermes", enabled: true, localSkillInstallation: true }, { id: "paused-agent", name: "Paused Hermes", stage: "workers", model: "model", runtime: "hermes", enabled: false, localSkillInstallation: true }, { id: "remote", name: "Remote Hermes", stage: "workers", model: "model", runtime: "hermes", enabled: true, localSkillInstallation: false }, { id: "omp", name: "OMP", stage: "workers", model: "model", runtime: "ohmypi", enabled: true, localSkillInstallation: false }] } }));
+  await page.route("**/api/agents/agent-1/skills", (route) => { payload = route.request().postDataJSON(); return route.fulfill({ json: { ok: true } }); });
+  await page.goto(`/projects/${projectId}?mission=${missionId}`);
+  await page.getByRole("tab", { name: /Artifacts/ }).click();
+  await expect(page.getByRole("option", { name: "Paused Hermes" })).toBeEnabled();
+  await expect(page.getByRole("option", { name: /Remote Hermes.*Local profile unavailable/ })).toBeDisabled();
+  await expect(page.getByRole("option", { name: /OMP.*Hermes only/ })).toBeDisabled();
+  await page.getByLabel("Hermes agent").selectOption("agent-1");
+  await page.getByRole("button", { name: "Install to Hermes Profile" }).click();
+  await expect.poll(() => payload).toEqual({ action: "install_artifact", missionId, artifactId: "skill-1" });
+});
+
+test("viewers can read a learned skill but cannot install it", async ({ page }) => {
+  const artifact = { id: "skill-1", kind: "learned_skill", title: "Learned skill", content: "---\nname: fixture-skill\ndescription: A fixture\n---\n\nInstructions\n", createdAt: "2026-01-01T00:00:00Z" };
+  await page.route(`**/api/missions/${missionId}`, (route) => route.fulfill({ json: { mission: { ...mission, artifacts: [artifact] } } }));
+  await page.route("**/api/auth", (route) => route.request().method() === "GET" ? route.fulfill({ json: { role: "viewer" } }) : route.continue());
+  await page.goto(`/projects/${projectId}?mission=${missionId}`);
+  await page.getByRole("tab", { name: /Artifacts/ }).click();
+  await expect(page.getByText("Instructions", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Install to Hermes Profile" })).toHaveCount(0);
+});
+
 test("project defaults preserve zero and false choices", async ({ page }) => {
-  let saved: Record<string, unknown> | null = null;
+  let saved = false ? { max_retries: 0, isolate_workspace: false } : null;
   await page.route(`**/api/projects/${projectId}`, async (route) => {
     if (route.request().method() !== "PATCH") return route.fallback();
-    saved = route.request().postDataJSON().defaults as Record<string, unknown>;
+    saved = route.request().postDataJSON().defaults;
     return route.fulfill({ json: { defaults: saved } });
   });
   await page.goto(`/projects?project=${projectId}`);

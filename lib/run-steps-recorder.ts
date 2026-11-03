@@ -25,7 +25,16 @@ export function watchRunSteps(agent: Agent, runId: string): void {
   void listen(agent, runId).finally(() => listening.delete(runId));
 }
 
-async function listen(agent: Agent, runId: string): Promise<void> {
+export type RecorderDeps = {
+  openStream: typeof openRunEventStream;
+  saveSteps: typeof saveRunSteps;
+  saveSubagents: typeof saveSubagentRuns;
+  recordActivity: typeof recordRunActivity;
+  checkpointMs: number;
+};
+
+export async function listen(agent: Agent, runId: string, overrides: Partial<RecorderDeps> = {}): Promise<void> {
+  const deps: RecorderDeps = { openStream: openRunEventStream, saveSteps: saveRunSteps, saveSubagents: saveSubagentRuns, recordActivity: recordRunActivity, checkpointMs: CHECKPOINT_MS, ...overrides };
   const controller = new AbortController();
   const stop = setTimeout(() => controller.abort(), MAX_LISTEN_MS);
   let lastWrite = 0;
@@ -33,22 +42,27 @@ async function listen(agent: Agent, runId: string): Promise<void> {
     const now = Date.now();
     if (!event.terminal && now - lastWrite < 15_000) return;
     lastWrite = now;
-    void recordRunActivity(runId, event).catch((error: unknown) => console.warn("[run-activity]", error));
+    void deps.recordActivity(runId, event).catch((error: unknown) => console.warn("[run-activity]", error));
   });
   let savedSteps = "";
-  const save = async () => {
-    const steps = collector.steps();
-    const snapshot = JSON.stringify(steps);
-    if (snapshot === savedSteps) return;
-    await saveRunSteps(runId, steps);
-    await saveSubagentRuns(runId, steps);
-    savedSteps = snapshot;
+  let saving: Promise<void> = Promise.resolve();
+  const save = () => {
+    const steps = collector.steps().map((step) => step.subagent && agent.id && agent.id !== "default" ? { ...step, subagent: { ...step.subagent, sourceAgentId: agent.id } } : step);
+    saving = saving.catch(() => undefined).then(async () => {
+      const snapshot = JSON.stringify(steps);
+      if (snapshot === savedSteps) return;
+      const results = await Promise.allSettled([deps.saveSteps(runId, steps), deps.saveSubagents(runId, steps)]);
+      const failed = results.find((result) => result.status === "rejected");
+      if (failed?.status === "rejected") throw failed.reason;
+      savedSteps = snapshot;
+    });
+    return saving;
   };
   const checkpoint = setInterval(() => {
     save().catch((err: unknown) => console.warn("[run-steps] checkpoint failed", runId, err));
-  }, CHECKPOINT_MS);
+  }, deps.checkpointMs);
   try {
-    const stream = await openRunEventStream(agent, runId, controller.signal);
+    const stream = await deps.openStream(agent, runId, controller.signal);
     const reader = stream.getReader();
     const decoder = new TextDecoder();
     for (;;) {

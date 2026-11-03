@@ -26,6 +26,6 @@ export async function decryptAgentKey(stored: string): Promise<string> {
     const clear = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, await encryptionKey(), data);
     return new TextDecoder().decode(clear);
   } catch {
-    throw new Error("Could not decrypt agent credential. Check NEIRO_ENCRYPTION_KEY.");
+    throw new Error("Could not decrypt agent credential. Check NEIRO_ENCRYPTION_KEY or DASHBOARD_SECRET.");
   }
 }

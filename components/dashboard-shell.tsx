@@ -4,6 +4,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { useTheme } from "next-themes";
 import {
+  Activity,
   Bot,
   BotMessageSquare,
   Clock3,
@@ -47,6 +48,7 @@ const navigation: NavItem[] = [
   { href: "/projects", label: "Projects", icon: FolderGit2 },
   { href: "/needs-you", label: "Needs you", icon: Inbox },
   { href: "/reviews", label: "Code review", icon: ScanSearch },
+  { href: "/live", label: "Live log", icon: Activity },
   { href: "/chat", label: "Chat", icon: MessagesSquare },
   { href: "/bots", label: "Bots", icon: BotMessageSquare },
   { href: "/agents", label: "AI team", icon: Bot },

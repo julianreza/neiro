@@ -31,6 +31,7 @@ export type TaskGuard = {
   runId: string | null;
   /** When present, routing_status must also match (null = not routed yet). */
   routingStatus?: RoutingStatus | null;
+  pendingControls?: PendingControl[];
 };
 
 /** Observed state a guarded mission update must still match. */
@@ -73,6 +74,7 @@ export type TaskPatch = Partial<
     runtimeProvider: string | null;
     runtimeModel: string | null;
     pendingControls: PendingControl[];
+    approval: boolean;
     admissionId: string | null;
     executionGeneration: number | null;
     subagentRuns: SubagentRun[];
@@ -314,13 +316,13 @@ function mapAttachments(v: unknown): ImageAttachment[] {
 }
 
 /** Stored pending_controls rows (already normalized when written). */
-function mapPendingControls(v: unknown): PendingControl[] {
+export function mapPendingControls(v: unknown): PendingControl[] {
   if (!Array.isArray(v)) return [];
   return v.flatMap((c) => {
     if (!c || typeof c !== "object") return [];
     const r = c as Row;
     const requestId = str(r.requestId);
-    if (!requestId) return [];
+    if (!requestId || (r.kind !== "approval" && r.kind !== "clarify")) return [];
     const choices = Array.isArray(r.choices)
       ? r.choices.filter((x): x is PendingControl["choices"][number] =>
           APPROVAL_CHOICES.includes(x as PendingControl["choices"][number]))
@@ -347,6 +349,7 @@ function mapSubagentRuns(v: unknown): SubagentRun[] {
     return [{
       delegationId,
       childSessionId: str(r.childSessionId) ?? undefined,
+      sourceAgentId: str(r.sourceAgentId) ?? undefined,
       status,
       summary: str(r.summary) ?? undefined,
       durationSec: num(r.durationSec) ?? undefined,
@@ -406,6 +409,7 @@ function taskPatchToRow(patch: TaskPatch): Row {
   if (patch.runtimeProvider !== undefined) row.runtime_provider = patch.runtimeProvider;
   if (patch.runtimeModel !== undefined) row.runtime_model = patch.runtimeModel;
   if (patch.pendingControls !== undefined) row.pending_controls = patch.pendingControls;
+  if (patch.approval !== undefined) row.approval = patch.approval;
   if (patch.admissionId !== undefined) row.admission_id = patch.admissionId;
   if (patch.executionGeneration !== undefined) row.execution_generation = patch.executionGeneration;
   if (patch.subagentRuns !== undefined) row.subagent_runs = patch.subagentRuns;
@@ -441,6 +445,7 @@ export function createSupabaseStore(client?: SupabaseClient): OrchestratorStore 
           .from("mission_artifacts")
           .select("*")
           .eq("mission_id", missionId)
+          .neq("kind", "run_cost_provenance")
           .order("created_at", { ascending: true }),
         // select("*") so a missing model column (older DB) still reads.
         supabase
@@ -512,6 +517,7 @@ export function createSupabaseStore(client?: SupabaseClient): OrchestratorStore 
           .eq("id", id)
           .eq("stage", guard.stage);
         query = guard.runId === null ? query.is("run_id", null) : query.eq("run_id", guard.runId);
+        if (guard.pendingControls !== undefined) query = query.eq("pending_controls", JSON.stringify(guard.pendingControls));
         if (guard.routingStatus !== undefined) {
           query =
             guard.routingStatus === null

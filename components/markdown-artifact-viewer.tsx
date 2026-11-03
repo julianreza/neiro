@@ -46,11 +46,15 @@ export function MarkdownArtifactViewer({
   files,
   initialArtifactId,
   agentIds,
+  missionId,
+  onInstalled,
 }: {
   title: string;
   files?: ArtifactFile[];
   initialArtifactId?: string | null;
-  agentIds?: { id: string; name: string }[];
+  agentIds?: { id: string; name: string; available?: boolean; reason?: string }[];
+  missionId?: string;
+  onInstalled?: () => void;
 }) {
   const demoArtifacts: ArtifactFile[] = [
     {
@@ -65,7 +69,7 @@ export function MarkdownArtifactViewer({
         "# Execution plan\n\nDemo plan for previewing the artifact reader.\n\n1. Define requirements and schema.\n2. Build API and interface in parallel.\n3. Verify behavior at the QA gate.\n4. Review and summarize deliverables.\n\n```text\nT1: Specification\nT2: Backend (depends on T1)\nT3: Frontend (depends on T1)\nT4: QA (depends on T2, T3)\n```",
     },
   ];
-  const artifacts = files ?? demoArtifacts;
+  const artifacts = (files ?? demoArtifacts).filter((file) => file.kind !== "skill_installation");
   const [installAgent, setInstallAgent] = useState("");
   const [installing, setInstalling] = useState(false);
   const [selected, setSelected] = useState(() => Math.max(0, artifacts.findIndex((file) => file.id === initialArtifactId)));
@@ -109,20 +113,21 @@ export function MarkdownArtifactViewer({
               <label className="sr-only" htmlFor="install-skill-agent">Hermes agent</label>
               <select id="install-skill-agent" value={installAgent} onChange={(event) => setInstallAgent(event.target.value)} className="max-w-40 rounded-md border bg-background px-2 py-1 text-xs">
                 <option value="">Select agent</option>
-                {agentIds.map((agent) => <option key={agent.id} value={agent.id}>{agent.name}</option>)}
+                {agentIds.map((agent) => <option key={agent.id} value={agent.id} disabled={agent.available === false}>{agent.name}{agent.available === false ? ` · ${agent.reason}` : ""}</option>)}
               </select>
               <Button variant="outline" size="sm" disabled={!installAgent || installing} onClick={async () => {
-                const name = /^name\s*:\s*["']?([^\s"']+)/m.exec(artifact.content)?.[1];
-                if (!name) { toast.error("Skill name is missing"); return; }
+                if (!missionId || !artifact.id) { toast.error("Skill artifact is unavailable"); return; }
                 setInstalling(true);
                 try {
-                  const response = await fetch(`/api/agents/${encodeURIComponent(installAgent)}/skills`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "save_local", name, content: artifact.content }) });
+                  const response = await fetch(`/api/agents/${encodeURIComponent(installAgent)}/skills`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "install_artifact", missionId, artifactId: artifact.id }) });
                   const data = await response.json().catch(() => ({}));
                   if (!response.ok) toast.error(typeof data.error === "string" ? data.error : "Could not install skill");
+                  else if (typeof data.warning === "string") toast.warning(data.warning);
                   else toast.success("Skill installed to Hermes");
+                  onInstalled?.();
                 } catch { toast.error("Could not reach Neiro"); }
                 finally { setInstalling(false); }
-              }}>{installing ? "Installing…" : "Install to Hermes Skills"}</Button>
+              }}>{installing ? "Installing…" : "Install to Hermes Profile"}</Button>
             </>}
             <Button
               variant="ghost"
@@ -160,6 +165,13 @@ export function MarkdownArtifactViewer({
             </Button>
           </div>
         </div>
+        {artifact.kind === "learned_skill" && files?.filter((file) => file.kind === "skill_installation").map((record) => {
+          try {
+            const result = JSON.parse(record.content) as { sourceArtifactId?: string; profile?: string; status?: string; at?: string; error?: string };
+            if (result.sourceArtifactId !== artifact.id) return null;
+            return <p key={record.id} className="px-6 pt-3 text-xs text-muted-foreground">{result.status === "installed" ? "Installed" : "Installation failed"} · {result.profile} · {result.at}{result.error ? ` · ${result.error}` : ""}</p>;
+          } catch { return null; }
+        })}
         <ArtifactWork file={artifact} />
         <article className="prose prose-sm dark:prose-invert max-w-[72ch] overflow-x-auto p-6 md:p-8">
           <Markdown remarkPlugins={[remarkGfm]}>{artifact.content}</Markdown>

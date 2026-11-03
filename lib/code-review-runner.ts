@@ -157,6 +157,7 @@ async function startReview(review: CodeReview, d: ReviewRunnerDeps): Promise<boo
     rules: await d.loadRules().catch(() => null),
   });
 
+  if (!(await d.reviews.claimReview(review.id, "fetching", { agentId: agent.id, runId: `claim:${review.id}` }))) return false;
   const started = await d.hermes.startRun(agent, {
     prompt,
     // The checkout (if any) is only read: "deny" refuses every write a CLI
@@ -167,7 +168,7 @@ async function startReview(review: CodeReview, d: ReviewRunnerDeps): Promise<boo
   });
   if (started.kind === "deferred") {
     // The runtime is busy; the next tick tries again.
-    return d.reviews.claimReview(review.id, "fetching", { status: "queued" });
+    return d.reviews.claimReview(review.id, "fetching", { status: "queued", agentId: null, runId: null });
   }
   return d.reviews.claimReview(review.id, "fetching", {
     status: "reviewing",

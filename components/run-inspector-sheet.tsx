@@ -18,6 +18,7 @@ import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { formatTokens } from "@/lib/client-api";
 import type { SubagentRun } from "@/lib/types";
+import { SubagentTranscript } from "@/components/subagent-transcript";
 
 /** What the live task row knows about its runs (live missions only). */
 export type InspectorFacts = {
@@ -28,6 +29,7 @@ export type InspectorFacts = {
   subagentRuns: SubagentRun[];
   /** The task has a Hermes session that can be forked. */
   canFork: boolean;
+  runAgentId: string | null;
 };
 
 export function RunInspectorSheet({
@@ -122,6 +124,7 @@ export function RunInspectorSheet({
                               {run.tokens !== undefined && <span className="text-muted-foreground">{formatTokens(run.tokens)} tokens</span>}
                             </p>
                             {run.summary && <p className="mt-1 text-muted-foreground">{run.summary}</p>}
+                            <div className="mt-2"><SubagentTranscript key={`${run.sourceAgentId ?? facts.runAgentId}:${run.childSessionId}`} run={run} agentId={run.sourceAgentId ?? facts.runAgentId} /></div>
                           </div>
                         </li>
                       ))}

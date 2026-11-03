@@ -3,7 +3,7 @@ import type { NextRequest } from "next/server";
 import { isAuthorizedRequest } from "@/lib/auth";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { findPendingControl, forkSession, getRun, steerRun, stopRun, submitRunApproval, submitRunClarify } from "@/lib/agent-runtime";
-import { mapAgentRow, mapTaskRow } from "@/lib/orchestrator-store";
+import { mapAgentRow, mapTaskRow, mapPendingControls } from "@/lib/orchestrator-store";
 import {
   advanceMission,
   classifyRun,
@@ -145,6 +145,7 @@ export async function POST(request: NextRequest, context: RouteContext) {
         .update({
           stage: "Done",
           approval: false,
+          pending_controls: [],
           run_id: null,
           run_agent_id: null,
           run_started_at: null,
@@ -210,6 +211,7 @@ export async function POST(request: NextRequest, context: RouteContext) {
         .update({
           stage: "Needs you",
           approval: false,
+          pending_controls: [],
           run_id: null,
           run_agent_id: null,
           run_started_at: null,
@@ -230,10 +232,13 @@ export async function POST(request: NextRequest, context: RouteContext) {
       // deny_tool with approved: true is the old "approve" spelling.
       const choice: ApprovalChoice =
         action === "deny_tool" && approved === true ? "once" : APPROVAL_ACTIONS[action];
+      if (!agent || !activeRunId) return NextResponse.json({ error: "This task has no active run." }, { status: 409 });
+      let answeredId = requestId;
       if (agent && activeRunId) {
         let answered: boolean;
         try {
           const control = await findPendingControl(agent, activeRunId, requestId);
+          answeredId = control?.requestId ?? requestId;
           if (control && choice !== "once" && choice !== "deny" && !control.choices.includes(choice)) {
             return NextResponse.json(
               { error: `This approval does not offer "${choice}". Choose once or deny.` },
@@ -253,19 +258,28 @@ export async function POST(request: NextRequest, context: RouteContext) {
         }
       }
 
+      const controls = mapPendingControls(task.pending_controls);
+      const answeredControl = answeredId ? controls.find((c) => c.requestId === answeredId && c.kind === "approval") : controls.find((c) => c.kind === "approval");
+      const remaining = answeredControl ? controls.filter((c) => c !== answeredControl) : controls;
       const { data, error } = await supabase
         .from("mission_tasks")
         .update({
-          approval: false,
+          approval: remaining.length > 0,
+          pending_controls: remaining,
           updated_at: new Date().toISOString(),
         })
         .eq("id", taskId)
+        .eq("mission_id", missionId)
+        .eq("run_id", activeRunId)
+        .eq("stage", task.stage)
+        .eq("pending_controls", JSON.stringify(task.pending_controls ?? []))
         .select()
-        .single();
+        .maybeSingle();
 
       if (error) {
         return NextResponse.json({ error: error.message }, { status: 500 });
       }
+      if (!data) return NextResponse.json({ ok: true, warning: "Answer sent; task changed. Refresh to see its current state." });
 
       return NextResponse.json({ ok: true, task: data }, { status: 200 });
     }
@@ -369,33 +383,45 @@ export async function POST(request: NextRequest, context: RouteContext) {
         return NextResponse.json({ error: "Missing required 'reply' text" }, { status: 400 });
       }
 
+      if (!agent || !activeRunId) return NextResponse.json({ error: "This task has no active run." }, { status: 409 });
+      let answeredId = requestId;
       if (agent && activeRunId) {
         try {
           const control = await findPendingControl(agent, activeRunId, requestId, "clarify").catch(() => null);
-          await submitRunClarify(agent, activeRunId, reply, {
+          answeredId = control?.requestId ?? requestId;
+          const answered = await submitRunClarify(agent, activeRunId, reply, {
             requestId: control?.requestId ?? requestId,
             executionGeneration: control?.executionGeneration ?? null,
           });
+          if (!answered) return NextResponse.json({ error: "The agent did not take the answer. It may have stopped waiting." }, { status: 409 });
         } catch (err: unknown) {
           const message = err instanceof Error ? err.message : String(err);
           return NextResponse.json({ error: message }, { status: 500 });
         }
       }
 
+      const controls = mapPendingControls(task.pending_controls);
+      const answeredControl = answeredId ? controls.find((c) => c.requestId === answeredId && c.kind === "clarify") : controls.find((c) => c.kind === "clarify");
+      const remaining = answeredControl ? controls.filter((c) => c !== answeredControl) : controls;
       const { data, error } = await supabase
         .from("mission_tasks")
         .update({
-          approval: false,
-          stage: "Coding",
+          approval: remaining.length > 0,
+          pending_controls: remaining,
           updated_at: new Date().toISOString(),
         })
         .eq("id", taskId)
+        .eq("mission_id", missionId)
+        .eq("run_id", activeRunId)
+        .eq("stage", task.stage)
+        .eq("pending_controls", JSON.stringify(task.pending_controls ?? []))
         .select()
-        .single();
+        .maybeSingle();
 
       if (error) {
         return NextResponse.json({ error: error.message }, { status: 500 });
       }
+      if (!data) return NextResponse.json({ ok: true, warning: "Answer sent; task changed. Refresh to see its current state." });
 
       return NextResponse.json({ ok: true, task: data }, { status: 200 });
     }

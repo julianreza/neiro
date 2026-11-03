@@ -43,9 +43,14 @@ export function ChatView() {
   const [projects, setProjects] = useState<SavedProject[]>([]);
   const [error, setError] = useState("");
   // `?chat=<id>` (from a project's Questions tab) opens that chat.
-  const [selected, setSelected] = useState<string | null>(() =>
-    typeof window === "undefined" ? null : new URLSearchParams(window.location.search).get("chat"),
-  );
+  const [selected, setSelected] = useState<string | null>(null);
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      const chatId = new URLSearchParams(window.location.search).get("chat");
+      if (chatId) setSelected(chatId);
+    }, 0);
+    return () => clearTimeout(timer);
+  }, []);
   const [newProject, setNewProject] = useState("");
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
@@ -225,10 +230,10 @@ export function ChatView() {
             const items = (
               <ul id={`chat-group-${key}`} className={name ? "chat-group-items" : undefined}>
                 {group.threads.map((t) => (
-                  <li key={t.id}>
+                  <li key={t.id} className="chat-list-row flex min-w-0 items-center">
                     <button
                       type="button"
-                      className="chat-item"
+                      className="chat-item min-w-0 flex-1"
                       aria-current={!isNew && chat?.id === t.id ? "true" : undefined}
                       onClick={() => setSelected(t.id)}
                     >
@@ -237,6 +242,23 @@ export function ChatView() {
                         {t.status === "running" ? "Answering…" : timeAgo(t.lastAt)}
                       </span>
                     </button>
+                    {canSend && (
+                      <DeleteButton
+                        url={`/api/chats/${encodeURIComponent(t.id)}`}
+                        what="Chat"
+                        label={`Delete ${t.title}`}
+                        iconOnly
+                        title="Delete this chat?"
+                        disabledReason={t.messages.some((message) => message.status === "running") || (chat?.id === t.id && sending)
+                          ? "The robot is still answering. Wait for it, or stop it, then delete."
+                          : undefined}
+                        body={<p>All {t.messages.length} message{t.messages.length === 1 ? "" : "s"} in “{t.title}” will be deleted. This can&apos;t be undone.</p>}
+                        onDeleted={() => {
+                          setChats((list) => (list ?? []).filter((item) => item.id !== t.id));
+                          if (chat?.id === t.id) setSelected(null);
+                        }}
+                      />
+                    )}
                   </li>
                 ))}
               </ul>
@@ -305,6 +327,10 @@ export function ChatView() {
                     : undefined
                 }
                 followUpBusy={Boolean(running) || sending}
+                onTerminal={() => {
+                  if (!m.agentId) return;
+                  void fetch(`/api/ask/${encodeURIComponent(m.id)}?agentId=${encodeURIComponent(m.agentId)}`, { cache: "no-store" }).then(() => load()).catch(() => undefined);
+                }}
               />
             ))}
           </div>
@@ -369,6 +395,7 @@ export function ChatTurn({
   retry,
   onFollowUp,
   followUpBusy,
+  onTerminal,
 }: {
   row: AskQuestionDTO;
   approvals: PendingApproval[];
@@ -378,6 +405,7 @@ export function ChatTurn({
   /** Send a suggested next step; only the newest turn gets buttons. */
   onFollowUp?: (text: string) => void;
   followUpBusy?: boolean;
+  onTerminal?: () => void;
 }) {
   const botRole = roleForAgent(row.agentName || "Q&A");
   const answerParts = splitAnswerFiles(row.answer);
@@ -388,7 +416,7 @@ export function ChatTurn({
   // after it finishes, for the "Worked 2m · 14 steps" summary.
   const [watched, setWatched] = useState(row.status === "running");
   if (row.status === "running" && !watched) setWatched(true);
-  const { steps: liveSteps } = useRunSteps(watched ? row.id : null, row.agentId);
+  const { steps: liveSteps, answer: liveAnswer, incomplete: streamIncomplete, state: streamState, retry: retryStream } = useRunSteps(watched ? row.id : null, row.agentId, undefined, onTerminal);
   // Not seen running here (a reload, an old chat): read the steps saved when it ended.
   const saved = useSavedSteps(done && liveSteps.length === 0 ? row.id : null);
   const steps = liveSteps.length > 0 ? liveSteps : saved;
@@ -415,7 +443,14 @@ export function ChatTurn({
             {asks ? (
               <ApprovalAsk agentName={row.agentName || "Q&A"} approvals={approvals} readOnly={!canAnswer} send={answer} />
             ) : row.status === "running" ? (
-              <StepTrail steps={steps} live label={steps.length === 0 ? "Reading the question…" : "Thinking…"} />
+              <>
+                <StepTrail steps={steps} live label={steps.length === 0 ? "Reading the question…" : "Thinking…"} />
+                <ThinkingBlock text={reasoningOf(steps)} />
+                {steps.findLast((step) => step.kind === "commentary")?.text && <p className="text-xs text-muted-foreground">Progress: {steps.findLast((step) => step.kind === "commentary")?.text}</p>}
+                {liveAnswer && <AgentMarkdown text={liveAnswer} />}
+                {streamIncomplete && <p className="text-xs text-muted-foreground" role="status">Live draft may be incomplete; the saved answer will replace it when ready.</p>}
+                {(streamState === "error" || streamState === "ended") && <p className="text-xs text-muted-foreground">Live stream unavailable; checking for the final answer. <button type="button" className="underline" onClick={retryStream}>Reconnect</button></p>}
+              </>
             ) : asleep ? null : (
               <>
                 <WorkSummary steps={steps} spent={spent} files={answerParts.files.length}>

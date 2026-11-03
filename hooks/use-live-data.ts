@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 /**
  * Where a surface's data came from. Surfaces must never present sample data
@@ -37,18 +37,22 @@ export function useLiveData<T>(
   url: string | null,
   demo: T,
   parse: (json: unknown) => T,
-): LiveState<T> & { reload: () => void; showDemo: () => void } {
+): LiveState<T> & { reload: () => void; refresh: () => void; showDemo: () => void } {
   const [result, setResult] = useState<{ url: string | null; state: LiveState<T> }>({
     url: null,
     state: { source: "loading" },
   });
-  const [nonce, setNonce] = useState(0);
-  const reload = useCallback(() => setNonce((n) => n + 1), []);
+  const [request, setRequest] = useState({ nonce: 0, refresh: false });
+  const lastUrl = useRef<string | null>(null);
+  const reload = useCallback(() => setRequest((r) => ({ nonce: r.nonce + 1, refresh: false })), []);
+  const refresh = useCallback(() => setRequest((r) => ({ nonce: r.nonce + 1, refresh: true })), []);
   const showDemo = useCallback(() => setResult((previous) => previous.url === url && previous.state.source === "error"
     ? { url, state: { source: "demo", data: demo, reason: previous.state.reason } } : previous), [url, demo]);
 
   useEffect(() => {
-    if (url === null) return;
+    if (url === null) { lastUrl.current = null; return; }
+    const explicitRefresh = request.refresh && lastUrl.current === url;
+    lastUrl.current = url;
     let cancelled = false;
     const settle = (state: LiveState<T>) => {
       if (!cancelled) setResult({ url, state });
@@ -61,7 +65,8 @@ export function useLiveData<T>(
     };
     (async () => {
       try {
-        const res = await fetch(url, { cache: "no-store" });
+        const requestUrl = explicitRefresh ? `${url}${url.includes("?") ? "&" : "?"}refresh=1` : url;
+        const res = await fetch(requestUrl, { cache: "no-store" });
         if (!res.ok) {
           fail(await describeFailure(res));
           return;
@@ -83,9 +88,9 @@ export function useLiveData<T>(
     };
     // `demo` and `parse` are expected to be stable module-level values.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [url, nonce]);
+  }, [url, request]);
 
   const state: LiveState<T> =
     url !== null && result.url === url ? result.state : { source: "loading" };
-  return { ...state, reload, showDemo };
+  return { ...state, reload, refresh, showDemo };
 }

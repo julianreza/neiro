@@ -7,10 +7,11 @@ type Usage = { input_tokens?: number; output_tokens?: number; cache_read_tokens?
 
 const valid = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value) && value >= 0;
 
-/** Estimate list-price cost, not an invoice. Unknown cache pricing uses the input rate. */
+/** Estimate list-price cost, not an invoice. Unknown cache pricing stays unknown. */
 export function estimateRunCost(usage: Usage, rates: Rates): number | null {
   const { input_tokens: input, output_tokens: output, cache_read_tokens: cached = 0 } = usage;
   if (!valid(input) || !valid(output) || !valid(cached) || cached > input || !valid(rates.input) || !valid(rates.output)) return null;
+  if (cached > 0 && !valid(rates.cacheRead)) return null;
   const cacheRate = valid(rates.cacheRead) ? rates.cacheRead : rates.input;
   return Math.round(((input - cached) * rates.input + cached * cacheRate + output * rates.output)) / 1_000_000;
 }

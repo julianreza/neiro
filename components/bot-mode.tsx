@@ -22,6 +22,9 @@ import { timeAgo } from "@/lib/client-api";
 import type { AskQuestionDTO } from "@/lib/ask-history";
 import type { BotDTO } from "@/lib/bots";
 import type { BotRoom, BotRoomMessage, ImageAttachment } from "@/lib/types";
+import { useRunSteps } from "@/hooks/use-run-steps";
+import { StepTrail } from "@/components/reply-parts";
+import { ThinkingBlock, reasoningOf } from "@/components/reply-extras";
 
 /**
  * Hermes Bot Mode on /chat (layout 2, "robot rail + list"): every bot on a
@@ -48,21 +51,32 @@ async function api<T>(url: string, init?: RequestInit): Promise<{ ok: boolean; d
 }
 
 /** The /api/bots roster, refreshed every 15 s (who is working changes). */
-export function useBots(): { bots: BotDTO[]; reload: () => void } {
+export function useBots(): { bots: BotDTO[]; reload: () => void; error: string } {
   const [bots, setBots] = useState<BotDTO[]>([]);
+  const [error, setError] = useState("");
   const [nonce, setNonce] = useState(0);
   useEffect(() => {
     let alive = true;
-    const load = () =>
-      api<{ bots?: BotDTO[] }>("/api/bots").then(({ ok, data }) => alive && ok && setBots(data.bots ?? []));
+    let pending = false;
+    const load = async () => {
+      if (pending || document.hidden) return;
+      pending = true;
+      const { ok, data } = await api<{ bots?: BotDTO[] }>("/api/bots");
+      pending = false;
+      if (!alive) return;
+      if (ok) { setBots(data.bots ?? []); setError(""); }
+      else setError(data.error ?? "Could not refresh bot activity");
+    };
     void load();
     const timer = setInterval(load, 15_000);
+    document.addEventListener("visibilitychange", load);
     return () => {
       alive = false;
       clearInterval(timer);
+      document.removeEventListener("visibilitychange", load);
     };
   }, [nonce]);
-  return { bots, reload: () => setNonce((n) => n + 1) };
+  return { bots, error, reload: () => setNonce((n) => n + 1) };
 }
 
 export function useRooms(): { rooms: BotRoom[] | null; error: string; reload: () => void } {
@@ -363,6 +377,10 @@ export function BotChatPane({ bot, bots, canSend }: { bot: BotDTO; bots: BotDTO[
   }, [bot.id]);
 
   const running = messages?.find((m) => m.status === "running") ?? null;
+  const stream = useRunSteps(running?.id ?? null, running ? bot.id : null, undefined, () => {
+    if (!running) return;
+    void api(`/api/ask/${encodeURIComponent(running.id)}?agentId=${encodeURIComponent(bot.id)}`).then(load);
+  });
 
   useEffect(() => {
     // Next task, not inside the effect: load() sets state.
@@ -447,10 +465,15 @@ export function BotChatPane({ bot, bots, canSend }: { bot: BotDTO; bots: BotDTO[
             <p className="chat-you">{m.question}</p>
             <div className="chat-reply" style={agentLook(role)}>
               <div className="chat-bubble" data-failed={m.status === "failed" ? "" : undefined}>
-                {m.status === "running" && !m.answer ? (
-                  <p className="flex items-center gap-2 text-sm text-muted-foreground">
-                    <Loader2 className="size-4 animate-spin" aria-hidden="true" /> {bot.name} is thinking…
-                  </p>
+                {m.status === "running" ? (
+                  <>
+                    <StepTrail steps={stream.steps} live label={`${bot.name} is thinking…`} />
+                    <ThinkingBlock text={reasoningOf(stream.steps)} />
+                    {stream.steps.findLast((step) => step.kind === "commentary")?.text && <p className="text-xs text-muted-foreground">Progress: {stream.steps.findLast((step) => step.kind === "commentary")?.text}</p>}
+                    {(stream.answer || m.answer) && <AgentMarkdown text={stream.answer || m.answer} />}
+                    {stream.incomplete && <p className="text-xs text-muted-foreground" role="status">Live draft may be incomplete; the saved answer will replace it when ready.</p>}
+                    {(stream.state === "error" || stream.state === "ended") && <p className="text-xs text-muted-foreground">Live stream unavailable; checking for the final answer. <button type="button" className="underline" onClick={stream.retry}>Reconnect</button></p>}
+                  </>
                 ) : m.status === "failed" ? (
                   <p className="text-sm">{m.error ?? "The bot could not answer."}</p>
                 ) : (
@@ -524,6 +547,9 @@ export function RoomPane({
     setRoom(data.room);
     setMessages(data.messages ?? []);
   }, [roomId]);
+
+  const claim = room?.driver?.claim;
+  const roomStream = useRunSteps(claim && !claim.runId.startsWith("claim:") ? claim.runId : null, claim?.agentId ?? null, undefined, () => void load());
 
   useEffect(() => {
     // Next task, not inside the effect: load() sets state.
@@ -647,9 +673,15 @@ export function RoomPane({
           );
         })}
         {speaking && !room?.needsYou && (
-          <p className="room-system" role="status">
-            <Loader2 className="mr-1 inline size-3 animate-spin" aria-hidden="true" /> {speaking.name} is thinking…
-          </p>
+          <div className="chat-bubble" role="status">
+            <p className="room-msg-who">{speaking.name}</p>
+            <StepTrail steps={roomStream.steps} live label={`${speaking.name} is thinking…`} />
+            <ThinkingBlock text={reasoningOf(roomStream.steps)} />
+            {roomStream.steps.findLast((step) => step.kind === "commentary")?.text && <p className="text-xs text-muted-foreground">Progress: {roomStream.steps.findLast((step) => step.kind === "commentary")?.text}</p>}
+            {roomStream.answer && <AgentMarkdown text={roomStream.answer} />}
+            {roomStream.incomplete && <p className="text-xs text-muted-foreground" role="status">Live draft may be incomplete; the saved answer will replace it when ready.</p>}
+            {(roomStream.state === "error" || roomStream.state === "ended") && <p className="text-xs text-muted-foreground">Live stream unavailable; checking for the final answer. <button type="button" className="underline" onClick={roomStream.retry}>Reconnect</button></p>}
+          </div>
         )}
         <div ref={end} />
       </div>

@@ -14,6 +14,7 @@ This block is written and re-added by `next dev` — verify at `node_modules/nex
 
 ## Dev environment & commands
 
+- Postman CLI is available for API engineering.
 - Install dependencies: `bun install` (uses `bun.lock`; do not commit `package-lock.json`, `yarn.lock`, or `pnpm-lock.yaml`)
 - Dev server (Turbopack on `http://localhost:3000`): `bun run dev`
 - Production build: `bun run build`
@@ -25,8 +26,10 @@ This block is written and re-added by `next dev` — verify at `node_modules/nex
 
 ## Conventions
 
+- `components/` contains dashboard UI, `lib/` contains runtime adapters, orchestration and shared domain logic, `app/api/` contains route handlers, and `supabase/` contains schema migrations and manual SQL. Browser tests live in `e2e/`; Bun tests are colocated with the code they exercise.
 - Authentication is enforced by `proxy.ts`. GET handlers reading uncached state call `await connection()` from `next/server`.
 - Orchestrator state transitions use guarded updates and idempotency keys when starting runs.
+- Custom agent API keys are encrypted with AES-256-GCM using `NEIRO_ENCRYPTION_KEY`, or `DASHBOARD_SECRET` when that key is unset. Keep the chosen secret stable; do not expose encrypted or plaintext credentials in API responses or logs.
 
 - Directory layout: App Router files live at repo root in `app/` (`layout.tsx`, `page.tsx`, `globals.css`) and static assets in `public/`; there is no `src/` directory.
 - Imports & TypeScript: `"strict": true` in `tsconfig.json`; `@/*` aliases the repo root (`./*`). Use `import type` for type-only imports, double quotes, semicolons, and 2-space indentation.

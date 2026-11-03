@@ -4,7 +4,9 @@ import type { NextRequest } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { openRunEventStream } from "@/lib/agent-runtime";
 import { createStepCollector } from "@/lib/run-steps";
-import { recordRunActivity, saveRunSteps, saveSubagentRuns } from "@/lib/run-steps-store";
+import { recordRunActivity, saveRunSteps } from "@/lib/run-steps-store";
+import { watchRunSteps } from "@/lib/run-steps-recorder";
+import { mapAgentRow } from "@/lib/orchestrator-store";
 import { AppConfigError } from "@/lib/types";
 import type { Agent } from "@/lib/types";
 
@@ -37,20 +39,7 @@ export async function GET(request: NextRequest, context: RouteContext) {
         return NextResponse.json({ error: "Agent not found" }, { status: 404 });
       }
 
-      agent = {
-        id: data.id,
-        name: data.name,
-        role: data.role,
-        stage: data.stage,
-        specialty: data.specialty || "",
-        model: data.model || "",
-        profile: data.profile || "default",
-        prompt: data.prompt || "",
-        url: data.url || "",
-        key_enc: data.key_enc,
-        enabled: data.enabled,
-        activeRun: data.active_run ?? false,
-      };
+      agent = mapAgentRow(data);
     } else {
       agent = {
         id: "default",
@@ -67,7 +56,10 @@ export async function GET(request: NextRequest, context: RouteContext) {
       };
     }
 
-    const stream = await openRunEventStream(agent, runId, request.signal);
+    watchRunSteps(agent, runId);
+    const lastEventId = request.headers.get("last-event-id");
+    if (lastEventId && !/^\d{1,16}$/.test(lastEventId)) return NextResponse.json({ error: "Invalid event cursor." }, { status: 400 });
+    const stream = await openRunEventStream(agent, runId, request.signal, lastEventId ?? undefined);
 
     // Pass every byte through untouched, and read the steps on the side. When
     // the run's stream ends on its own (not when the viewer leaves), keep them
@@ -93,9 +85,8 @@ export async function GET(request: NextRequest, context: RouteContext) {
         try {
           collector.feed(decoder.decode());
           collector.end();
-          const steps = collector.steps();
-          await saveRunSteps(runId, steps);
-          await saveSubagentRuns(runId, steps);
+          const steps = collector.steps().map((step) => step.subagent && agent.id !== "default" ? { ...step, subagent: { ...step.subagent, sourceAgentId: agent.id } } : step);
+          if (!lastEventId) await saveRunSteps(runId, steps);
         } catch (err: unknown) {
           console.warn("[run-steps] could not save steps", runId, err);
         }

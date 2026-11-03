@@ -104,6 +104,8 @@ export type PendingControl = {
 export type SubagentRun = {
   delegationId: string;
   childSessionId?: string;
+  /** Agent whose runtime emitted this delegation. */
+  sourceAgentId?: string;
   status: "running" | "completed" | "failed";
   summary?: string;
   durationSec?: number;
@@ -325,6 +327,7 @@ export type TaskRunUsage = {
   outputTokens?: number | null;
   cacheReadTokens?: number | null;
   costUsd?: number | null;
+  costSource?: import("@/lib/run-cost-sources").RunCostSource;
   at: string;
 };
 

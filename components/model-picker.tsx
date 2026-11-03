@@ -3,7 +3,7 @@
 import { Picker, type PickerOption } from "@/components/ui/picker";
 import type { AgentRuntime } from "@/lib/types";
 
-export type ModelOption = { id: string; providerName: string };
+export type ModelOption = { id: string; providerName: string; provider?: string; pricing?: { input?: number; output?: number; cacheRead?: number }; supportsVision?: boolean; supportsReasoning?: boolean; supportsTools?: boolean };
 
 export type RuntimeModels = {
   runtime: AgentRuntime;
@@ -59,7 +59,11 @@ export function ModelPicker({
   }
 
   const loading = runtimes.some((r) => r.status === "loading");
+  const matches = runtimes.find((r) => r.runtime === runtime)?.models.filter((model) => model.id === value) ?? [];
+  const selected = matches.length === 1 ? matches[0] : undefined;
+  const capability = (value: boolean | undefined) => value === undefined ? "Unknown" : value ? "Yes" : "No";
   return (
+    <>
     <Picker
       id={id}
       value={current}
@@ -78,5 +82,8 @@ export function ModelPicker({
       emptyText={loading ? "Loading models…" : "No model matches. Type a model id."}
       options={options}
     />
+    {value && <p className="text-xs text-muted-foreground">{matches.length > 1 ? "Multiple providers; model metadata is ambiguous." : `Vision: ${capability(selected?.supportsVision)} · Reasoning: ${capability(selected?.supportsReasoning)} · Tools: ${capability(selected?.supportsTools)}`}</p>}
+    {value && matches.length <= 1 && <p className="text-xs text-muted-foreground">Catalog USD / 1M tokens · Input: {selected?.pricing?.input !== undefined ? `$${selected.pricing.input}` : "Unknown"} · Output: {selected?.pricing?.output !== undefined ? `$${selected.pricing.output}` : "Unknown"} · Cache read: {selected?.pricing?.cacheRead !== undefined ? `$${selected.pricing.cacheRead}` : "Unknown"}</p>}
+    </>
   );
 }

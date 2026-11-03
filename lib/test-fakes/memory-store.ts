@@ -171,6 +171,7 @@ export class MemoryStore implements OrchestratorStore {
     await yieldTick();
     const t = this.tasks.get(id);
     if (!t || t.stage !== guard.stage || t.runId !== guard.runId) return false;
+    if (guard.pendingControls !== undefined && JSON.stringify(t.pendingControls ?? []) !== JSON.stringify(guard.pendingControls)) return false;
     if (guard.routingStatus !== undefined && (t.routingStatus ?? null) !== guard.routingStatus) {
       return false;
     }

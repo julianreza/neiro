@@ -5,6 +5,7 @@ import { assignHandles, parseMentions, rosterBlock } from "@/lib/mentions";
 import { mapAgentRow } from "@/lib/orchestrator-store";
 import { FOLLOW_UP_RULE, REPLY_SHAPES } from "@/lib/reply-format";
 import type { Agent, ImageAttachment } from "@/lib/types";
+import { agentActivity } from "@/lib/agent-activity";
 
 /**
  * Hermes Bot Mode: every enabled agent is a bot with one forever-chat (its
@@ -51,6 +52,7 @@ export function handlesOf(agents: Agent[]): Map<string, string> {
 /** The roster shown on the /chat Bots tab: hidden bots left out. */
 export async function listBots(supabase: SupabaseClient): Promise<BotDTO[]> {
   const agents = await loadBotAgents(supabase);
+  const activity = await agentActivity(supabase);
   const handles = handlesOf(agents);
   const visible = agents.filter((a) => !a.botHidden);
   const sessions = visible.map((a) => a.canonicalSessionId).filter((s): s is string => Boolean(s));
@@ -79,7 +81,7 @@ export async function listBots(supabase: SupabaseClient): Promise<BotDTO[]> {
       handle: handles.get(a.id) ?? a.id,
       section: a.botSection?.trim() || "Team",
       runtime: a.runtime ?? "hermes",
-      activeRun: a.activeRun,
+      activeRun: activity.has(a.id),
       canonicalSessionId: a.canonicalSessionId ?? null,
       lastMessage: l?.text ?? null,
       lastAt: l?.at ?? null,

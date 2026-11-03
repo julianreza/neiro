@@ -33,6 +33,7 @@ import {
 import { REPLY_SHAPES } from "@/lib/reply-format";
 import { watchRunSteps } from "@/lib/run-steps-recorder";
 import { diffWorkspace, snapshotWorkspace } from "@/lib/workspace-diff";
+import { classifyRun } from "@/lib/run-status";
 import type { HermesServerCapabilities } from "@/lib/hermes";
 import {
   extractGateVerdict,
@@ -86,9 +87,8 @@ import { getSupabaseAdmin } from "@/lib/supabase";
 import { evaluateSafeApproval, guardExternalPrompt } from "@/lib/system-one-gate";
 import { isSyntheticRequestId } from "@/lib/approvals";
 import { writeWorktreeHermesContext, prepareTaskWorktree, mergeTaskWorktree, cleanupMergedTaskWorktree, TaskMergeConflict, type MissionWorkspace } from "@/lib/worktree";
-import { localAgentProfile } from "@/lib/hermes-local-profile";
-import { saveLearnedSkillFile } from "@/lib/hermes-skills";
 import { estimateAgentRunCost } from "@/lib/usage-cost";
+import { costSourceForRun } from "@/lib/run-cost-sources";
 import { WORKTREE_REVIEW_PREFIX } from "@/lib/worktree-reviews";
 
 /* ------------------------------------------------------------------ */
@@ -200,10 +200,7 @@ function resolveDeps(deps?: Partial<OrchestratorDeps>): OrchestratorDeps {
     github: deps?.github ?? { ensureMissionPr: realEnsureMissionPr, fetchPr: realFetchPr },
     reviewRules: deps?.reviewRules ?? (deps?.store ? async () => null : loadReviewRulesText),
     watchRun: deps?.watchRun !== undefined ? deps.watchRun : deps?.store ? null : watchRunSteps,
-    installLearnedSkill: deps?.installLearnedSkill !== undefined ? deps.installLearnedSkill : deps?.store ? null : async (agentId, name, content) => {
-      const profile = await localAgentProfile(agentId);
-      await saveLearnedSkillFile(profile, name, content);
-    },
+    installLearnedSkill: deps?.installLearnedSkill ?? null,
     safeApproval: deps?.safeApproval ?? evaluateSafeApproval,
     guardPrText: deps?.guardPrText ?? (deps?.store ? async () => "unknown" : guardExternalPrompt),
     runCost: deps?.runCost !== undefined ? deps.runCost : deps?.store ? null : estimateAgentRunCost,
@@ -234,26 +231,8 @@ const STALE_CLAIM_MS = 5 * 60 * 1000;
 const MAX_ERROR_CHARS = 1000;
 const MAX_PROMPT_CONTEXT_CHARS = 12_000;
 
-const SUCCESS_STATUSES = new Set(["completed", "succeeded", "success"]);
-const FAILURE_STATUSES = new Set([
-  "failed",
-  "error",
-  "cancelled",
-  "canceled",
-  "interrupted",
-  "stopped",
-  "expired",
-  "expired_404",
-]);
-
-export type RunOutcome = "pending" | "success" | "failure";
-
-export function classifyRun(status: string): RunOutcome {
-  const s = status.toLowerCase();
-  if (SUCCESS_STATUSES.has(s)) return "success";
-  if (FAILURE_STATUSES.has(s)) return "failure";
-  return "pending";
-}
+export { classifyRun } from "@/lib/run-status";
+export type { RunOutcome } from "@/lib/run-status";
 
 /**
  * Hermes long-term memory scope (X-Hermes-Session-Key): every agent on the
@@ -546,13 +525,25 @@ function specPrompt(m: MissionDetailDTO): string {
 
 async function recordMissionRunUsage(m: MissionDetailDTO, agent: Agent, run: HermesRunStatus, stage: string, d: OrchestratorDeps) {
   if (!m.runId || (run.tokens ?? 0) <= 0) return;
+  const cost = await d.runCost?.(agent, run).catch(() => null) ?? null;
   await d.store.recordTokenUsage({
     runId: m.runId, missionId: m.id, taskId: null, agentId: agent.id, agentName: agent.name,
     stage, tokens: run.tokens ?? 0, model: run.runtime?.model || agent.model || run.model || null,
     runtime: agent.runtime ?? "hermes", inputTokens: run.input_tokens,
     outputTokens: run.output_tokens, cacheReadTokens: run.cache_read_tokens,
-    costUsd: await d.runCost?.(agent, run).catch(() => null) ?? null,
+    costUsd: cost,
   });
+  await recordCostSource(m.id, null, m.runId, run, cost, d);
+}
+
+async function recordCostSource(missionId: string, taskId: string | null, runId: string, run: HermesRunStatus, cost: number | null, d: OrchestratorDeps) {
+  const source = costSourceForRun(run, cost, d.runCost === estimateAgentRunCost);
+  if (source === "unknown") return;
+  try {
+    await d.store.insertArtifactOnce({ missionId, taskId, runId, title: "Run cost source", kind: "run_cost_provenance", content: JSON.stringify({ runId, source, costUsd: cost }), dedupeKey: `run-cost-source:${runId}` });
+  } catch (error) {
+    console.warn("[run-cost] could not record cost source", error);
+  }
 }
 
 async function recordGatewayDraining(missionId: string, taskId: string | null, runId: string, run: HermesRunStatus, d: OrchestratorDeps) {
@@ -777,10 +768,6 @@ async function stepSummarize(m: MissionDetailDTO, d: OrchestratorDeps, ctx?: Pas
           content: outcome.skill.content,
           dedupeKey: `skill:${m.id}`,
         });
-        if (m.runAgentId && d.installLearnedSkill) {
-          try { await d.installLearnedSkill(m.runAgentId, outcome.skill.name, outcome.skill.content); }
-          catch (error) { console.warn("[orchestrator] learned skill not installed", { missionId: m.id, error: errorMessage(error) }); }
-        }
       }
     }
   }
@@ -949,7 +936,7 @@ async function stepTask(
   ctx: PassContext,
 ) {
   const guard: TaskGuard = { stage: task.stage, runId: task.runId };
-  const clearRun = { runId: null, runAgentId: null, runStartedAt: null };
+  const clearRun = { runId: null, runAgentId: null, runStartedAt: null, pendingControls: [], approval: false };
 
   // Orphaned claim: release; the stage is kept, so the next tick restarts it.
   if (isClaim(task.runId)) {
@@ -1077,6 +1064,7 @@ async function stepTask(
   // Credit this run's tokens to the agent that ran it. Before the task
   // moves on, so a failed write is retried by the next tick.
   if ((run.tokens ?? 0) > 0) {
+    const cost = await d.runCost?.(agent, run).catch(() => null) ?? null;
     await d.store.recordTokenUsage({
       runId: task.runId,
       missionId: m.id,
@@ -1091,21 +1079,23 @@ async function stepTask(
       inputTokens: run.input_tokens,
       outputTokens: run.output_tokens,
       cacheReadTokens: run.cache_read_tokens,
-      costUsd: await d.runCost?.(agent, run).catch(() => null) ?? null,
+      costUsd: cost,
     });
+    await recordCostSource(m.id, task.id, task.runId, run, cost, d);
   }
 
   if (outcome === "failure" || !output) {
     if (task.stage === "Final review") {
       await finishMissionReview(task, d, {
         status: "failed",
-        error: run.error || (output ? `The review run ended with status "${run.status}".` : "The reviewer returned an empty answer."),
+        error: run.error || (outcome === "failure" ? `The review run ended with status "${run.status}".` : "The reviewer returned an empty answer."),
         rawOutput: output || null,
         tokens: run.tokens ?? 0,
       });
     }
-    await recordAttemptFailure(m, task, d, run.error || (output ? `The run ended with status "${run.status}".` : "The agent returned an empty answer."));
-    await failAttempt(m, task, guard, tokens, d, facts);
+    const reason = run.error || (outcome === "failure" ? `The run ended with status "${run.status}".` : "The agent returned an empty answer.");
+    await recordAttemptFailure(m, task, d, reason);
+    await failAttempt(m, task, guard, tokens, d, facts, reason);
     return;
   }
 
@@ -1179,7 +1169,7 @@ async function integrateIsolatedTask(m: MissionDetailDTO, task: MissionTask, d: 
   }
   const token = CLAIM_PREFIX + d.newId();
   const idle: TaskGuard = { stage: "Final review", runId: null };
-  if (!(await d.store.updateTaskIf(task.id, idle, { runId: token, runStartedAt: d.now().toISOString() }))) return;
+  if (!(await d.store.updateTaskIf(task.id, idle, { runId: token, runAgentId: null, runStartedAt: d.now().toISOString() }))) return;
   const claimed: TaskGuard = { stage: "Final review", runId: token };
   let markedDone = false;
   try {
@@ -1207,7 +1197,7 @@ async function integrateIsolatedTask(m: MissionDetailDTO, task: MissionTask, d: 
 
 /** Cache tokens and the real provider/model of a finished run, added to the task. */
 export function runFacts(task: MissionTask, run: HermesRunStatus): TaskPatch {
-  const patch: TaskPatch = { pendingControls: [] };
+  const patch: TaskPatch = { pendingControls: [], approval: false };
   if (run.cache_read_tokens) patch.cacheReadTokens = (task.cacheReadTokens ?? 0) + run.cache_read_tokens;
   if (run.cache_write_tokens) patch.cacheWriteTokens = (task.cacheWriteTokens ?? 0) + run.cache_write_tokens;
   const model = run.runtime?.model ?? run.model;
@@ -1229,12 +1219,11 @@ async function trackPendingControls(
   agent: Agent,
 ) {
   const controls = run.controls ?? [];
-  const before = (task.pendingControls ?? []).map((c) => c.requestId).join("|");
-  const after = controls.map((c) => c.requestId).join("|");
-  if (before === after) return;
+  if (JSON.stringify(task.pendingControls ?? []) === JSON.stringify(controls) && task.approval === (controls.length > 0) && (task.admissionId ?? null) === (run.admission_id ?? null) && (task.executionGeneration ?? null) === (run.execution_generation ?? null)) return;
   const saved = await d.store
-    .updateTaskIf(task.id, guard, {
+    .updateTaskIf(task.id, { ...guard, pendingControls: task.pendingControls ?? [] }, {
       pendingControls: controls,
+      approval: controls.length > 0,
       admissionId: run.admission_id ?? null,
       executionGeneration: run.execution_generation ?? null,
     })
@@ -1281,6 +1270,7 @@ async function parkTask(
     runAgentId: null,
     runStartedAt: null,
     pendingControls: [],
+    approval: false,
   });
   if (!parked) return;
   ctx.problems.push(`${task.title}: ${reason}`);
@@ -1345,8 +1335,9 @@ async function failAttempt(
   tokens: number,
   d: OrchestratorDeps,
   facts: TaskPatch = {},
+  reason?: string,
 ) {
-  const clearRun = { runId: null, runAgentId: null, runStartedAt: null };
+  const clearRun = { runId: null, runAgentId: null, runStartedAt: null, pendingControls: [], approval: false };
   if (task.retries < m.maxRetries) {
     // A routed task keeps its route: back to Routed, never re-asking Laya.
     await d.store.updateTaskIf(task.id, guard, {
@@ -1364,7 +1355,7 @@ async function failAttempt(
         missionId: m.id,
         taskId: task.id,
         title: "A task needs you",
-        body: `"${task.title}" failed ${task.retries + 1} time(s) in ${task.stage}.`,
+        body: `"${task.title}" failed ${task.retries + 1} time(s) in ${task.stage}.${reason ? ` ${reason}` : ""}`,
         dedupeKey: `needs:${task.id}:${task.retries}`,
         actions: [{ id: "retry_task", label: "Retry task", target: task.id }],
       });
@@ -1715,7 +1706,7 @@ async function startTaskRun(
 ) {
   const claimGuard: TaskGuard = { stage: task.stage, runId: task.runId };
   const release = () =>
-    d.store.updateTaskIf(task.id, claimGuard, { runId: null, runStartedAt: null });
+    d.store.updateTaskIf(task.id, claimGuard, { runId: null, runAgentId: null, runStartedAt: null });
 
   const isolated = isolatedMissionWorkspace(m);
   const agent = knownAgent ?? (await pickTaskAgent(task.stage, task, d));
@@ -1810,6 +1801,7 @@ async function startTaskRun(
     }
   }
 
+  if (!(await d.store.updateTaskIf(task.id, claimGuard, { runAgentId: agent.id }))) return;
   let started: HermesStartRunResult;
   try {
     started = await d.hermes.startRun(agent, {

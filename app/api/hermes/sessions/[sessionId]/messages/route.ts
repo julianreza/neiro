@@ -5,6 +5,7 @@ import { getSupabaseAdmin } from "@/lib/supabase";
 import { getHermesSessionMessages } from "@/lib/hermes";
 import { AppConfigError } from "@/lib/types";
 import type { Agent } from "@/lib/types";
+import { mapAgentRow } from "@/lib/orchestrator-store";
 
 type RouteContext = {
   params: Promise<{ sessionId: string }>;
@@ -17,6 +18,11 @@ export async function GET(request: NextRequest, context: RouteContext) {
   try {
     const { searchParams } = new URL(request.url);
     const agentId = searchParams.get("agentId");
+    const compacted = searchParams.get("include_compacted");
+    const inline = searchParams.get("inline_images");
+    if ((compacted !== null && compacted !== "true" && compacted !== "false") || (inline !== null && inline !== "true" && inline !== "false")) {
+      return NextResponse.json({ error: "Invalid transcript options." }, { status: 400 });
+    }
 
     let agent: Agent;
 
@@ -35,20 +41,7 @@ export async function GET(request: NextRequest, context: RouteContext) {
         return NextResponse.json({ error: "Agent not found" }, { status: 404 });
       }
 
-      agent = {
-        id: data.id,
-        name: data.name,
-        role: data.role,
-        stage: data.stage,
-        specialty: data.specialty || "",
-        model: data.model || "",
-        profile: data.profile || "default",
-        prompt: data.prompt || "",
-        url: data.url || "",
-        key_enc: data.key_enc,
-        enabled: data.enabled,
-        activeRun: data.active_run ?? false,
-      };
+      agent = mapAgentRow(data);
     } else {
       agent = {
         id: "default",
@@ -65,7 +58,7 @@ export async function GET(request: NextRequest, context: RouteContext) {
       };
     }
 
-    const messages = await getHermesSessionMessages(agent, sessionId);
+    const messages = await getHermesSessionMessages(agent, sessionId, { includeCompacted: compacted === "true", inlineImages: inline === "true" });
     return NextResponse.json({ messages }, { status: 200 });
   } catch (err: unknown) {
     if (err instanceof AppConfigError) {

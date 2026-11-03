@@ -1,6 +1,7 @@
 import "server-only";
 import { execFile } from "node:child_process";
-import { lstat, mkdir, writeFile } from "node:fs/promises";
+import { lstat, mkdir, open, writeFile } from "node:fs/promises";
+import { constants } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { extractSkillBlock } from "@/lib/orchestrator-parsers";
@@ -177,8 +178,22 @@ export async function saveLearnedSkillFile(profile: string, name: string, conten
   const file = join(directory, "SKILL.md");
   try { await writeFile(file, content, { flag: "wx", mode: 0o600 }); }
   catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "EEXIST") throw new HermesSkillError("A skill with this name already exists.", 409);
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+      const handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW).catch(() => null);
+      if (handle) {
+        try {
+          const info = await handle.stat();
+          if (info.isFile() && info.size <= 100_000 && await handle.readFile("utf8") === content) return file;
+        } finally { await handle.close(); }
+      }
+      throw new HermesSkillError("A skill with this name already exists.", 409);
+    }
     throw error;
   }
+  const written = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    const info = await written.stat();
+    if (!info.isFile() || info.size > 100_000 || await written.readFile("utf8") !== content) throw new HermesSkillError("The installed skill could not be verified.", 500);
+  } finally { await written.close(); }
   return file;
 }

@@ -117,7 +117,7 @@ type ModelFamily = {
   brand: "gemini" | "claude" | "gpt" | "other";
   variants: { label: string; model: ModelRowBase }[];
 };
-type ModelRowBase = { id: string; name: string; type: string; provider: string };
+type ModelRowBase = { id: string; name: string; type: string; provider: string; pricing?: { input?: number; output?: number; cacheRead?: number }; supportsVision?: boolean; supportsReasoning?: boolean; supportsTools?: boolean };
 
 const VARIANT_RE = /-(high|medium|low|thinking)$/i;
 const VARIANT_ORDER = ["base", "low", "medium", "high", "thinking"];
@@ -154,7 +154,7 @@ function groupModels(list: ModelRowBase[]): ModelFamily[] {
 const cronSample =
   '# Example only: replace both placeholders on your VPS. Not deployed.\n* * * * * curl --fail --silent --show-error -X POST \\\n  -H "Authorization: Bearer <DASHBOARD_SECRET>" \\\n  "<NEIRO_URL>/api/orchestrator/tick"';
 
-type ModelRow = (typeof models)[number];
+type ModelRow = (typeof models)[number] & Omit<ModelRowBase, "id" | "name" | "type" | "provider">;
 type CliCatalog = { installed: boolean; reason?: string; models: { id: string; name: string; group: string }[] };
 const emptyCli: CliCatalog = { installed: false, models: [] };
 function parseCliCatalog(json: unknown): CliCatalog {
@@ -173,7 +173,7 @@ function parseStatus(json: unknown): GatewayStatusDTO | null {
 }
 
 function parseModels(json: unknown): ModelRow[] {
-  const list = (json as { models?: { id: string; providerName?: string; provider?: string }[] } | null)
+  const list = (json as { models?: { id: string; providerName?: string; provider?: string; pricing?: ModelRow["pricing"]; supportsVision?: boolean; supportsReasoning?: boolean; supportsTools?: boolean }[] } | null)
     ?.models;
   if (!Array.isArray(list)) throw new Error("Malformed /api/agents/models response");
   return list.map((item) => ({
@@ -181,6 +181,10 @@ function parseModels(json: unknown): ModelRow[] {
     name: item.id.split("/").pop() || item.id,
     type: "chat" as Exclude<Category, "all">,
     provider: item.providerName || item.provider || "Hermes",
+    pricing: item.pricing,
+    supportsVision: item.supportsVision,
+    supportsReasoning: item.supportsReasoning,
+    supportsTools: item.supportsTools,
   }));
 }
 
@@ -294,7 +298,7 @@ export function GatewayMonitor() {
 
   function refreshStatus() {
     status.reload();
-    modelList.reload();
+    modelList.refresh();
     cli.reload();
     toast.info("Re-checking gateway status");
   }
@@ -432,6 +436,7 @@ export function GatewayMonitor() {
             Click a variant to copy its model ID.
             {modelsAreSample ? " Hermes sample IDs are not verified." : ""}
           </p>
+          <Button type="button" variant="outline" size="sm" className="mt-2" onClick={() => { modelList.refresh(); cli.reload(); }}>Refresh models</Button>
         </div>
         <div className="gateway-toolbar">
           <div className="relative gateway-search">
@@ -483,7 +488,7 @@ export function GatewayMonitor() {
                       <li key={family.key} className="family-row" data-brand={family.brand}>
                         <div className="flex min-w-0 items-center gap-3"><span className="family-bar" aria-hidden="true" /><div className="min-w-0"><h3 className="truncate font-semibold">{family.name}</h3><p className="text-xs text-muted-foreground">{family.variants.length} {family.variants.length === 1 ? "variant" : "variants"}</p></div></div>
                         <ul className="flex flex-wrap gap-1.5" aria-label={`${family.name} variants`}>
-                          {family.variants.map(({ label, model }) => <li key={model.id}><button type="button" className="variant-chip" title={model.id} aria-label={`Copy model ID ${model.id}`} onClick={() => void copy(model.id, runtime.sample ? "Sample model ID" : "Model ID")}>{label}<Copy className="size-3" aria-hidden="true" /></button></li>)}
+                          {family.variants.map(({ label, model }) => <li key={model.id}><button type="button" className="variant-chip" title={model.id} aria-label={`Copy model ID ${model.id}`} onClick={() => void copy(model.id, runtime.sample ? "Sample model ID" : "Model ID")}>{label}<Copy className="size-3" aria-hidden="true" /></button><span className="ml-1 text-xs text-muted-foreground">{model.pricing ? `USD / 1M: in ${model.pricing.input ?? "Unknown"}, out ${model.pricing.output ?? "Unknown"}, cache ${model.pricing.cacheRead ?? "Unknown"}` : "Pricing unknown"} · Vision {model.supportsVision === undefined ? "unknown" : model.supportsVision ? "yes" : "no"} · Reasoning {model.supportsReasoning === undefined ? "unknown" : model.supportsReasoning ? "yes" : "no"} · Tools {model.supportsTools === undefined ? "unknown" : model.supportsTools ? "yes" : "no"}</span></li>)}
                         </ul>
                       </li>
                     ))}

@@ -8,7 +8,9 @@ import {
   forkHermesSession,
   getHermesDetailedInventory,
   getHermesRun,
+  getHermesSessionMessages,
   getHermesServerCapabilities,
+  openHermesRunEventStream,
   readinessOf,
   probeHermesAgent,
   resolveHermesUnknownRun,
@@ -51,6 +53,20 @@ beforeEach(() => {
   calls = [];
   delete process.env.HERMES_PROVIDER_SLUG;
   clearHermesCapabilitiesCache();
+});
+
+test("session transcript forwards compaction and suppresses inline images", async () => {
+  stub(() => Response.json({ messages: [{ role: "assistant", content: "done" }] }));
+  assert.deepEqual(await getHermesSessionMessages(agent, "child-1", { includeCompacted: true, inlineImages: false }), [{ role: "assistant", content: "done" }]);
+  const query = new URL(calls[0].url).searchParams;
+  assert.equal(query.get("include_compacted"), "true");
+  assert.equal(query.get("inline_images"), "false");
+});
+
+test("run event stream forwards a resume cursor to Hermes", async () => {
+  stub(() => new Response("data: {}\n\n", { headers: { "content-type": "text/event-stream" } }));
+  await openHermesRunEventStream(agent, "run_1", undefined, "17");
+  assert.equal(new Headers(calls[0].init?.headers).get("Last-Event-ID"), "17");
 });
 
 afterEach(() => {

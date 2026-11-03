@@ -13,7 +13,8 @@ test("learned skills save in the chosen profile and never overwrite existing fil
     const file = await saveLearnedSkillFile("dev", "ship-safely", content, root);
     assert.equal(file, join(root, "profiles", "dev", "skills", "ship-safely", "SKILL.md"));
     assert.equal(await readFile(file, "utf8"), content);
-    await assert.rejects(saveLearnedSkillFile("dev", "ship-safely", content, root));
+    assert.equal(await saveLearnedSkillFile("dev", "ship-safely", content, root), file);
+    await assert.rejects(saveLearnedSkillFile("dev", "ship-safely", `${content}\nchanged`, root));
     await assert.rejects(saveLearnedSkillFile("../escape", "ship-safely", content, root));
     await assert.rejects(saveLearnedSkillFile("dev", "../escape", content, root));
     await assert.rejects(saveLearnedSkillFile("dev", "different", content, root));

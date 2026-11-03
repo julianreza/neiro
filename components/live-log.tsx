@@ -10,6 +10,7 @@ import { useRunSteps } from "@/hooks/use-run-steps";
 import type { LogStep } from "@/lib/run-events";
 import type { SubagentRun } from "@/lib/types";
 import type { ActiveRunDTO } from "@/app/api/runs/active/route";
+import { SubagentTranscript } from "@/components/subagent-transcript";
 
 const POLL_MS = 10_000;
 
@@ -182,7 +183,7 @@ function RunInspector({
   status: RunStatus;
   onGone: (runId: string) => void;
 }) {
-  const { steps, state, error: streamError, retry } = useRunSteps(run.runId, run.agentId ?? null, onGone);
+  const { steps, state, error: streamError, retry } = useRunSteps(run.agentId ? run.runId : null, run.agentId, onGone);
   const [picked, setPicked] = useState<number | null>(null);
   const bottom = useRef<HTMLLIElement>(null);
 
@@ -246,6 +247,7 @@ function RunInspector({
     <>
       <section className="log-panel log-steps" aria-live="polite">
         {header}
+        {!run.agentId && <p className="log-error" role="status">The source agent for this run is unavailable.</p>}
         {streamError && (
           <div role="alert" className="log-error">
             <span>Couldn&apos;t open this run&apos;s log. {streamError.length > 120 ? "" : streamError}</span>
@@ -317,6 +319,7 @@ function RunInspector({
                     Session <span className="code-chip">{focus.subagent.childSessionId}</span>
                   </p>
                 )}
+                <div className="mt-2"><SubagentTranscript key={`${run.agentId}:${focus.subagent.childSessionId}`} run={focus.subagent} agentId={run.agentId} /></div>
               </div>
             )}
             {focus.detail && (

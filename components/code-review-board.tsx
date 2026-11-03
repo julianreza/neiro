@@ -4,7 +4,6 @@ import { useCallback, useEffect, useMemo, useState, type CSSProperties } from "r
 import Link from "next/link";
 import { toast } from "sonner";
 import {
-  ArrowRight,
   Bug,
   CircleCheck,
   Code,
@@ -793,8 +792,15 @@ function FindingsView({
             </span>
           )}
         </div>
+        <div className="cr-ship">
+          <p className="eyebrow">Summary</p>
+          <p>{review.summary || "The reviewer gave no summary."}</p>
+          {review.error && <p className="cr-muted mt-2">{review.error}</p>}
+        </div>
         {review.design && (
-          <div className="cr-design-tiles">
+          <details className="cr-design-disclosure">
+            <summary>Design assessment</summary>
+            <div className="cr-design-tiles">
             {[
               { label: "Problem", text: review.design.problem, icon: Target, color: "#8b5cf6" },
               { label: "Why it matters", text: review.design.whyItMatters, icon: Flame, color: "#0ea5e9" },
@@ -814,13 +820,9 @@ function FindingsView({
                   <p>{text}</p>
                 </div>
               ))}
-          </div>
+            </div>
+          </details>
         )}
-        <div className="cr-ship">
-          <p className="eyebrow">Ship-readiness summary</p>
-          <p>{review.summary || "The reviewer gave no summary."}</p>
-          {review.error && <p className="cr-muted mt-2">{review.error}</p>}
-        </div>
       </section>
 
       {shown.length === 0 && (
@@ -850,24 +852,21 @@ function FindingsView({
           <h2 className="cr-finding-title">{f.problem}</h2>
           {steps.length > 0 && (
             <ol className="cr-flow">
-              {steps.map(({ key, label, icon: Icon, color }, i) => (
+              {steps.map(({ key, label, icon: Icon, color }) => (
                 <li key={key} style={{ "--step": color } as CSSProperties}>
                   <p className="cr-step-label">
                     <Icon className="size-3.5" aria-hidden="true" /> {label}
                   </p>
                   <p>{f[key]}</p>
-                  {i < steps.length - 1 && <ArrowRight className="cr-flow-arrow" aria-hidden="true" />}
                 </li>
               ))}
             </ol>
           )}
           {f.evidence && (
-            <div className="cr-evidence-block">
-              <p className="cr-step-label">
-                <Code className="size-3.5" aria-hidden="true" /> Evidence
-              </p>
+            <details className="cr-evidence-block">
+              <summary className="cr-evidence-summary"><Code className="size-3.5" aria-hidden="true" /> Evidence</summary>
               <pre className="cr-evidence">{f.evidence}</pre>
-            </div>
+            </details>
           )}
           <footer className="cr-finding-foot">
             {f.fixMissionId && (

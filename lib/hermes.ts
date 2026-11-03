@@ -350,7 +350,7 @@ export async function getHermesSessionMessages(
   );
 
   if (!res.ok) {
-    if (res.status === 404) return [];
+    if (res.status === 404) throw new Error("Hermes session was not found or is unavailable for this agent.");
     const text = await res.text().catch(() => "");
     throw new Error(`Failed to get Hermes session messages (${res.status}): ${text}`);
   }
@@ -844,6 +844,7 @@ export async function openHermesRunEventStream(
   agent: Agent,
   runId: string,
   signal?: AbortSignal,
+  lastEventId?: string,
 ): Promise<ReadableStream<Uint8Array>> {
   const res = await hermesFetch(
     agent,
@@ -851,6 +852,7 @@ export async function openHermesRunEventStream(
     {
       headers: {
         Accept: "text/event-stream",
+        ...(lastEventId ? { "Last-Event-ID": lastEventId } : {}),
       },
     },
     signal,
@@ -954,6 +956,7 @@ export type HermesModelOption = {
   pricing?: { input?: number; output?: number; cacheRead?: number };
   supportsVision?: boolean;
   supportsReasoning?: boolean;
+  supportsTools?: boolean;
 };
 
 export type HermesModelOptions = {
@@ -1017,6 +1020,7 @@ export async function listHermesModelOptions(agent?: Pick<Agent, "profile" | "ur
         ...(Object.keys(rates).length > 0 && { pricing: rates }),
         ...(typeof caps.vision === "boolean" && { supportsVision: caps.vision }),
         ...(typeof caps.reasoning === "boolean" && { supportsReasoning: caps.reasoning }),
+        ...(typeof caps.tools === "boolean" && { supportsTools: caps.tools }),
       });
     }
   }

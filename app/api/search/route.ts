@@ -18,9 +18,11 @@ export async function GET(request: NextRequest) {
     const db = getSupabaseAdmin();
     const groups = await Promise.all(SOURCES.map(async (source) => {
       const patterns = [escaped, `${escaped}%`, `%${escaped}%`];
-      const responses = await Promise.all(patterns.map((pattern) => db.from(source.table)
-        .select(`id,${source.column},created_at${source.mission ? ",mission_id" : ""}`)
-        .ilike(source.column, pattern).order("created_at", { ascending: false }).limit(5)));
+      const responses = await Promise.all(patterns.map((pattern) => {
+        let request = db.from(source.table).select(`id,${source.column},created_at${source.mission ? ",mission_id" : ""}`).ilike(source.column, pattern);
+        if (source.kind === "Artifacts") request = request.neq("kind", "run_cost_provenance");
+        return request.order("created_at", { ascending: false }).limit(5);
+      }));
       const rows: SearchResult[] = [];
       for (const response of responses) {
         if (response.error) throw new Error(response.error.message);

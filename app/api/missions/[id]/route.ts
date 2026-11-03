@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server";
 import { connection } from "next/server";
+import { loadRunCostSources } from "@/lib/run-cost-sources-store";
+import { matchingCostSource } from "@/lib/run-cost-sources";
 import type { NextRequest } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { mapArtifactRow, mapMissionRow, mapTaskRow } from "@/lib/orchestrator-store";
@@ -82,6 +84,7 @@ export async function GET(_request: NextRequest, context: RouteContext) {
       .from("mission_artifacts")
       .select("*")
       .eq("mission_id", id)
+      .neq("kind", "run_cost_provenance")
       .order("created_at", { ascending: true });
 
     if (artifactsErr) {
@@ -96,6 +99,12 @@ export async function GET(_request: NextRequest, context: RouteContext) {
 
     try {
       detail.runUsage = await loadMissionRunUsage(supabase, id);
+      try {
+        const sources = await loadRunCostSources(supabase, detail.runUsage.map((row) => row.runId));
+        detail.runUsage = detail.runUsage.map((row) => ({ ...row, costSource: matchingCostSource(row.costUsd, sources.get(row.runId)) }));
+      } catch (err) {
+        console.warn("[mission-cost] cost sources unavailable", err);
+      }
     } catch (err) {
       console.warn("[mission-usage] unavailable", err);
     }

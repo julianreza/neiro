@@ -96,8 +96,9 @@ export async function openRunEventStream(
   agent: Agent,
   runId: string,
   signal?: AbortSignal,
+  lastEventId?: string,
 ): Promise<ReadableStream<Uint8Array>> {
-  return cliRuntimeOfRunId(runId) ? openCliEventStream(runId, signal) : openHermesRunEventStream(agent, runId, signal);
+  return cliRuntimeOfRunId(runId) ? openCliEventStream(runId, signal) : openHermesRunEventStream(agent, runId, signal, lastEventId);
 }
 
 /**

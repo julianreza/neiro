@@ -1,5 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { writeDroppingMissing } from "@/lib/missing-column";
+import { classifyRun } from "@/lib/run-status";
 
 /** One question asked in Ask mode, as History shows it. */
 export type AskStatus = "running" | "completed" | "failed" | "stopped";
@@ -86,12 +87,11 @@ export function askContextBrief(turns: AskTurn[]): string {
 }
 
 const ASK_STATUSES = new Set<AskStatus>(["running", "completed", "failed", "stopped"]);
-const FAILED_RUN = new Set(["failed", "cancelled", "canceled", "expired_404"]);
-
 /** Hermes run status -> saved status. null = the run is still going. */
-export function askStatusFromRun(status: string): Exclude<AskStatus, "running" | "stopped"> | null {
-  if (status === "completed") return "completed";
-  if (FAILED_RUN.has(status)) return "failed";
+export function askStatusFromRun(status: string): Exclude<AskStatus, "running"> | null {
+  const outcome = classifyRun(status);
+  if (outcome === "success") return "completed";
+  if (outcome === "failure") return status.trim().toLowerCase() === "stopped" ? "stopped" : "failed";
   return null;
 }
 

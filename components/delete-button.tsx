@@ -27,6 +27,7 @@ export function DeleteButton({
   disabledReason,
   label = "Delete",
   tone = "ghost",
+  iconOnly = false,
 }: {
   url: string;
   /** Short name for the toast, e.g. "Mission". */
@@ -38,6 +39,7 @@ export function DeleteButton({
   label?: string;
   /** "danger" = a solid red button (for settings panels). */
   tone?: "ghost" | "danger";
+  iconOnly?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -67,11 +69,12 @@ export function DeleteButton({
         <Button
           variant={tone === "danger" ? "destructive" : "ghost"}
           size={tone === "danger" ? "default" : "sm"}
-          className={tone === "danger" ? "min-h-10" : "delete-trigger"}
-          aria-label={label === "Delete" ? `Delete ${what.toLowerCase()}` : undefined}
+          className={iconOnly ? "chat-delete-trigger !size-10 shrink-0 !p-0" : tone === "danger" ? "min-h-10" : "delete-trigger"}
+          aria-label={iconOnly ? label : label === "Delete" ? `Delete ${what.toLowerCase()}` : undefined}
+          title={iconOnly ? label : undefined}
         >
           <Trash2 aria-hidden="true" />
-          {label}
+          {!iconOnly && label}
         </Button>
       </DialogTrigger>
       <DialogContent>

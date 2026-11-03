@@ -78,6 +78,6 @@ export async function saveSubagentRuns(runId: string, steps: LogStep[]) {
     .eq("run_id", runId);
   // Before 20261031000000_hermes_full_suite.sql the column is missing: skip.
   if (error && error.code !== "42703" && error.code !== "PGRST204") {
-    console.warn("[run-steps] could not save sub-agents", runId, error.message);
+    throw new Error(`Could not save sub-agents for ${runId}: ${error.message}`);
   }
 }

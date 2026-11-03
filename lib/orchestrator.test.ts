@@ -35,6 +35,61 @@ const PLAN_OUTPUT = [
   "```",
 ].join("\n");
 
+test("waiting controls synchronize approval and clear when resolved", async () => {
+  const { store, hermes, deps } = setup();
+  store.seedAgent("workers");
+  const mission = store.seedMission({ phase: "executing" });
+  const task = store.seedTask(mission.id, { stage: "Coding", runId: "run-controls", runAgentId: "workers-agent" });
+  hermes.setRun("run-controls", { status: "running", controls: [{ kind: "clarify", requestId: "c1", executionGeneration: 1, choices: [] }] });
+  await advanceMission(mission.id, deps);
+  assert.equal(store.tasks.get(task.id)?.approval, true);
+  hermes.setRun("run-controls", { status: "running", controls: [] });
+  await advanceMission(mission.id, deps);
+  assert.equal(store.tasks.get(task.id)?.approval, false);
+});
+
+test("a changed generation with the same request id updates stored controls", async () => {
+  const { store, hermes, deps } = setup();
+  store.seedAgent("workers");
+  const mission = store.seedMission({ phase: "executing" });
+  const old = { kind: "approval" as const, requestId: "c1", executionGeneration: 1, choices: ["once" as const] };
+  const task = store.seedTask(mission.id, { stage: "Coding", runId: "run-controls", runAgentId: "workers-agent", approval: true, pendingControls: [old] });
+  hermes.setRun("run-controls", { status: "running", controls: [{ ...old, executionGeneration: 2 }] });
+  await advanceMission(mission.id, deps);
+  assert.equal(store.tasks.get(task.id)?.pendingControls?.[0].executionGeneration, 2);
+});
+
+for (const [stage, agentStage] of [["Coding", "workers"], ["QA check", "qa"], ["Final review", "reviewer"]] as const) {
+  for (const status of ["interrupted", "stopped"]) {
+    test(`${status} during ${stage} consumes at most one retry and never accepts partial output`, async () => {
+      const { store, hermes, deps } = setup();
+      store.seedAgent(agentStage);
+      const mission = store.seedMission({ phase: "executing", maxRetries: 1 });
+      const task = store.seedTask(mission.id, { taskKey: "T1", stage, runId: "run-1", runAgentId: `${agentStage}-agent` });
+      hermes.setRun("run-1", { status, output: "VERDICT: PASS", tokens: 7 });
+      await Promise.all([advanceMission(mission.id, deps), advanceMission(mission.id, deps)]);
+      const result = store.tasks.get(task.id)!;
+      assert.equal(result.retries, 1);
+      assert.equal(result.runId, null);
+      assert.equal(result.stage, "Queued");
+      assert.equal(store.tokenUsage.length, 1);
+      assert.match(store.artifactsOf(mission.id, "run_failure")[0].content, new RegExp(status));
+      assert.equal(store.artifactsOf(mission.id, "coding_output").length, 0);
+    });
+  }
+}
+
+test("an interrupted run with no retries remaining needs attention", async () => {
+  const { store, hermes, deps } = setup();
+  store.seedAgent("workers");
+  const mission = store.seedMission({ phase: "executing", maxRetries: 0 });
+  const task = store.seedTask(mission.id, { taskKey: "T1", stage: "Coding", runId: "interrupted-run", runAgentId: "workers-agent" });
+  hermes.setRun("interrupted-run", { status: "interrupted" });
+  await advanceMission(mission.id, deps);
+  assert.equal(store.tasks.get(task.id)?.stage, "Needs you");
+  assert.match(store.artifactsOf(mission.id, "run_failure")[0].content, /interrupted/i);
+});
+
 test("F1: two concurrent ticks on one Queued task start exactly one coding run", async () => {
   const { store, hermes, deps } = setup();
   store.seedAgent("workers");
@@ -366,7 +421,36 @@ test("planning and spec runs record token usage once across concurrent ticks", a
   assert.deepEqual(store.tokenUsage.map((usage) => usage.costUsd), [0.012345, 0.012345]);
 });
 
-test("learned skill installation is best effort and records the summary once", async () => {
+test("run cost provenance is stored once alongside recorded usage", async () => {
+  const { store, hermes, deps } = setup();
+  deps.runCost = async () => 0.04;
+  store.seedAgent("orchestrator");
+  const mission = store.seedMission({ phase: "planning", runId: "run-cost-origin", runAgentId: "orchestrator-agent" });
+  hermes.setRun("run-cost-origin", { status: "completed", output: PLAN_OUTPUT, tokens: 123, estimated_cost_usd: 0.04, cost_status: "actual" });
+  await Promise.all([advanceMission(mission.id, deps), advanceMission(mission.id, deps)]);
+  const records = store.artifactsOf(mission.id, "run_cost_provenance");
+  assert.equal(records.length, 1);
+  assert.deepEqual(JSON.parse(records[0].content), { runId: "run-cost-origin", source: "reported", costUsd: 0.04 });
+});
+
+test("a provenance write failure does not block the mission or invent a source", async () => {
+  const { store, hermes, deps } = setup();
+  deps.runCost = async () => 0.04;
+  const insert = store.insertArtifactOnce.bind(store);
+  store.insertArtifactOnce = async (artifact) => {
+    if (artifact.kind === "run_cost_provenance") throw new Error("unavailable");
+    return insert(artifact);
+  };
+  store.seedAgent("orchestrator");
+  const mission = store.seedMission({ phase: "planning", runId: "run-cost-failure", runAgentId: "orchestrator-agent" });
+  hermes.setRun("run-cost-failure", { status: "completed", output: PLAN_OUTPUT, tokens: 123, estimated_cost_usd: 0.04, cost_status: "actual" });
+  await advanceMission(mission.id, deps);
+  assert.equal(store.tokenUsage[0].costUsd, 0.04);
+  assert.equal(store.artifactsOf(mission.id, "run_cost_provenance").length, 0);
+  assert.equal(store.missions.get(mission.id)?.phase, "spec");
+});
+
+test("learned skill awaits manual review before installation", async () => {
   const { store, hermes, deps } = setup();
   store.seedAgent("orchestrator");
   const mission = store.seedMission({ phase: "summarizing", learnSkillOnDone: true, runId: "run-summary", runAgentId: "orchestrator-agent" });
@@ -374,7 +458,7 @@ test("learned skill installation is best effort and records the summary once", a
   let savedName = "";
   deps.installLearnedSkill = async (_agentId, name) => { savedName = name; throw new Error("not local"); };
   await advanceMission(mission.id, deps);
-  assert.equal(savedName, "safe-test");
+  assert.equal(savedName, "");
   assert.equal(store.artifactsOf(mission.id, "learned_skill").length, 1);
   assert.equal(store.missions.get(mission.id)?.status, "completed");
 });

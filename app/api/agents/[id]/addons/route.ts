@@ -1,4 +1,4 @@
-import { NextResponse } from "next/server";
+import { connection, NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 import {
   asAddonKind,
@@ -16,6 +16,7 @@ type RouteContext = { params: Promise<{ id: string }> };
 
 /** GET ?kind=mcp|plugin|toolset → what the profile has; add &q=… → catalog search. */
 export async function GET(request: NextRequest, context: RouteContext) {
+  await connection();
   const { id } = await context.params;
   try {
     const kind = asAddonKind(request.nextUrl.searchParams.get("kind"));

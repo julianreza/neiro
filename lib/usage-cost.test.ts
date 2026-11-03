@@ -16,6 +16,7 @@ test("cost estimate requires complete token counts and rates and accounts for ca
   assert.equal(estimateRunCost({ input_tokens: 100, output_tokens: 20 }, { input: 2, output: 4 }), 0.00028);
   assert.equal(estimateRunCost({ input_tokens: 100 }, { input: 2, output: 4 }), null);
   assert.equal(estimateRunCost({ input_tokens: 100, output_tokens: 20 }, { input: 2 }), null);
+  assert.equal(estimateRunCost({ input_tokens: 100, output_tokens: 20, cache_read_tokens: 50 }, { input: 2, output: 4 }), null);
   assert.equal(estimateRunCost({ input_tokens: 100, output_tokens: 20, cache_read_tokens: 101 }, { input: 2, output: 4, cacheRead: 1 }), null);
 });
 

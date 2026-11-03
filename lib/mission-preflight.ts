@@ -23,7 +23,8 @@ export function choosePreflightAgent(agents: Agent[], stage: AgentStage): Agent 
 
 async function inspectRuntime(agent: Agent): Promise<RuntimeInspection> {
   if (asRuntime(agent.runtime) !== "hermes") {
-    const info = await listCliRuntime("ohmypi");
+    const info = await listCliRuntime("ohmypi").catch(() => null);
+    if (!info) return { status: "unknown", reason: `${agent.name}: Oh My Pi readiness could not be checked.` };
     const status = !info.installed ? "unavailable" : info.reason ? "unknown" : "pass";
     const reason = !info.installed ? `${agent.name}: Oh My Pi is not installed.` : info.reason ? `${agent.name}: model availability could not be checked.` : `${agent.name}: Oh My Pi is installed.`;
     const found = info.models.some((model) => model.id === agent.model);
@@ -98,9 +99,11 @@ export async function missionPreflight(input: MissionCreateInput, testAgents?: A
   }
   const planner = choosePreflightAgent(agents, "orchestrator");
   const worker = choosePreflightAgent(agents, "workers") ?? planner;
-  if (repo && input.isolateWorkspace && input.maxParallelWorkers > 1 &&
-      agents.some((agent) => agent.enabled && ["workers", "qa", "reviewer"].includes(agent.stage) && asRuntime(agent.runtime) === "hermes")) {
-    add("task_runtime_isolation", "warning", "Hermes cannot enforce a separate directory per task. Parallel isolated tasks need Oh My Pi agents for coding, QA, and review.", "/agents");
+  const parallelIsolation = repo && input.isolateWorkspace && input.maxParallelWorkers > 1;
+  if (parallelIsolation && worker && asRuntime(worker.runtime) === "hermes") {
+    add("task_runtime_isolation", "blocked", "The coding fallback uses Hermes, which cannot enforce a separate directory per task. Use one worker or an Oh My Pi coding agent.", "/agents");
+  } else if (parallelIsolation && agents.some((agent) => agent.enabled && agent.stage === "workers" && asRuntime(agent.runtime) === "hermes")) {
+    add("task_runtime_isolation", "warning", "A routed Hermes worker cannot enforce a separate task directory and will require attention. Use Oh My Pi workers for isolated tasks.", "/agents");
   }
   if (!planner) add("planner", "blocked", "No enabled orchestrator agent is available.", "/agents");
   else add("planner", "pass", `Planner: ${planner.name}.`);
@@ -108,17 +111,20 @@ export async function missionPreflight(input: MissionCreateInput, testAgents?: A
   else add("worker", "pass", `Coding fallback: ${worker.name}.`);
   const qa = choosePreflightAgent(agents, "qa");
   const reviewer = choosePreflightAgent(agents, "reviewer");
+  const selected = [planner, worker, choosePreflightAgent(agents, "spec")].filter((agent): agent is Agent => Boolean(agent));
+  const toInspect = [...new Map([...selected, qa, reviewer].filter((agent): agent is Agent => Boolean(agent)).map((agent) => [agent.id, agent])).values()];
+  const inspections = new Map(await Promise.all(toInspect.map(async (agent) => [agent.id, await deps.inspectRuntime(agent)] as const)));
   for (const [stage, label, agent] of [["qa", "QA", qa], ["reviewer", "Review", reviewer]] as const) {
     if (!agent) add(stage, "warning", `No ${label} agent; this verification will be skipped.`, "/agents");
+    else if (parallelIsolation && asRuntime(agent.runtime) === "hermes") add(stage, "warning", `${label} uses Hermes, which cannot enforce the task directory. ${label} will be skipped if you continue without verification.`, "/agents");
     else {
-      const state = await deps.inspectRuntime(agent);
+      const state = inspections.get(agent.id)!;
       add(stage, state.status === "unavailable" ? "warning" : state.status, state.status === "unavailable" ? `${state.reason} ${label} will be skipped if you continue without verification.` : state.reason, "/agents");
       if (state.model) checks.push(state.model);
     }
   }
-  const selected = [planner, worker, choosePreflightAgent(agents, "spec")].filter((agent): agent is Agent => Boolean(agent));
   for (const agent of [...new Map(selected.map((agent) => [agent.id, agent])).values()]) {
-    const state = await deps.inspectRuntime(agent);
+    const state = inspections.get(agent.id)!;
     add(`runtime:${agent.id}`, state.status === "unavailable" ? "blocked" : state.status, state.reason, "/gateway");
     if (state.model) checks.push(state.model);
   }

@@ -25,3 +25,18 @@ test("agent keys use authenticated encryption with a fresh nonce and legacy plai
     else process.env.NEIRO_ENCRYPTION_KEY = previous;
   }
 });
+
+test("agent key encryption falls back to DASHBOARD_SECRET", async () => {
+  const previousKey = process.env.NEIRO_ENCRYPTION_KEY;
+  const previousSecret = process.env.DASHBOARD_SECRET;
+  delete process.env.NEIRO_ENCRYPTION_KEY;
+  process.env.DASHBOARD_SECRET = "test-dashboard-secret";
+  try {
+    const encrypted = await encryptAgentKey("custom-api-key");
+    assert.ok(encrypted.startsWith("enc:v1:"));
+    assert.equal(await decryptAgentKey(encrypted), "custom-api-key");
+  } finally {
+    if (previousKey === undefined) delete process.env.NEIRO_ENCRYPTION_KEY; else process.env.NEIRO_ENCRYPTION_KEY = previousKey;
+    if (previousSecret === undefined) delete process.env.DASHBOARD_SECRET; else process.env.DASHBOARD_SECRET = previousSecret;
+  }
+});

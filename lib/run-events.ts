@@ -82,6 +82,30 @@ export function isTerminalRunEventType(type: string): boolean {
   return TERMINAL_RUN_EVENTS.has(type.toLowerCase());
 }
 
+/** Answer fragments are separate from the bounded, summarized step trail. */
+export function answerDelta(raw: string, eventName?: string): string | null {
+  try {
+    const data = JSON.parse(raw) as Record<string, unknown>;
+    const type = (s(data.type) ?? s(data.event) ?? s(eventName) ?? "").toLowerCase();
+    if (data.phase === "commentary") return null;
+    if (!["message.delta", "assistant.delta", "response.output_text.delta"].includes(type)) return null;
+    return typeof data.delta === "string" ? data.delta : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Hermes can identify streamed commentary only after it emitted the deltas. */
+export function removeInterim(answer: string, raw: string, eventName?: string): string {
+  try {
+    const data = JSON.parse(raw) as Record<string, unknown>;
+    const type = (s(data.type) ?? s(data.event) ?? s(eventName) ?? "").toLowerCase();
+    if (type !== "message.interim" || data.already_streamed !== true) return answer;
+    const text = typeof data.text === "string" ? data.text : "";
+    return text && answer.endsWith(text) ? answer.slice(0, -text.length) : "";
+  } catch { return answer; }
+}
+
 export function parseRunEvent(raw: string, eventName?: string): LogStep | null {
   const trimmed = raw.trim();
   if (!trimmed || trimmed === "[DONE]") return trimmed === "[DONE]" ? { kind: "done", text: "Run finished", at: null } : null;
@@ -129,7 +153,6 @@ export function parseRunEvent(raw: string, eventName?: string): LogStep | null {
     return { kind: "reasoning", text: delta ? raw : short(raw, 600), at, delta };
   }
   if (type === "message.interim" || type === "assistant.commentary" || data.phase === "commentary") {
-    // Already shown through message.delta: skip it so it isn't printed twice.
     if (data.already_streamed === true) return null;
     return text ? { kind: "commentary", text: short(text), at } : null;
   }
@@ -172,7 +195,7 @@ export function appendStep(steps: LogStep[], step: LogStep, max = 300): LogStep[
     const id = step.subagent.delegationId;
     const at = steps.findIndex((s) => s.kind === "subagent" && s.subagent?.delegationId === id);
     if (at >= 0) {
-      const merged = { ...step, subagent: { ...step.subagent, startedAt: steps[at].subagent?.startedAt ?? null } };
+      const merged = { ...step, subagent: { ...steps[at].subagent, ...step.subagent, startedAt: steps[at].subagent?.startedAt ?? null } };
       return [...steps.slice(0, at), merged, ...steps.slice(at + 1)];
     }
   }
