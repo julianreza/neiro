@@ -32,7 +32,12 @@ export const defaultExec: Exec = (cmd, args, opts = {}) =>
         cwd: opts.cwd,
         timeout: opts.timeoutMs ?? 60_000,
         maxBuffer: 32 * 1024 * 1024,
-        env: { ...process.env, GH_PROMPT_DISABLED: "1", GIT_TERMINAL_PROMPT: "0" },
+        env: {
+          ...process.env,
+          PATH: ["/opt/homebrew/bin", "/usr/local/bin", process.env.PATH ?? ""].filter(Boolean).join(":"),
+          GH_PROMPT_DISABLED: "1",
+          GIT_TERMINAL_PROMPT: "0",
+        },
       },
       (err, stdout, stderr) => {
         if (err) {

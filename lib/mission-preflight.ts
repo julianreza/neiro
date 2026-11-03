@@ -70,7 +70,8 @@ export async function missionPreflight(input: MissionCreateInput, testAgents?: A
       if ((input.mode === "build" || input.mode === "fix") && repo) {
         const origin = await git(["remote", "get-url", "origin"]).then(() => true, () => false);
         add("origin", origin ? "pass" : "warning", origin ? "Git origin is configured." : "No Git origin: the draft PR may require attention.", "/projects");
-        const auth = await exec("gh", ["auth", "status"], { timeout: 5000, env: { ...process.env, GH_PROMPT_DISABLED: "1" } }).then(() => true, () => false);
+        const PATH = ["/opt/homebrew/bin", "/usr/local/bin", process.env.PATH ?? ""].filter(Boolean).join(":");
+        const auth = await exec("gh", ["auth", "status"], { timeout: 5000, env: { ...process.env, PATH, GH_PROMPT_DISABLED: "1" } }).then(() => true, () => false);
         add("github", auth ? "pass" : "warning", auth ? "GitHub CLI is authenticated." : "GitHub CLI authentication could not be confirmed; draft PR creation may need attention.", "/reviews");
       }
     }
